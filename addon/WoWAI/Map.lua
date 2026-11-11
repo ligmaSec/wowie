@@ -14,9 +14,7 @@ WoWAIMap = M
 local ARRIVE_YARDS = 12
 local NODE_SIZE, PIN_SIZE = 9, 16
 local CIRCLE = "Interface\\CHARACTERFRAME\\TempPortraitAlphaMask"
-local ARROW = "Interface\\Minimap\\MinimapArrow"
 local CONTINENT = (Enum and Enum.UIMapType and Enum.UIMapType.Continent) or 2
-local atan2 = math.atan2 or math.atan -- Lua 5.1 in game; 5.3 in the test VM
 
 local KIND_COLOR = {
 	ore = { 0.95, 0.6, 0.25 }, herb = { 0.35, 0.95, 0.35 }, quest = { 1, 0.85, 0 }, turnin = { 0.35, 0.8, 1 },
@@ -25,7 +23,7 @@ local KIND_COLOR = {
 	flight = { 0.55, 0.75, 1 }, poi = { 1, 1, 1 },
 }
 
-local mdb -- WoWAIMapDB: { map, hidden = { [layer] = true }, nodes = { ore, herb, filter }, nav = { layer, index }, navPos }
+local mdb -- WoWAIMapDB: { map, hidden, nodes, nav = { layer, index }, waypoint = { map, x, y, previous, tracked, quest } }
 
 local function Try(fn, ...)
 	if type(fn) ~= "function" then return nil end
@@ -43,6 +41,7 @@ local function DB()
 		mdb = WoWAIMapDB
 		mdb.hidden = mdb.hidden or {}
 		mdb.nodes = mdb.nodes or { ore = false, herb = false, filter = "skill" }
+		mdb.navPos = nil -- the standalone compass was replaced by map tracking
 	end
 	return mdb
 end
@@ -125,18 +124,16 @@ local function PlayerOnContinent()
 	if cx then return cont, cx, cy end
 end
 
--- Yards and bearing (radians, counter-clockwise from north) from the player to a point.
-local function Heading(p)
+-- Straight-line yards are only used for arrival when no routing addon is active.
+local function DistanceTo(p)
 	local cont, px, py = PlayerOnContinent()
-	if not cont then return nil, "no position here" end
-	local tcont = ContinentOf(p[1])
-	if tcont ~= cont then return nil, "on another continent" end
+	if not cont or ContinentOf(p[1]) ~= cont then return end
 	local tx, ty = Project(p[1], p[2] / 100, p[3] / 100, cont)
-	if not tx then return nil, "cannot place this point" end
+	if not tx then return end
 	local w, h = ContinentYards(cont)
-	local east, south = (tx - px) * (w or 1), (ty - py) * (h or 1)
-	local dist = w and math.sqrt(east * east + south * south) or nil
-	return dist, atan2(-east, -south)
+	if not w or not h then return end
+	local east, south = (tx - px) * w, (ty - py) * h
+	return math.sqrt(east * east + south * south)
 end
 
 ---------------------------------------------------------------------------
@@ -328,10 +325,110 @@ local function SetupWorldMap()
 end
 
 ---------------------------------------------------------------------------
--- Navigator: arrow, distance, and auto-advance along an ordered layer
+-- Map tracking: native waypoints, with dotted routes through ShortestPathForever
 ---------------------------------------------------------------------------
 
-local nav
+local ROUTE_OWNER = "WoWAI"
+local tracking, navigatorTicker
+
+local function Router()
+	local api = ShortestPathForever and ShortestPathForever.API
+	if api and api.version == 1 and type(api.Navigate) == "function"
+		and type(api.Cancel) == "function" and type(api.CurrentStop) == "function"
+		and type(api.Ended) == "function" and type(api.Active) == "function" then return api end
+end
+
+local function WaypointMatches(point, own)
+	return point and point.position and point.uiMapID == own.map
+		and math.abs(point.position.x - own.x) < 0.000001
+		and math.abs(point.position.y - own.y) < 0.000001
+end
+
+local function ReleaseWaypoint()
+	local own = DB().waypoint
+	if not own then return end
+	mdb.waypoint = nil
+	if not WaypointMatches(Try(C_Map.GetUserWaypoint), own) then return end
+	local ownsTracking = Try(C_SuperTrack and C_SuperTrack.IsSuperTrackingUserWaypoint)
+	local restored = false
+	if own.previous and UiMapPoint and UiMapPoint.CreateFromCoordinates then
+		local p = own.previous
+		restored = Try(C_Map.SetUserWaypoint, UiMapPoint.CreateFromCoordinates(p.map, p.x, p.y, p.z)) == true
+	end
+	if not restored then Try(C_Map.ClearUserWaypoint) end
+	if ownsTracking then
+		Try(C_SuperTrack.SetSuperTrackedUserWaypoint, restored and own.tracked or false)
+		if not (restored and own.tracked) and own.quest then Try(C_SuperTrack.SetSuperTrackedQuestID, own.quest) end
+	end
+end
+
+local function ReleaseTracking()
+	local api = tracking and tracking.api or Router()
+	if api then Try(api.Cancel, ROUTE_OWNER) end -- the API only cancels this owner's journey
+	tracking = nil
+	ReleaseWaypoint()
+end
+
+local function SetNativeWaypoint(p)
+	if not (C_Map.SetUserWaypoint and C_Map.GetUserWaypoint and C_Map.ClearUserWaypoint
+		and UiMapPoint and UiMapPoint.CreateFromCoordinates
+		and C_SuperTrack and C_SuperTrack.SetSuperTrackedUserWaypoint
+		and C_SuperTrack.IsSuperTrackingUserWaypoint) then return false end
+	if C_Map.CanSetUserWaypointOnMap and not Try(C_Map.CanSetUserWaypointOnMap, p[1]) then return false end
+	local own = DB().waypoint
+	if not own then
+		own = { tracked = Try(C_SuperTrack.IsSuperTrackingUserWaypoint), quest = Try(C_SuperTrack.GetSuperTrackedQuestID) }
+		local previous = Try(C_Map.GetUserWaypoint)
+		if previous and previous.position then
+			own.previous = { map = previous.uiMapID, x = previous.position.x, y = previous.position.y, z = previous.z }
+		end
+	end
+	local x, y = p[2] / 100, p[3] / 100
+	if Try(C_Map.SetUserWaypoint, UiMapPoint.CreateFromCoordinates(p[1], x, y)) ~= true then return false end
+	own.map, own.x, own.y = p[1], x, y
+	mdb.waypoint = own -- plain coordinates survive /reload; no Vector2D userdata is saved
+	local ok = pcall(C_SuperTrack.SetSuperTrackedUserWaypoint, true)
+	if not ok then ReleaseWaypoint(); return false end
+	return true
+end
+
+local function TrackingMatches(l, p, i)
+	return tracking and tracking.layer == l.name and tracking.index == i
+		and tracking.map == p[1] and tracking.x == p[2] and tracking.y == p[3]
+		and tracking.title == (p[4] ~= "" and p[4] or l.title) and tracking.kind == p[5]
+end
+
+local function StartTracking(l, p, i)
+	if TrackingMatches(l, p, i) and tracking.backend ~= "pending" then return true end
+	local api = Router()
+	local backend = "native"
+	if api and InCombatLockdown() then
+		if not tracking or tracking.backend ~= "pending" then
+			ReleaseTracking()
+			Print("Map route tracking will start after combat.")
+		end
+		backend = "pending"
+	elseif api then
+		-- The router owns its native bend waypoint and restores the player's tracking.
+		-- Never compete with it by writing a second waypoint on every update.
+		ReleaseWaypoint()
+		if Try(api.Navigate, ROUTE_OWNER, p[1], p[2] / 100, p[3] / 100, p[4] ~= "" and p[4] or l.title, p[5]) == true then
+			backend = "route"
+		else
+			Try(api.Cancel, ROUTE_OWNER)
+			Print("Dotted routing is unavailable; setting the game's map waypoint.")
+		end
+	end
+	if backend == "native" and not SetNativeWaypoint(p) then
+		ReleaseTracking()
+		mdb.nav = nil
+		Print("This location cannot be tracked by the client's waypoint API.")
+		return false
+	end
+	tracking = { backend = backend, api = backend == "route" and api or nil, layer = l.name, index = i,
+		map = p[1], x = p[2], y = p[3], title = p[4] ~= "" and p[4] or l.title, kind = p[5] }
+	return true
+end
 
 local function NavPoint()
 	local n = DB().nav
@@ -341,84 +438,50 @@ local function NavPoint()
 	return l, l.points[n.index], n.index
 end
 
-local function BuildNavigator()
-	nav = CreateFrame("Frame", "WoWAINavigator", UIParent, "BackdropTemplate")
-	nav:SetSize(250, 44)
-	nav:SetBackdrop({ bgFile = "Interface\\Tooltips\\UI-Tooltip-Background", edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", tile = true, tileSize = 16, edgeSize = 12, insets = { left = 3, right = 3, top = 3, bottom = 3 } })
-	nav:SetBackdropColor(0, 0, 0, 0.7)
-	local p = DB().navPos
-	if p then nav:SetPoint(p[1], UIParent, p[1], p[2], p[3]) else nav:SetPoint("TOP", UIParent, "TOP", 0, -120) end
-	nav:SetMovable(true)
-	nav:EnableMouse(true)
-	nav:RegisterForDrag("LeftButton")
-	nav:SetScript("OnDragStart", nav.StartMoving)
-	nav:SetScript("OnDragStop", function(self)
-		self:StopMovingOrSizing()
-		local point, _, _, x, y = self:GetPoint()
-		DB().navPos = { point, x, y }
-	end)
-	nav:SetScript("OnMouseUp", function(_, button)
-		if button == "RightButton" then M.Step(1) end
-	end)
-	nav.arrow = nav:CreateTexture(nil, "ARTWORK")
-	nav.arrow:SetSize(34, 34)
-	nav.arrow:SetPoint("LEFT", 6, 0)
-	nav.arrow:SetTexture(ARROW)
-	nav.title = nav:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-	nav.title:SetPoint("TOPLEFT", 46, -7)
-	nav.title:SetPoint("RIGHT", -8, 0)
-	nav.title:SetJustifyH("LEFT")
-	nav.title:SetWordWrap(false)
-	nav.text = nav:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	nav.text:SetPoint("BOTTOMLEFT", 46, 8)
-	nav.text:SetPoint("RIGHT", -8, 0)
-	nav.text:SetJustifyH("LEFT")
-	nav.text:SetWordWrap(false)
-	nav:SetScript("OnEnter", function(self)
-		GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
-		GameTooltip:AddLine("Route")
-		GameTooltip:AddLine("Drag to move, right-click to skip this stop. /wow-ai map for options.", 1, 1, 1, true)
-		GameTooltip:Show()
-	end)
-	nav:SetScript("OnLeave", function() GameTooltip:Hide() end)
-	nav:SetScript("OnUpdate", function(self, elapsed)
-		self.t = (self.t or 0) + elapsed
-		if self.t < 0.1 then return end
-		self.t = 0
-		M.UpdateNavigator()
-	end)
-	nav:Hide()
-end
-
 function M.UpdateNavigator()
 	local l, p, i = NavPoint()
-	if not l then if nav then nav:Hide() end return end
-	if not nav then BuildNavigator() end
-	nav:Show()
-	nav.title:SetText(string.format("%d/%d  %s", i, #l.points, p[4] ~= "" and p[4] or l.title))
-	local dist, bearing = Heading(p)
-	if not dist and type(bearing) == "string" then
-		nav.arrow:Hide()
-		nav.text:SetText(bearing)
+	if not l then
+		if tracking or DB().waypoint then ReleaseTracking() end
 		return
 	end
-	nav.arrow:Show()
-	local facing = Try(GetPlayerFacing)
-	if facing and bearing then nav.arrow:SetRotation(bearing - facing) else nav.arrow:SetRotation(0) end
-	if dist then
-		nav.text:SetText(string.format("%d yd  |cff888888%s|r", math.floor(dist + 0.5), l.title))
-		if dist <= ARRIVE_YARDS then
-			Try(PlaySound, SOUNDKIT and SOUNDKIT.MAP_PING or 3175)
-			M.Step(1, true)
+	-- Respect a pin the player moved or cleared, including between UI reloads.
+	local own = DB().waypoint
+	if own and (not WaypointMatches(Try(C_Map.GetUserWaypoint), own)
+		or Try(C_SuperTrack and C_SuperTrack.IsSuperTrackingUserWaypoint) == false) then
+		mdb.nav = nil
+		ReleaseTracking()
+		M.Refresh()
+		return
+	end
+	if tracking and tracking.backend == "route" then
+		if not Try(tracking.api.CurrentStop, ROUTE_OWNER) then
+			local reason = Try(tracking.api.Ended, ROUTE_OWNER)
+			if reason == "arrived" then
+				if TrackingMatches(l, p, i) then M.Step(1, true); return end
+				tracking = nil -- the layer moved its target while the old destination completed
+			else
+				mdb.nav = nil
+				ReleaseTracking()
+				M.Refresh()
+				return
+			end
+		elseif TrackingMatches(l, p, i) then
+			return -- the routing addon, not straight-line distance, decides arrival
 		end
-	else
-		nav.text:SetText(l.title)
+	end
+	if tracking and tracking.backend == "pending" and InCombatLockdown() then return end
+	if not StartTracking(l, p, i) or tracking.backend ~= "native" then return end
+	local dist = DistanceTo(p)
+	if dist and dist <= ARRIVE_YARDS then
+		Try(PlaySound, SOUNDKIT and SOUNDKIT.MAP_PING or 3175)
+		M.Step(1, true)
 	end
 end
 
 function M.Navigate(layer, index)
 	local l = FindLayer(layer)
 	if not l then Print("no layer " .. tostring(layer)); return end
+	ReleaseTracking() -- an explicit request may take over tracking or retry an unavailable router
 	DB().nav = { layer = layer, index = math.max(1, math.min(index or 1, #l.points)) }
 	mdb.hidden[layer] = nil
 	M.UpdateNavigator()
@@ -430,7 +493,7 @@ function M.Step(delta, arrived)
 	if not l then return end
 	local nexti = i + delta
 	if nexti > #l.points then
-		if l.loop then nexti = 1 else
+		if l.loop and #l.points > 1 then nexti = 1 else
 			Print("route finished: " .. l.title)
 			mdb.nav = nil
 			M.UpdateNavigator()
@@ -442,12 +505,17 @@ function M.Step(delta, arrived)
 	end
 	mdb.nav.index = nexti
 	M.Refresh()
-	if not arrived then M.UpdateNavigator() end
+	if arrived then
+		local nextLayer, nextPoint, nextIndex = NavPoint()
+		if nextPoint then StartTracking(nextLayer, nextPoint, nextIndex) end
+	else
+		M.UpdateNavigator()
+	end
 end
 
 function M.Stop()
 	DB().nav = nil
-	M.UpdateNavigator()
+	ReleaseTracking()
 	M.Refresh()
 end
 
@@ -480,11 +548,13 @@ function M.Sync(m)
 	for _, l in ipairs(changed) do
 		mdb.hidden[l.name] = nil
 		Print(string.format("%s: %d point(s)%s. Open the map (M) to see it.", l.title or l.name, #l.points, l.ordered and ", route" or ""))
-		-- A new or changed route on the player's continent starts navigation at its first
-		-- stop, unless the player is already following another route.
+		-- Routes and single destinations start navigation even with the map closed.
+		-- Unordered collections stay map-only; never take over another active route.
 		local here = PlayerOnContinent()
 		local free = not mdb.nav or mdb.nav.layer == l.name
-		if l.ordered and #l.points > 0 and free and (not here or ContinentOf(l.points[1][1]) == here) then
+		local api = Router()
+		free = free and (not api or not Try(api.Active) or Try(api.CurrentStop, ROUTE_OWNER) ~= nil)
+		if (l.ordered or #l.points == 1) and #l.points > 0 and free and (not here or ContinentOf(l.points[1][1]) == here) then
 			mdb.nav = { layer = l.name, index = 1 }
 		end
 	end
@@ -541,6 +611,7 @@ local ev = CreateFrame("Frame")
 ev:RegisterEvent("ADDON_LOADED")
 ev:RegisterEvent("PLAYER_LOGIN")
 ev:RegisterEvent("SKILL_LINES_CHANGED")
+ev:RegisterEvent("PLAYER_REGEN_ENABLED")
 ev:SetScript("OnEvent", function(_, event, arg1)
 	if event == "ADDON_LOADED" and (arg1 == ADDON_NAME or arg1 == "Blizzard_WorldMap") then
 		DB()
@@ -548,6 +619,9 @@ ev:SetScript("OnEvent", function(_, event, arg1)
 	elseif event == "PLAYER_LOGIN" then
 		DB()
 		SetupWorldMap()
+		if not navigatorTicker then navigatorTicker = C_Timer.NewTicker(0.2, M.UpdateNavigator) end
+		C_Timer.After(0, M.UpdateNavigator)
+	elseif event == "PLAYER_REGEN_ENABLED" then
 		M.UpdateNavigator()
 	elseif event == "SKILL_LINES_CHANGED" then
 		M.Refresh()

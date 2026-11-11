@@ -10,7 +10,14 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - A **Defaults...** panel for persistent addon-wide agent/model/reasoning choices, with Save, Cancel and Bridge defaults. Per-chat overrides win; provider-specific choices do not leak across default-agent changes, and pending resends keep their original settings.
 - Live Codex model discovery through the installed CLI's paginated `app-server` `model/list` API, alongside Antigravity's catalog. Configured/custom IDs remain selectable when discovery is unavailable.
 
+### Changed
+
+- Internal cleanup: slot and reload replies share one addon snapshot handler, selector labels and menus share default resolution, and Codex override filtering builds its matchers once per request. Wire formats and selection precedence are unchanged.
+- Replaced WoWAI's standalone compass with map/minimap waypoint tracking. Active destinations use ShortestPathForever's dotted-route API when enabled, and native waypoints otherwise; OpenMap follows the native marker. Route progression, stop/completion, combat deferral and player waypoint/quest ownership are preserved.
+
 ### Fixed
+
+- Single map destinations now start map tracking even when the agent sends an unordered one-point layer. Previously these were only world-map pins, so a nearby destination outside the current city map appeared to do nothing. Existing routes are not interrupted, and unordered multi-point collections remain map-only.
 
 - Linux: `npm run probe` said `no game window found` (or, once the window was forced, `capture failed`) for a client launched through a Proton runtime, such as Faugus, Steam or umu-launcher. Proton sets `WM_CLASS` to `steam_app_<appid>` for every window in the prefix, so the `wow.exe` match never fired, and Xwayland refuses `XGetImage` on the root window with `BadMatch`. The capture now matches those windows by the game's title and falls back to the game window's own drawable, which also makes the capture work on Wayland sessions.
 - Addon: the pixel strip now accounts for `GetScreenDPIScale()` and refreshes its scale on sends and `UI_SCALE_CHANGED`. On scaled displays, cells were larger than the capture decoder's four-pixel grid, so the bridge could attach to the game while Connect never received a hello response.

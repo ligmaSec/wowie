@@ -550,6 +550,10 @@ function agentConfig(cfg, id, selection = {}) {
   // Explicit chat choices beat matching extraArgs too, without duplicate CLI flags.
   if ((selection.model || selection.reasoning) && Array.isArray(out.extraArgs)) {
     const args = out.extraArgs;
+    const modelConfig = id === 'codex' && selection.model && /^model\s*=/;
+    const reasoningConfig = id === 'codex' && selection.reasoning && /^model_reasoning_effort\s*=/;
+    const overridesConfig = id === 'codex' && (value =>
+      (modelConfig && modelConfig.test(value)) || (reasoningConfig && reasoningConfig.test(value)));
     out.extraArgs = [];
     for (let i = 0; i < args.length; i++) {
       const arg = String(args[i]);
@@ -557,12 +561,9 @@ function agentConfig(cfg, id, selection = {}) {
           || (selection.reasoning && arg === '--effort')) { i++; continue; }
       if ((selection.model && /^(--model=|-m=)/.test(arg))
           || (selection.reasoning && arg.startsWith('--effort='))) continue;
-      if (id === 'codex') {
-        const key = selection.model && /^model\s*=/;
-        const effort = selection.reasoning && /^model_reasoning_effort\s*=/;
-        const matches = value => (key && key.test(value)) || (effort && effort.test(value));
-        if ((arg === '-c' || arg === '--config') && matches(String(args[i + 1]))) { i++; continue; }
-        if (/^(--config=|-c=?)/.test(arg) && matches(arg.replace(/^(--config=|-c=?)/, ''))) continue;
+      if (overridesConfig) {
+        if ((arg === '-c' || arg === '--config') && overridesConfig(String(args[i + 1]))) { i++; continue; }
+        if (/^(--config=|-c=?)/.test(arg) && overridesConfig(arg.replace(/^(--config=|-c=?)/, ''))) continue;
       }
       out.extraArgs.push(args[i]);
     }

@@ -800,6 +800,19 @@ local function ImportRestore(r)
 	end
 end
 
+-- Slot loads and the reload inbox carry the same bridge snapshot.
+local function ApplyBridgeData(data)
+	if type(data) ~= "table" then return false end
+	if type(data.cwd) == "string" and data.cwd ~= "" then run.bridgeCwd = data.cwd end
+	if type(data.agent) == "string" and data.agent ~= "" then run.bridgeAgent = data.agent end
+	if type(data.agents) == "table" and #data.agents > 0 then run.bridgeAgents = data.agents end
+	if type(data.agentOptions) == "table" then run.agentOptions = data.agentOptions end
+	local matched = ApplyReplies(data.replies)
+	if data.restore then ImportRestore(data.restore) end
+	if data.map and WoWAIMap then WoWAIMap.Sync(data.map) end
+	return matched
+end
+
 local function TryLoadSlot(why)
 	local name = FreeSlot()
 	if not name then
@@ -826,15 +839,7 @@ local function TryLoadSlot(why)
 		-- The bridge's clock and ours are the same machine; translate to GetTime().
 		NotedBridge(GetTime() - (time() - data.now))
 	end
-	if type(data) == "table" and type(data.cwd) == "string" and data.cwd ~= "" then run.bridgeCwd = data.cwd end
-	if type(data) == "table" then
-		if type(data.agent) == "string" and data.agent ~= "" then run.bridgeAgent = data.agent end
-		if type(data.agents) == "table" and #data.agents > 0 then run.bridgeAgents = data.agents end
-		if type(data.agentOptions) == "table" then run.agentOptions = data.agentOptions end
-	end
-	local matched = ApplyReplies(type(data) == "table" and data.replies or nil)
-	if type(data) == "table" and data.restore then ImportRestore(data.restore) end
-	if type(data) == "table" and data.map and WoWAIMap then WoWAIMap.Sync(data.map) end
+	local matched = ApplyBridgeData(data)
 	if why == "signal" and not matched then
 		run.signalUnreliable = true
 	end
@@ -928,19 +933,6 @@ local function Tick()
 	if run.nextPollAt and now >= run.nextPollAt then
 		TryLoadSlot("schedule")
 	end
-end
-
--- Pull whatever bridge.js last wrote into Inbox.lua (the reload path).
-local function ProcessInbox()
-	local inbox = WoWAI_Inbox
-	if type(inbox) ~= "table" then return end
-	if type(inbox.cwd) == "string" and inbox.cwd ~= "" then run.bridgeCwd = inbox.cwd end
-	if type(inbox.agent) == "string" and inbox.agent ~= "" then run.bridgeAgent = inbox.agent end
-	if type(inbox.agents) == "table" and #inbox.agents > 0 then run.bridgeAgents = inbox.agents end
-	if type(inbox.agentOptions) == "table" then run.agentOptions = inbox.agentOptions end
-	ApplyReplies(inbox.replies)
-	if inbox.restore then ImportRestore(inbox.restore) end
-	if inbox.map and WoWAIMap then WoWAIMap.Sync(inbox.map) end
 end
 
 Finish = function(chat, role, text, denied, agent, summary, macros)
@@ -2464,6 +2456,12 @@ local function MakeSelectorRow(parent, name, defaults)
 	return row
 end
 
+-- Bridge defaults are display hints; requests leave them for the CLI to resolve.
+local function SelectorDefault(c, key, options, defaults)
+	local value = not defaults and InheritedChoice(c, key) or ""
+	return value ~= "" and value or (options[key] or "")
+end
+
 local function MakeSelectors(parent, panel)
 	local row = MakeSelectorRow(parent, "WoWAISelectors")
 	row:SetPoint("TOPLEFT", panel, "TOPRIGHT", 8, 0)
@@ -2506,10 +2504,6 @@ local function MakeSelectors(parent, panel)
 		if ui.chatMenu then ui.chatMenu:Hide() end
 		local agent = defaults and (c.agent ~= "" and c.agent or run.bridgeAgent) or ChatAgent(c)
 		local o, choices = (run.agentOptions or NO_OPTIONS)[agent or ""] or NO_OPTIONS, {}
-		local function Inherited(key)
-			local value = not defaults and InheritedChoice(c, key) or ""
-			return value ~= "" and value or (o[key] or "")
-		end
 		local function Choice(value, label, action)
 			table.insert(choices, { value = value, label = label, action = action })
 		end
@@ -2518,7 +2512,7 @@ local function MakeSelectors(parent, panel)
 			Choice("", (defaults and "Bridge default (" or "Default (") .. AgentName(defaults and (run.bridgeAgent or "") or DefaultAgent()) .. ")")
 			for _, agent in ipairs(run.bridgeAgents or { "claude", "codex", "grok", "agy", "hermes" }) do Choice(agent, AgentName(agent)) end
 		elseif key == "model" then
-			local inherited = Inherited("model")
+			local inherited = SelectorDefault(c, "model", o, defaults)
 			Choice("", inherited ~= "" and ("Default (" .. inherited .. ")") or "Default")
 			local models = {}
 			if c.model ~= "" then table.insert(models, c.model) end
@@ -2530,7 +2524,7 @@ local function MakeSelectors(parent, panel)
 			Choice(nil, "Custom model...", function() WoWAI.ModelPrompt(c.id, defaults) end)
 		elseif key == "reasoning" then
 			if not o.reasoningLevels or #o.reasoningLevels == 0 then menu:Hide(); return end
-			local inherited = Inherited("reasoning")
+			local inherited = SelectorDefault(c, "reasoning", o, defaults)
 			Choice("", inherited ~= "" and ("Default (" .. inherited .. ")") or "Default")
 			for _, level in ipairs(o.reasoningLevels) do Choice(level, AgentName(level)) end
 		else return end
@@ -2584,18 +2578,14 @@ local function UpdateSelectorRow(row, c, defaults)
 		button.valueText = value
 		button:SetText(Display(value))
 	end
-	local function Inherited(key)
-		local value = not defaults and InheritedChoice(c, key) or ""
-		return value ~= "" and value or (o[key] or "")
-	end
 	Set(row.buttons.agent, c.agent ~= "" and AgentName(c.agent) or ((defaults and "Bridge (" or "Default (") .. AgentName(inheritedAgent) .. ")"))
-	local model = Inherited("model")
+	local model = SelectorDefault(c, "model", o, defaults)
 	local chooseAgent = defaults and c.agent == ""
 	row.buttons.model:SetEnabled(not chooseAgent)
 	Set(row.buttons.model, chooseAgent and "Choose agent" or (c.model ~= "" and c.model or (model ~= "" and ("Default (" .. model .. ")") or "Default")))
 	local supported = o.reasoningLevels and #o.reasoningLevels > 0
 	row.buttons.reasoning:SetEnabled(supported and not chooseAgent and true or false)
-	local reasoning = Inherited("reasoning")
+	local reasoning = SelectorDefault(c, "reasoning", o, defaults)
 	Set(row.buttons.reasoning, chooseAgent and "Choose agent" or (supported and (c.reasoning ~= "" and AgentName(c.reasoning) or (reasoning ~= "" and ("Default (" .. reasoning .. ")") or "Default")) or (run.agentOptions and "Not supported" or "Connect first")))
 end
 
@@ -3489,7 +3479,7 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 		BuildUI()
 		run = { outbound = {} }
 		SelfTestSignals()
-		ProcessInbox()
+		ApplyBridgeData(WoWAI_Inbox)
 		if AnyPending() then
 			-- Still waiting after a reload: resume polling with a fresh slot pool.
 			run.sentAt = GetTime()

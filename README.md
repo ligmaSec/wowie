@@ -10,7 +10,7 @@ Chat with your local coding agents from inside **World of Warcraft: Forever**: [
 - Live progress while the agent works: action count, elapsed time, the files it's editing and commands it's running
 - Replies echoed into the game chat; `/r` replies to the agent when it was the last to message you
 - The agent knows your character, level, zone, talents, professions and quest log (optional), and you can shift-click items, spells and quests into a message
-- The agent can draw on your world map: numbered routes, quest stops and marks, with a navigator arrow that walks you from stop to stop
+- The agent can mark your world map and track destinations on your map/minimap, with dotted routes through ShortestPathForever when enabled
 - Herb and ore spawns on the world map, filtered by your gathering skill (`/wow-ai map ore`, `/wow-ai map herb`)
 - Ready-made macros: ask for one and the reply carries a **Create macro** button that saves it and puts it on your cursor, ready to drop on an action bar (`/wow-ai macro undo` reverts it)
 - An **Allow & retry** button when Claude or Grok needs a command outside your allowlist
@@ -189,7 +189,7 @@ The agent writes each macro in a ```` ```wowmacro <Name> ```` block (optional `i
 The agent can draw on your world map. Ask *"route me through copper and tin around here"*, *"plan the quests I can do in Westfall"* or *"where is the nearest mining trainer?"*, and the answer arrives with:
 
 - **Layers on the world map:** numbered pins joined by lines for routes, and pins for quest givers, objectives, turn-ins, trainers, dungeon entrances or any mark. They show on the zone map and on the continent map; hover a pin for its label, click it to navigate there.
-- **A navigator:** a small frame with an arrow and the distance in yards to the current stop. It starts as soon as a route on your continent arrives (unless you are already following one), advances when you get within 12 yards, and loops on farming circuits. Drag it to move it; right-click skips a stop.
+- **Tracked destinations:** the active stop goes to the game's map/minimap waypoint tracking, not a standalone compass. With ShortestPathForever enabled, its routing API draws your configured route dots and terrain-aware path; OpenMap follows the native waypoint. New/changed routes and single destinations activate without opening the map unless another route is active. Use `/aimap nav <layer>` for a saved mark, and `next`, `prev` or `stop` to control it. Player-selected pins and quests keep priority when tracking is stopped or replaced.
 - **Herb and ore spawns:** with an optional `WoWAI_Nodes` data addon installed, every gathering spawn point of the zone you are looking at, filtered to what your skill can gather.
 
 The system prompt tells every agent how to hand marks to the bridge: append commands to the file named in `WOW_AI_MAP_FILE` (set for every run), or end the reply with a small ```` ```wowmap ```` block. The bridge validates the marks, keeps them in `state.json` and ships them to the game, so they survive a UI reload and the beta's saved-data wipes. Where the agent gets its coordinates from is up to the folder the chat works in: [docs/MAP.md](docs/MAP.md) describes the command format and how to feed it game data.
@@ -200,7 +200,7 @@ The system prompt tells every agent how to hand marks to the bridge: append comm
 | `/wow-ai map ore [on\|off]`, `/wow-ai map herb [on\|off]` | show or hide mining / herbalism spawns on the world map |
 | `/wow-ai map filter all\|skill` | every spawn, or only what your skill can gather (default) |
 | `/wow-ai map hide <layer>`, `/wow-ai map show <layer>` | hide or show one of the agent's layers |
-| `/wow-ai map nav <layer> [n]`, `next`, `prev`, `stop` | drive the navigator |
+| `/wow-ai map nav <layer> [n]`, `next`, `prev`, `stop` | track a destination or control the owned map route |
 
 `/aimap` is a shorter alias. To remove layers for good, ask the agent ("clear the map", "remove the mining route").
 
@@ -247,7 +247,7 @@ The keys you are most likely to touch. Every key, flag and environment variable 
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md): every config key, command-line flag and environment variable
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how the pixel strip, slot pool and signal files work, and why
 - [docs/INSTALL-LINUX.md](docs/INSTALL-LINUX.md): Linux + Wine install, and how to check the screen capture
-- [docs/MAP.md](docs/MAP.md): map layers, the navigator and herb/ore nodes
+- [docs/MAP.md](docs/MAP.md): map layers, tracked destinations and herb/ore nodes
 - [CONTRIBUTING.md](CONTRIBUTING.md): repo layout, running the tests, conventions
 - [CHANGELOG.md](CHANGELOG.md): release notes
 
@@ -259,7 +259,7 @@ npm test          # everything except the live test; CI runs it on Windows (.git
 npm run test:live # runs the bridge in a sandbox with a real agent call (add -- --agent codex or grok)
 ```
 
-Layout: `addon/WoWAI` is the addon (`WoWAI.lua` the chat and transport, `Map.lua` the map layers, navigator and nodes), `bridge/` the companion (`bridge.js` does I/O and processes, `protocol.js` is the pure part, `agents.js` knows how to launch and read each agent, `capture.ps1` / `capture_x11.py` the screen capture per platform), `docs/` the design and reference, `tests/` the checks (`map_test.js` and `map_addon_test.js` cover the map protocol and `Map.lua` in a Lua VM). After editing the addon, copy it into the game folder (`node setup.js` does that too) and `/reload`. What each test covers, and the conventions for changes, are in [CONTRIBUTING.md](CONTRIBUTING.md).
+Layout: `addon/WoWAI` is the addon (`WoWAI.lua` the chat and transport, `Map.lua` the map layers, tracked destinations and nodes), `bridge/` the companion (`bridge.js` does I/O and processes, `protocol.js` is the pure part, `agents.js` knows how to launch and read each agent, `capture.ps1` / `capture_x11.py` the screen capture per platform), `docs/` the design and reference, `tests/` the checks (`map_test.js` and `map_addon_test.js` cover the map protocol and `Map.lua` in a Lua VM). After editing the addon, copy it into the game folder (`node setup.js` does that too) and `/reload`. What each test covers, and the conventions for changes, are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Credits
 

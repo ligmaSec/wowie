@@ -1,6 +1,6 @@
 // Runs the real Map.lua (with WoWAI.lua) in a Lua VM: syncing layers from the
-// bridge, drawing pins on the world map (zone and continent), the navigator's
-// distance/bearing and arrival, herb/ore nodes filtered by skill, and /wow-ai map.
+// bridge, drawing pins on the world map, native waypoint ownership and route
+// progression, optional dotted routing, gathering nodes, and /wow-ai map.
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -14,13 +14,40 @@ const ADDON = path.join(__dirname, '..', 'addon', 'WoWAI');
 // Eastern Kingdoms (1415), which is 10000 x 15000 yards.
 const MAP_STUB = `
 Enum = { UIMapType = { Continent = 2, Zone = 3 } }
-local MAPS = { [1432] = { name = "Loch Modan", mapType = 3, parentMapID = 1415 }, [1415] = { name = "Eastern Kingdoms", mapType = 2, parentMapID = 947 }, [947] = { name = "Azeroth", mapType = 1, parentMapID = 0 } }
+local MAPS = {
+  [1432] = { name = "Loch Modan", mapType = 3, parentMapID = 1415 },
+  [1415] = { name = "Eastern Kingdoms", mapType = 2, parentMapID = 947 },
+  [1411] = { name = "Durotar", mapType = 3, parentMapID = 1414 },
+  [1454] = { name = "Orgrimmar", mapType = 4, parentMapID = 1411 },
+  [1414] = { name = "Kalimdor", mapType = 2, parentMapID = 947 },
+  [947] = { name = "Azeroth", mapType = 1, parentMapID = 0 },
+}
 C_Map.GetMapInfo = function(id) local m = MAPS[id]; if m then return { name = m.name, mapType = m.mapType, parentMapID = m.parentMapID, mapID = id } end end
 C_Map.GetBestMapForUnit = function() return STUB.playerMap or 1432 end
-C_Map.GetMapRectOnMap = function(child, parent) if child == 1432 and parent == 1415 then return 0.5, 0.6, 0.4, 0.5 end end
+C_Map.GetMapRectOnMap = function(child, parent)
+  if child == 1432 and parent == 1415 then return 0.5, 0.6, 0.4, 0.5 end
+  if child == 1411 and parent == 1414 then return 0.7, 0.8, 0.2, 0.4 end
+  if child == 1454 and parent == 1414 then return 0.71, 0.73, 0.21, 0.23 end
+  if child == 1454 and parent == 1411 then return 0.1, 0.3, 0.05, 0.15 end
+end
 function CreateVector2D(x, y) return { x = x, y = y } end
-C_Map.GetWorldPosFromMapPos = function(id, v) if id == 1415 then return 0, { x = v.x * 10000, y = v.y * 15000 } end end
-function GetPlayerFacing() return STUB.facing or 0 end
+C_Map.GetWorldPosFromMapPos = function(id, v) if id == 1415 or id == 1414 then return 0, { x = v.x * 10000, y = v.y * 15000 } end end
+UiMapPoint = { CreateFromCoordinates = function(map, x, y, z) return { uiMapID = map, position = CreateVector2D(x, y), z = z } end }
+C_Map.CanSetUserWaypointOnMap = function() return not STUB.denyWaypoint end
+C_Map.GetUserWaypoint = function() return STUB.waypoint end
+C_Map.SetUserWaypoint = function(point)
+  if STUB.denyWaypoint then return false end
+  STUB.waypoint = { uiMapID = point.uiMapID, position = { x = point.position.x, y = point.position.y }, z = point.z }
+  STUB.FireEvent("USER_WAYPOINT_UPDATED")
+  return true
+end
+C_Map.ClearUserWaypoint = function() STUB.waypoint = nil; STUB.FireEvent("USER_WAYPOINT_UPDATED") end
+C_SuperTrack = {
+  IsSuperTrackingUserWaypoint = function() return STUB.superTracked == true and STUB.waypoint ~= nil end,
+  SetSuperTrackedUserWaypoint = function(value) STUB.superTracked = value end,
+  GetSuperTrackedQuestID = function() return STUB.trackedQuest or 0 end,
+  SetSuperTrackedQuestID = function(id) STUB.trackedQuest = id; STUB.superTracked = false end,
+}
 function Methods_CreateLine() end
 local canvas = CreateFrame("Frame", "WorldMapCanvas")
 canvas.width, canvas.height = 1000, 700
@@ -34,7 +61,7 @@ local T = getmetatable(canvas).__index
 MINING, HERBALISM = "Mining", "Herbalism"
 `;
 
-function newVM() {
+function newVM(initialState = '') {
   const L = lauxlib.luaL_newstate();
   lualib.luaL_openlibs(L);
   const run = (code, arg) => {
@@ -55,7 +82,6 @@ function newVM() {
   // Lines are frames too (Frame:CreateLine), and textures can rotate.
   stub += `
 function Methods.CreateLine(self, name, layer) local l = NewObjectPublic("Line", name, self); table.insert(self.textures, l); return l end
-function Methods.SetRotation(self, r) self.rotation = r end
 function Methods.SetVertexColor(self, r, g, b, a) self.vcolor = { r, g, b, a } end
 function Methods.SetScale(self, s) self.scale = s end
 function Methods.SetAllPoints(self, rel) if rel then self.width, self.height = rel.width, rel.height end end
@@ -65,6 +91,7 @@ function Methods.SetFrameLevel(self, l) self.level = l end
   stub = stub.replace('local function NewObject(', 'function NewObjectPublic(').replace(/NewObject\(/g, 'NewObjectPublic(');
   run(stub);
   run(MAP_STUB);
+  if (initialState) run(initialState);
   for (const f of ['Codec.lua', 'Inbox.lua', 'WoWAI.lua', 'Map.lua']) run(fs.readFileSync(path.join(ADDON, f), 'utf8'), 'WoWAI');
   run('STUB.FireEvent("ADDON_LOADED", "WoWAI"); STUB.FireEvent("PLAYER_LOGIN")');
   return { run, evaluate, num };
@@ -126,6 +153,54 @@ test('a new route does not take over a route the player is already following', (
   assert.equal(vm.evaluate('WoWAIMapDB.nav.index'), '1');
 });
 
+test('a single destination outside the city starts navigation with the world map closed', () => {
+  const vm = newVM();
+  vm.run(`
+    STUB.playerMap, STUB.shownMap = 1454, 1454
+    STUB.posX, STUB.posY = 0.5, 0.5
+    WorldMapFrame:Hide()
+    WoWAIMap.Sync({ epoch = "single", version = 1, layers = {
+      { name = "nearby-copper", title = "Nearby Copper", ordered = false, loop = false,
+        points = { { 1411, 52.7, 18.2, "Copper Vein area", "ore" } } }
+    } })
+  `);
+  assert.equal(vm.evaluate('WoWAIMapDB.nav.layer'), 'nearby-copper');
+  // The point is outside Orgrimmar: it belongs on Durotar, not the city map.
+  vm.run('WorldMapFrame:Show(); WoWAIMap.Refresh()');
+  assert.deepEqual(shownPins(vm), []);
+  vm.run('STUB.shownMap = 1411; WoWAIMap.Refresh()');
+  assert.deepEqual(shownPins(vm), ['527,127,,Nearby Copper']);
+  vm.run('SlashCmdList.WOWAIMAP("stop"); WoWAIMap.Sync(WoWAIMapDB.map)');
+  assert.equal(vm.evaluate('WoWAIMapDB.nav'), null, 'a repeated snapshot must not undo a manual stop');
+});
+
+test('single destination auto-navigation respects an active route and continent boundaries', () => {
+  const vm = newVM();
+  vm.run(`WoWAIMap.Sync(${LAYER}); WoWAIMap.Navigate("mining", 2)`);
+  vm.run(`local m = ${LAYER}; m.version = 2
+    m.layers[2] = { name = "destination", title = "Copper", ordered = false, loop = false,
+      points = { { 1432, 20, 20, "Copper", "ore" } } }
+    WoWAIMap.Sync(m)`);
+  assert.equal(vm.evaluate('WoWAIMapDB.nav.layer'), 'mining');
+  assert.equal(vm.evaluate('WoWAIMapDB.nav.index'), '2', 'a new destination cannot interrupt the current route');
+  vm.run(`WoWAIMap.Stop()
+    WoWAIMap.Sync({ epoch = "single", version = 1, layers = {
+      { name = "far-away", title = "Durotar copper", ordered = false, loop = false,
+        points = { { 1411, 52.7, 18.2, "Copper", "ore" } } }
+    } })`);
+  assert.equal(vm.evaluate('WoWAIMapDB.nav'), null, 'a point on another continent must not start local navigation');
+});
+
+test('unordered collections remain world-map pins without choosing an arbitrary navigation target', () => {
+  const vm = newVM();
+  vm.run(`WoWAIMap.Sync({ epoch = "pois", version = 1, layers = {
+    { name = "vendors", title = "Vendors", ordered = false, loop = false,
+      points = { { 1432, 20, 20, "First vendor", "vendor" }, { 1432, 80, 80, "Second vendor", "vendor" } } }
+  } })`);
+  assert.equal(vm.evaluate('WoWAIMapDB.nav'), null);
+  assert.deepEqual(shownPins(vm), ['200,140,,Vendors', '800,560,,Vendors']);
+});
+
 test('slot data carrying a map reaches the map module', () => {
   const vm = newVM();
   vm.run(`WoWAI_Inbox = { replies = {}, map = ${LAYER} }; STUB.FireEvent("PLAYER_LOGIN")`);
@@ -146,32 +221,124 @@ test('pins land where the points are, on the zone map and on the continent', () 
   assert.deepEqual(shownPins(vm), []);
 });
 
-test('navigator shows yards and bearing, and advances on arrival', () => {
+test('native waypoints advance on arrival and restore the previous player pin when a route finishes', () => {
   const vm = newVM();
-  vm.run(`WoWAIMap.Sync(${LAYER})`);
-  // Player at Loch Modan 50,50 -> continent (0.55, 0.45); stop 1 (50,40) is 150 yd due north.
-  vm.run('STUB.posX, STUB.posY = 0.5, 0.5; WoWAIMap.UpdateNavigator()');
-  assert.match(vm.evaluate('WoWAINavigator.text.text'), /^150 yd/);
-  assert.ok(Math.abs(vm.num('WoWAINavigator.arrow.rotation')) < 1e-9, 'north is straight up');
-  vm.run('STUB.facing = math.pi / 2; WoWAIMap.UpdateNavigator()'); // facing west: target is to the right
-  assert.ok(Math.abs(vm.num('WoWAINavigator.arrow.rotation') + Math.PI / 2) < 1e-9);
-  // Walk onto stop 1: it advances to stop 2 (60,50: 100 yd east and 150 yd south).
-  vm.run('STUB.facing = 0; STUB.posX, STUB.posY = 0.5, 0.4; WoWAIMap.UpdateNavigator()');
+  vm.run(`
+    C_Map.SetUserWaypoint(UiMapPoint.CreateFromCoordinates(1432, 0.1, 0.2))
+    C_SuperTrack.SetSuperTrackedUserWaypoint(true)
+    local m = ${LAYER}; m.layers[1].loop = false; WoWAIMap.Sync(m)
+    STUB.posX, STUB.posY = 0.5, 0.4
+    STUB.Tick()
+  `);
   assert.equal(vm.evaluate('WoWAIMapDB.nav.index'), '2');
-  vm.run('WoWAIMap.UpdateNavigator()');
-  assert.match(vm.evaluate('WoWAINavigator.text.text'), /^180 yd/);
-  // South-east: a clockwise turn between a quarter and a half.
-  assert.ok(Math.abs(vm.num('WoWAINavigator.arrow.rotation') - Math.atan2(-100, -150)) < 1e-9);
-  // Due east from the same spot's latitude: exactly a clockwise quarter turn.
-  vm.run('STUB.posX, STUB.posY = 0.5, 0.5; WoWAIMap.UpdateNavigator()');
-  assert.match(vm.evaluate('WoWAINavigator.text.text'), /^100 yd/);
-  assert.ok(Math.abs(vm.num('WoWAINavigator.arrow.rotation') + Math.PI / 2) < 1e-9, 'east is a clockwise quarter turn');
-  // Loop: after the last stop it wraps to the first.
-  vm.run('WoWAIMap.Step(1); WoWAIMap.Step(1)');
-  assert.equal(vm.evaluate('WoWAIMapDB.nav.index'), '1');
-  // Elsewhere with no position: says so instead of pointing.
-  vm.run('STUB.playerMap = 999; WoWAIMap.UpdateNavigator()');
-  assert.equal(vm.evaluate('WoWAINavigator.text.text'), 'no position here');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.6);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.y'), 0.5);
+  vm.run('STUB.posX, STUB.posY = 0.6, 0.5; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAIMapDB.nav.index'), '3');
+  vm.run('STUB.posX, STUB.posY = 0.55, 0.7; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAIMapDB.nav'), null);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.1);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.y'), 0.2);
+  assert.equal(vm.evaluate('C_SuperTrack.IsSuperTrackingUserWaypoint()'), 'true');
+});
+
+test('a player-selected pin or quest takes priority over addon tracking', () => {
+  const vm = newVM();
+  vm.run(`WoWAIMap.Sync(${LAYER})
+    C_Map.SetUserWaypoint(UiMapPoint.CreateFromCoordinates(1432, 0.15, 0.25))
+    STUB.Tick()`);
+  assert.equal(vm.evaluate('WoWAIMapDB.nav'), null);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.15, 'the player pin must not be cleared or overwritten');
+  vm.run('WoWAIMap.Navigate("mining"); C_SuperTrack.SetSuperTrackedQuestID(123); STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAIMapDB.nav'), null);
+  assert.equal(vm.num('C_SuperTrack.GetSuperTrackedQuestID()'), 123);
+  assert.equal(vm.evaluate('C_SuperTrack.IsSuperTrackingUserWaypoint()'), 'false', 'stopping must not steal tracking back from the selected quest');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.15, 'the prior player pin is restored without tracking it');
+});
+
+test('native waypoint ownership survives reload without treating the addon pin as a prior player pin', () => {
+  const vm = newVM();
+  vm.run(`C_Map.SetUserWaypoint(UiMapPoint.CreateFromCoordinates(1432, 0.15, 0.25))
+    C_SuperTrack.SetSuperTrackedUserWaypoint(true)
+    WoWAIMap.Sync(${LAYER})
+    local function Dump(v)
+      if type(v) == "table" then
+        local rows = {}
+        for k, value in pairs(v) do rows[#rows + 1] = "[" .. Dump(k) .. "]=" .. Dump(value) end
+        return "{" .. table.concat(rows, ",") .. "}"
+      elseif type(v) == "string" then return string.format("%q", v)
+      else return tostring(v) end
+    end
+    SAVED = Dump({ db = WoWAIMapDB, waypoint = C_Map.GetUserWaypoint() })`);
+  const reloaded = newVM(`local saved = ${vm.evaluate('SAVED')}; WoWAIMapDB = saved.db
+    C_Map.SetUserWaypoint(saved.waypoint); C_SuperTrack.SetSuperTrackedUserWaypoint(true)`);
+  reloaded.run('WoWAIMap.UpdateNavigator(); WoWAIMap.Stop()');
+  assert.equal(reloaded.num('C_Map.GetUserWaypoint().position.x'), 0.15);
+  assert.equal(reloaded.num('C_Map.GetUserWaypoint().position.y'), 0.25);
+});
+
+function installRouter(vm) {
+  vm.run(`
+    STUB.routeEnded = {}
+    ShortestPathForever = { API = {
+      version = 1,
+      Navigate = function(owner, map, x, y, title, kind)
+        if InCombatLockdown() then return false end
+        STUB.routeEnded[owner] = nil
+        STUB.route = { owner = owner, map = map, x = x, y = y, title = title, kind = kind }
+        return true
+      end,
+      CurrentStop = function(owner) return STUB.route and STUB.route.owner == owner and 1 or nil end,
+      Ended = function(owner) return STUB.routeEnded[owner] end,
+      Active = function() return STUB.route ~= nil end,
+      Cancel = function(owner)
+        if not STUB.route or STUB.route.owner ~= owner then return false end
+        STUB.route = nil; STUB.routeEnded[owner] = "cancelled"; return true
+      end,
+    } }
+  `);
+}
+
+test('dotted routing drives arrival, advances the active stop, and yields to another route owner', () => {
+  const vm = newVM();
+  installRouter(vm);
+  vm.run(`WoWAIMap.Sync(${LAYER})
+    STUB.posX, STUB.posY = 0.5, 0.4; STUB.Tick()`);
+  assert.equal(vm.evaluate('WoWAIMapDB.nav.index'), '1', 'straight-line proximity must not skip a routed stop');
+  vm.run('STUB.route = nil; STUB.routeEnded.WoWAI = "arrived"; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAIMapDB.nav.index'), '2');
+  assert.equal(vm.evaluate('STUB.route.owner'), 'WoWAI');
+  vm.run(`STUB.route = { owner = "OtherAddon" }; STUB.routeEnded.WoWAI = "replaced"
+    local m = ${LAYER}; m.version = 2; m.layers[1].points[2][2] = 65; WoWAIMap.Sync(m)`);
+  assert.equal(vm.evaluate('WoWAIMapDB.nav'), null, 'a layer update must not retake a route that another addon owns');
+  assert.equal(vm.evaluate('STUB.route.owner'), 'OtherAddon');
+});
+
+test('automatic tracking leaves another dotted route alone and defers owned routing during combat', () => {
+  const vm = newVM();
+  installRouter(vm);
+  vm.run(`STUB.route = { owner = "OtherAddon" }; WoWAIMap.Sync(${LAYER})`);
+  assert.equal(vm.evaluate('WoWAIMapDB.nav'), null);
+  assert.equal(vm.evaluate('STUB.route.owner'), 'OtherAddon');
+  vm.run(`STUB.route = nil; STUB.combat = true
+    function InCombatLockdown() return STUB.combat end
+    WoWAIMap.Navigate("mining"); STUB.Tick()`);
+  assert.equal(vm.evaluate('STUB.route'), null);
+  assert.equal(vm.evaluate('C_Map.GetUserWaypoint()'), null, 'combat must not leave a competing native waypoint');
+  vm.run('STUB.combat = false; STUB.FireEvent("PLAYER_REGEN_ENABLED")');
+  assert.equal(vm.evaluate('STUB.route.owner'), 'WoWAI');
+  vm.run('WoWAIMap.Stop()');
+  assert.equal(vm.evaluate('STUB.route'), null);
+});
+
+test('a rejected waypoint leaves player tracking intact instead of claiming active navigation', () => {
+  const vm = newVM();
+  vm.run(`C_Map.SetUserWaypoint(UiMapPoint.CreateFromCoordinates(1432, 0.15, 0.25))
+    C_SuperTrack.SetSuperTrackedUserWaypoint(true); STUB.denyWaypoint = true
+    WoWAIMap.Sync(${LAYER})`);
+  assert.equal(vm.evaluate('WoWAIMapDB.nav'), null);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.15);
+  assert.equal(vm.evaluate('C_SuperTrack.IsSuperTrackingUserWaypoint()'), 'true');
 });
 
 test('herb/ore nodes toggle and follow the gathering skill', () => {
@@ -212,6 +379,6 @@ test('/wow-ai map hide, show, nav and stop', () => {
   assert.equal(vm.evaluate('WoWAIMapDB.nav.index'), '3');
   vm.run('SlashCmdList.WOWAIMAP("stop")');
   assert.equal(vm.evaluate('WoWAIMapDB.nav'), null);
-  assert.equal(vm.evaluate('WoWAINavigator.shown'), 'false');
+  assert.equal(vm.evaluate('C_Map.GetUserWaypoint()'), null);
   vm.run('SlashCmdList.WOWAIMAP("")'); // status never errors
 });

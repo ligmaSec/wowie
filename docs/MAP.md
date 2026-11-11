@@ -1,4 +1,4 @@
-# Map layers, navigator and gathering nodes
+# Map layers, tracked destinations and gathering nodes
 
 The agent can mark your world map. What it draws are **layers**: a named list of points (`uiMapID`, x, y in map percent, a label, a kind), optionally **ordered** (a route: numbered pins joined by lines) and **looping** (a farming circuit).
 
@@ -18,8 +18,9 @@ The agent can mark your world map. What it draws are **layers**: a named list of
 
 ## In game
 
-- **World map:** pins for every visible layer on the map you are looking at, projected onto continent maps too. Hover for the label; click a pin to navigate to it.
-- **Navigator:** a small frame with an arrow and the distance in yards to the current stop of the route. It starts on a route as soon as one arrives (unless you are already following another one), advances when you get within 12 yards, and wraps around on loops. Drag it to move it; right-click skips a stop. It shows "no position here" in instances, where the game gives addons no coordinates.
+- **World map:** pins for every visible layer on the map you are looking at, projected onto continent maps too. Hover for the label; click to track a destination. A point outside Orgrimmar belongs on Durotar's map, not the city map.
+- **Tracked destinations:** the active stop is sent to the game's waypoint tracking, not a separate WoWAI compass. OpenMap follows the native waypoint. With **ShortestPathForever** enabled, its public routing API draws your configured map/minimap route, including dotted paths and directions around terrain. It owns its intermediate waypoint; WoWAI does not overwrite it on each update. Without that routing addon, the game tracks the destination as a native waypoint.
+- **Progress and stopping:** new/changed ordered routes and single destinations on your continent activate automatically unless another route is active. Unordered multi-point collections remain map-only. ShortestPathForever decides routed arrival; native-only navigation advances within 12 yards. `next`, `prev` and `stop` update the tracked destination, and loops wrap around. Stop/completion restores prior player tracking only while the addon still owns it; a player-selected pin or quest is not overwritten. Routing requested in combat starts after combat.
 - **Herb and ore nodes:** with a `WoWAI_Nodes` data addon installed (see below), every herb and ore spawn point of the zone on the world map, filtered to what your skill can gather.
 
 | Command | Does |
@@ -28,9 +29,13 @@ The agent can mark your world map. What it draws are **layers**: a named list of
 | `/wow-ai map ore [on\|off]`, `/wow-ai map herb [on\|off]` | Show or hide mining / herbalism nodes |
 | `/wow-ai map filter all\|skill` | Every node, or only those your skill can gather (default) |
 | `/wow-ai map hide <layer>`, `/wow-ai map show <layer>` | Hide or show a layer locally |
-| `/wow-ai map nav <layer> [n]`, `next`, `prev`, `stop` | Drive the navigator |
+| `/wow-ai map nav <layer> [n]`, `next`, `prev`, `stop` | Track a destination, move between stops, or stop the owned route |
 
 `/aimap` is a shorter alias for `/wow-ai map`. Everything here only reads positions and draws. Nothing moves, targets or acts for you.
+
+Activate an already-saved destination with `/aimap nav <layer>`, using the name shown by `/aimap`; for example `/aimap nav nearby-mining`. No new agent request is needed. A stopped destination stays stopped when the bridge resends an unchanged snapshot.
+
+The native integration uses the client's [`C_Map.SetUserWaypoint`](https://github.com/Ketho/wow-ui-source-forever/blob/forever/Interface/AddOns/Blizzard_APIDocumentationGenerated/MapDocumentation.lua) and [`C_SuperTrack`](https://github.com/Ketho/wow-ui-source-forever/blob/forever/Interface/AddOns/Blizzard_APIDocumentationGenerated/SuperTrackManagerDocumentation.lua) APIs. ShortestPathForever is optional; its v1 API receives one active destination under the owner `WoWAI`, and only that owner's route is cancelled.
 
 ## Where the data comes from
 
