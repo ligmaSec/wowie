@@ -28,11 +28,15 @@ Keys under `agents.claude`, `agents.codex`, `agents.grok`, `agents.agy` and `age
 | `allowedTools` | git, npm, npx, node, python, pip, pytest, ls, dir, WebSearch, WebFetch | Rules in Claude Code's syntax: `Bash(git:*)` allows any command starting with `git`, `WebSearch` a tool. Passed to Claude as `--allowedTools`, translated to Grok's `--allow` globs, ignored by Codex. The **Allow & retry** button in game appends rules here permanently. |
 | `deniedTools` | `[]` | Rules the agent may never use, same syntax. Claude: `--disallowedTools`; Grok: `--deny`, which wins over everything, `bypassPermissions` included; ignored by Codex. |
 | `model` | `""` | Passed to the CLI (`--model` / `-m`) when non-empty. Empty uses the CLI's default. |
+| `reasoning` | `""` | Default effort for Claude and Antigravity (`--effort low\|medium\|high\|xhigh\|max`) or Codex (`-c model_reasoning_effort=\"<level>\"`, including `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`). Availability depends on the CLI and model. Empty leaves the CLI default; unsupported for Grok/Hermes. |
+| `models` | `[]` | Additional model IDs shown in the in-game Model selector. The configured `model`, Claude aliases and Antigravity's catalog are added automatically. Other/custom model IDs can always be entered in the UI. |
 | `path` | `""` | Full path to the executable. Empty means: look in the installer's folder, then (for Codex) `CODEX_BIN`, then `PATH`, then npm's launcher. A `.js` path is run with the bridge's Node. |
 | `extraArgs` | `[]` | More command-line arguments, added verbatim (before Codex's `resume` subcommand). |
 | `networkAccess` (codex only) | `false` | `true` lets commands inside Codex's `workspace-write` sandbox reach the network (`-c sandbox_workspace_write.network_access=true`). |
 
 A `config.json` from before agents existed kept Claude's settings at the top level (`claudePath`, `model`, `permissionMode`, `allowedTools`). The bridge still reads them, under anything in `agents.claude`; `setup.js` moves them down.
+
+The addon's **Agent**, **Model** and **Reasoning** controls save per-chat choices in `WoWAIDB`, send them with each request on both transports, and leave these bridge defaults unchanged. New chats inherit the current choices. Explicit model/effort selections override matching CLI switches in `extraArgs`; unrelated arguments remain. Returning an explicit choice to **Default** starts a fresh session so a resumed CLI cannot retain the old override. Switching agent clears that chat's model and effort. Pending messages, including resends after `/reload`, keep their original selection.
 
 ## Runs
 
@@ -52,13 +56,13 @@ Keys under `capture`:
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Run `capture.ps1` (Windows), `capture_mac.py` (macOS) or `capture_x11.py` (Linux). With `false` only the reload path works (`/wow-ai mode reload` in game). |
-| `processName` | `"Wow"` | The game executable without `.exe`. `setup.js` sets it from the `Wow*.exe` it finds in the client folder (on macOS, from the binary inside the `.app` bundle). On Windows the capture also skips a game running from a different client folder than `addonDir`, because retail's exe has the same name. |
+| `processName` | `"Wow"` | The game executable without `.exe`. `setup.js` sets it from the `Wow*.exe` it finds in the client folder (on macOS, from the binary inside the `.app` bundle). On Windows the capture also skips a game running from a different client folder than `addonDir`, because retail's exe has the same name. Proton runtimes (Steam, umu-launcher, Faugus) ignore it: they set `WM_CLASS` to `steam_app_<appid>` for every window in the prefix, and the Linux capture matches the client by its "World of Warcraft" title instead. |
 | `cellPx` | `4` | Pixel size of one strip cell. Must match `CELL` in `addon/WoWAI/Codec.lua`. |
 | `cellsPerRow` | `200` | Cells per strip row. Must match the addon. |
 | `maxRows` | `48` | Maximum strip rows captured. Must match the addon. |
 | `intervalMs` | `250` | Capture period. Lower is more responsive and costs a little more CPU. |
 | `python` | `"python3"` | Linux and macOS: interpreter for `capture_x11.py` / `capture_mac.py`. |
-| `windowName` | `""` | Linux and macOS: find the game window by title substring instead of by process name (on Linux, by WM_CLASS `<processName>.exe`). |
+| `windowName` | `""` | Linux and macOS: find the game window by title substring instead of by process name (on Linux, by WM_CLASS `<processName>.exe`, or by the game title for Proton's `steam_app_<appid>` windows). |
 | `keepComposited` | `false` | Linux: set `_NET_WM_BYPASS_COMPOSITOR=2` on the game window so the compositor keeps drawing it. Try it if `npm run probe` sees a black or stale strip in borderless fullscreen. |
 
 The capture region is `cellsPerRow × cellPx` by `maxRows × cellPx` pixels (800 × 192 by default) at the top-left of the game's client area.

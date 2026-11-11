@@ -28,6 +28,27 @@ test('agent ids, display names and the legacy Claude config keys', () => {
   assert.deepEqual(A.agentConfig({ agents: { grok: { model: 'grok-build' } } }, 'grok'), { model: 'grok-build' });
 });
 
+test('chat choices override matching extraArgs without mutating defaults or another chat', () => {
+  const cfg = { agents: {
+    claude: { model: 'sonnet', reasoning: 'medium', extraArgs: ['--model', 'opus', '--effort=low', '--verbose'] },
+    codex: { model: 'base', extraArgs: ['-m', 'old', '-c', 'model_reasoning_effort="low"', '--config=model="old"', '--profile', 'work'] },
+  } };
+  const before = structuredClone(cfg);
+  const claude = A.agentConfig(cfg, 'claude', { model: 'custom-model', reasoning: 'high' });
+  const cargs = A.AGENTS.claude.args({ cfg: claude });
+  assert.equal(cargs[cargs.indexOf('--model') + 1], 'custom-model');
+  assert.equal(cargs[cargs.indexOf('--effort') + 1], 'high');
+  assert.equal(cargs.filter(x => x === '--model').length, 1, 'no duplicate model flag can reject the run');
+  const codex = A.agentConfig(cfg, 'codex', { model: 'code-model', reasoning: 'xhigh' });
+  const args = A.AGENTS.codex.args({ cfg: codex, cwd: '.' });
+  assert.equal(args[args.indexOf('-m') + 1], 'code-model');
+  assert.equal(args[args.indexOf('-c') + 1], 'model_reasoning_effort="xhigh"');
+  assert.ok(args.indexOf('-c') < args.indexOf('exec'), 'Codex overrides are global options, including resumed runs');
+  assert.deepEqual(codex.extraArgs, ['--profile', 'work'], 'unrelated extra arguments remain');
+  assert.deepEqual(A.agentConfig(cfg, 'claude'), cfg.agents.claude, 'Default is still the configured selection');
+  assert.deepEqual(cfg, before, 'per-chat overrides never alter shared config');
+});
+
 test('Claude Code: headless stream-json with the allowlist, resume and system prompt; prompt on stdin', () => {
   const cfg = { permissionMode: 'acceptEdits', allowedTools: ['WebSearch', 'Bash(git:*)'], model: 'opus' };
   const args = A.AGENTS.claude.args({ cfg, resume: 'sess-1', system: SYS, cwd: 'C:\\p' });
@@ -94,6 +115,40 @@ test('Antigravity arguments and captured stream parser', () => {
   const results = resumed.map(ev => rp.feed(ev));
   assert.equal(results[0].session, '6d560884-a06c-4b29-a675-4d3201dea093');
   assert.equal(results[results.length - 1].done.text.trim(), 'HELLO');
+});
+
+test('Antigravity: a blank successful result is an error with the headless permission diagnostic', () => {
+  const p = A.agyParser();
+  p.feed({ event: 'result', result: { status: 'SUCCESS', response: '' } });
+  const result = p.finish({
+    code: 0,
+    stderr: 'Permission required for run_command: command(ls -la /wow/AI)\n',
+  });
+  assert.equal(result.done.error, true, 'a clean CLI exit without an answer must not be reported as done');
+  assert.ok(result.done.text.includes('command(ls -la /wow/AI)'), 'the blocked action is visible to the player');
+});
+
+test('Antigravity: streamed answers survive an empty result body and harmless stderr', () => {
+  const p = A.agyParser();
+  p.feed({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'Go to ' } });
+  p.feed({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'the trainer.' } });
+  p.feed({ event: 'result', result: { status: 'SUCCESS', response: '' } });
+  assert.deepEqual(p.finish({ code: 0, stderr: 'startup warning\n' }).done,
+    { text: 'Go to the trainer.', error: false });
+});
+
+test('Antigravity: provider errors and unsuccessful exits are not presented as successful answers', () => {
+  const failed = A.agyParser();
+  failed.feed({ event: 'result', result: { status: 'ERROR', response: '', error: 'Model quota exhausted' } });
+  assert.deepEqual(failed.finish({ code: 1, stderr: '' }).done,
+    { text: 'Model quota exhausted', error: true });
+
+  const partial = A.agyParser();
+  partial.feed({ event: 'result', result: { status: 'SUCCESS', response: 'Partial answer' } });
+  const result = partial.finish({ code: 3, stderr: 'AGY_ERROR: model connection lost' });
+  assert.equal(result.done.error, true);
+  assert.equal(result.done.text, 'Partial answer');
+  assert.ok(result.notes.some(note => note.includes('model connection lost')));
 });
 
 test('Hermes command modes, image forwarding and plain text completion', () => {

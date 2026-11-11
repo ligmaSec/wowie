@@ -4,6 +4,16 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+### Added
+
+- Direct **Agent**, **Model** and **Reasoning** selectors above the addon's transcript, saved per chat and inherited by new chats. Models include configured IDs, Claude aliases, Antigravity's live catalog and a custom-ID dialog. Claude/Antigravity effort uses `--effort`; Codex uses `model_reasoning_effort`. Unsupported reasoning controls are disabled. Both transports carry per-request choices; resends retain the original selection even after `/reload`. Agent changes clear model/effort, and returning an explicit choice to Default starts a fresh session.
+
+### Fixed
+
+- Linux: `npm run probe` said `no game window found` (or, once the window was forced, `capture failed`) for a client launched through a Proton runtime, such as Faugus, Steam or umu-launcher. Proton sets `WM_CLASS` to `steam_app_<appid>` for every window in the prefix, so the `wow.exe` match never fired, and Xwayland refuses `XGetImage` on the root window with `BadMatch`. The capture now matches those windows by the game's title and falls back to the game window's own drawable, which also makes the capture work on Wayland sessions.
+- Addon: the pixel strip now accounts for `GetScreenDPIScale()` and refreshes its scale on sends and `UI_SCALE_CHANGED`. On scaled displays, cells were larger than the capture decoder's four-pixel grid, so the bridge could attach to the game while Connect never received a hello response.
+- Antigravity: an empty successful CLI result no longer becomes a successful “finished without a reply” message. The bridge finalizes streaming parsers after draining stdout, reports empty replies as errors with stderr diagnostics (including headless permission denials), and preserves provider errors and failed process exits.
+
 ## [0.5.0] - 2026-11-04
 
 ### Added

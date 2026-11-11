@@ -5,10 +5,13 @@ The bridge can drive three coding agents: Claude Code, OpenAI Codex and xAI's Gr
 ## Choosing one
 
 - `agent` in `bridge/config.json` is the default for every chat (`claude` unless you change it). The bridge refuses to start on a name it doesn't know.
-- A chat can pick its own with `/wow-ai agent codex`, or right-click the chat in the left panel and choose **Agent...**. `/wow-ai agent default` goes back to the bridge's. A new chat inherits the agent of the chat you were in, like the folder.
+- A chat can pick its own with the **Agent** selector above the transcript, `/wow-ai agent codex`, or **Agent...** in the chat's right-click menu. **Default** (or `/wow-ai agent default`) goes back to the bridge's. A new chat inherits the current agent, model, reasoning effort and folder.
 - The choice travels with each message as an `agent=` flag in the strip record, so the bridge needs no restart, and the reply comes back tagged with the agent that wrote it: the bubble label, the `[Codex · chat]` prefix in the game chat and the `To Grok [chat]:` header of `/r` all follow it.
 - A session belongs to the agent (and the folder) that made it. A chat that changes agent starts a fresh session with the new one; the transcript in the window stays.
 - The bridge's banner lists every agent with the executable it found, or what to install. A chat whose agent is missing gets a reply saying so instead of a hang.
+- **Model** and **Reasoning** beside Agent apply to the next message. Model accepts custom CLI IDs as well as the configured model, optional `agents.<id>.models`, Claude's aliases and Antigravity's catalog (queried once at bridge startup with `agy models`). These are per-chat overrides, not edits to `config.json`; explicit choices also override matching `extraArgs`. A pending request keeps its original settings when resent, including after `/reload`.
+- **Default** uses the bridge / CLI setting. Returning an explicit model or reasoning choice to Default starts a fresh session, preventing a resumed CLI session from keeping its previous override. Changing agent clears both choices.
+- Reasoning uses `--effort` for Claude and Antigravity, and `-c model_reasoning_effort=\"<level>\"` before `exec` for Codex ([configuration reference](https://developers.openai.com/codex/config-reference/)). The picker offers the agent's levels; support still depends on the chosen model and CLI version. Grok and Hermes have no reasoning switch in this bridge, so their control is disabled.
 
 All of them run headless on the bridge PC, so log in once by hand in a terminal there (`claude`, `codex`, `grok login`, `agy`, `hermes setup`); the bridge reuses the cached login.
 
@@ -22,6 +25,8 @@ Every agent's block in `config.json` has the same keys, and the bridge maps them
 | `allowedTools` | Rules in Claude Code's syntax: `WebSearch` allows a tool, `Bash(git:*)` any command starting with `git`, `Bash(npm test)` that exact command. The **Allow & retry** button appends to this list. Ignored by Codex. |
 | `deniedTools` | Rules the agent may never use, same syntax. Claude gets them as `--disallowedTools`, Grok as `--deny` (which wins over everything, `bypassPermissions` included). Ignored by Codex. |
 | `model` | Passed through to the CLI when non-empty. |
+| `reasoning` | Default effort when non-empty: Claude/Antigravity use `--effort`; Codex uses `-c model_reasoning_effort=\"<level>\"`. Unsupported for Grok/Hermes. |
+| `models` | Optional array of model IDs to add to the addon's Model picker; does not change the default model. |
 | `path` | The executable, when the bridge can't find it on its own. A `.js` path is run with the bridge's own Node; a Windows `.cmd` npm shim is unwrapped. |
 | `extraArgs` | Anything else to put on the command line, verbatim. |
 
@@ -62,6 +67,19 @@ Codex also checks `CODEX_BIN` before searching `PATH`, so a newer launcher can o
 - **Command line:** `agy -p=<prompt> --output-format stream-json --add-dir <folder> --print-timeout <seconds>s [--conversation <id>] [--model <m>] ...`. The prompt must be attached to `-p=`. The bridge sets both the process cwd and `--add-dir` to the chat folder.
 - **Permissions:** `acceptEdits` uses `--mode accept-edits --disable-slash-commands`; `default` uses `--mode plan`; `bypassPermissions` uses `--dangerously-skip-permissions --disable-slash-commands`.
 - **Session and progress:** the `conversation_id` from `init` is resumed with `--conversation`. Active tool steps become progress lines, and `result` supplies the final reply. The context block goes at the top of the prompt. When needed, the user prompt is truncated to keep context under the Windows command-line limit.
+- **Headless approvals:** Antigravity cannot ask for tool approval inside WoW. A denied action can leave a successful CLI result with no response; the bridge reports that as an error and includes the CLI's diagnostic instead of showing “finished without a reply.” Provider errors are also preserved.
+
+To allow every shell command for Antigravity runs launched by this bridge, set these arguments under `agents.agy`:
+
+```json
+"extraArgs": [
+  "--settings",
+  "{\"permissions\":{\"allow\":[\"command(*)\"]}}"
+]
+```
+
+This changes only the bridge-launched runs, not Antigravity's global settings. It is a command permission grant, not filesystem confinement: commands can access resources outside their starting folder. Other tool permissions and existing deny rules still apply. Restart the bridge after changing it. Prefer narrower `command(...)` rules when full command access is not needed; see [Antigravity's headless permissions](https://antigravity.google/docs/cli/headless#permissions-in-headless-mode).
+
 
 ## Hermes Agent
 

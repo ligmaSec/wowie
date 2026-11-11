@@ -27,7 +27,7 @@
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const P = require('./protocol'); // the pure protocol code, unit-tested in tests/bridge_test.js
 const A = require('./agents');   // how each agent is launched and read, unit-tested in tests/agents_test.js
 
@@ -64,6 +64,7 @@ if (!DEFAULT_AGENT) {
   console.error(`"agent": "${cfg.agent}" in ${CONFIG_FILE} is not one of ${A.agentIds().join(', ')}.`);
   process.exit(2);
 }
+const agentOptions = A.selectionOptions(cfg);
 
 // Default folder: --project, else the folder we were started from (unless that is
 // this repo, i.e. npm start), else the configured one.
@@ -290,7 +291,7 @@ function takeMapCommands(job, text) {
 // Slot file / Inbox.lua body: see protocol.luaTable.
 function slotFile(globalName, records, urgent = true) {
   const map = Date.now() < mapShareUntil && (urgent || mapLuaSize() <= MAP_PROGRESS_MAX) ? state.map : null;
-  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, agent: DEFAULT_AGENT, agents: A.agentIds(), map });
+  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, agent: DEFAULT_AGENT, agents: A.agentIds(), agentOptions, map });
 }
 
 function addonInstalled() {
@@ -520,7 +521,11 @@ function runJob(job) {
   }
   job.agent = agentId;
   const agent = A.AGENTS[agentId];
-  const acfg = A.agentConfig(cfg, agentId);
+  if (job.reasoning && !(agent.reasoningLevels || []).includes(job.reasoning)) {
+    finish(job, 'error', `${agent.name} does not support reasoning level "${job.reasoning}". Choose a supported level or Default in the addon.`);
+    return;
+  }
+  const acfg = A.agentConfig(cfg, agentId, job);
   const cmd = A.resolveCommand(agentId, acfg);
   if (!cmd.found) {
     log(`${tag} ${agentId} not found: ${cmd.note}`);
@@ -657,7 +662,8 @@ function runJob(job) {
 
   child.on('close', (code) => {
     cleanup();
-    if (agent.stream === 'text') {
+    if (buffer.trim()) handleLine(buffer.trim());
+    if (!parserError && typeof parser.finish === 'function') {
       try {
         const r = parser.finish({ stdout: stdoutText, stderr, code });
         if (r && r.session) sessionId = r.session;
@@ -667,7 +673,6 @@ function runJob(job) {
         result = { text: `${agent.name} output parser failed: ${err.message}`, error: true };
       }
     }
-    if (buffer.trim()) handleLine(buffer.trim());
     if (sessionId) {
       state.sessions[skey] = sessionId;
       (state.sessionCwd = state.sessionCwd || {})[skey] = cwd;
@@ -806,6 +811,20 @@ function banner() {
   console.log('Leave this window open while you play. Ctrl+C to stop.\n');
 }
 
+// Antigravity exposes its account's model catalog. Keep custom/configured models
+// selectable if discovery is unavailable; never delay capture or a chat for it.
+function discoverModels() {
+  const cmd = A.resolveCommand('agy', A.agentConfig(cfg, 'agy'));
+  if (!cmd.found) return;
+  execFile(cmd.file, [...cmd.args, 'models'], { timeout: 15000, maxBuffer: 256 * 1024, windowsHide: true }, (err, stdout) => {
+    if (err) { log('Antigravity model list unavailable:', err.message); return; }
+    const models = String(stdout).split(/\r?\n/).map(line => line.match(/^([^\s]+)\t/)).filter(Boolean).map(m => m[1]);
+    if (!models.length) return;
+    agentOptions.agy.models = [...new Set([...agentOptions.agy.models, ...models])];
+    publishNow();
+  });
+}
+
 findSavedVars();
 banner();
 if (inject !== null) {
@@ -816,6 +835,7 @@ if (inject !== null) {
     if (running.size === 0) { console.log('nothing pending'); process.exit(0); }
   } else {
     setInterval(pollSavedVariables, cfg.pollMs || 750);
+    discoverModels();
     presenceBeat();
     setInterval(presenceBeat, cfg.presenceIntervalMs || 30000);
     if (cap.enabled) startCapture();

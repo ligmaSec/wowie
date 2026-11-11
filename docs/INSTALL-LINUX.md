@@ -4,8 +4,8 @@ The addon is the same; only the bridge's screen capture differs. On Linux the br
 
 ## Requirements
 
-- An **X11** session (`echo $XDG_SESSION_TYPE` prints `x11`). Wayland blocks reading other windows' pixels.
-- The game under Wine (Lutris, Bottles, a hand-made prefix...), **windowed or borderless**.
+- An **X11** session, or a Wayland session with Xwayland and the game using Wine/Proton's **X11 backend**. The capture falls back to reading the game's X window when the server refuses root-window capture. Wine's native Wayland backend is not supported, even if Xwayland is installed.
+- The game **windowed or borderless**.
 - Node.js 22.2+, python3, and at least one agent CLI logged in (see [AGENTS.md](AGENTS.md)).
 
 ## Install
@@ -34,4 +34,4 @@ It finds the game window, saves what the capture sees to `bridge/probe.png`, and
 3. `nvidia-settings -a AllowFlipping=0` (NVIDIA).
 4. As a last resort `/wow-ai mode reload` in game: no capture at all, one UI reload per message.
 
-`bridge.log` shows `capture: attached to window 0x...` once the window is found. If it keeps saying `waiting for Wow window`, set `capture.processName` to your executable's name, or `capture.windowName` to part of the window title. `capture.python` picks the interpreter if `python3` is not the one on your `PATH`.
+`bridge.log` shows `capture: attached to window 0x...` once the window is found. Plain Wine sets `WM_CLASS` to the executable name (`wow.exe`), but Proton runtimes (Steam, umu-launcher, Faugus) give every window in the prefix the same `steam_app_<appid>` class; the capture recognises those by the game's "World of Warcraft" title, so the Battle.net window is skipped without any setting. If it keeps saying `waiting for Wow window`, set `capture.windowName` to part of the window title, or `capture.processName` to your executable's name (non-Proton prefixes). `capture.python` picks the interpreter if `python3` is not the one on your `PATH`.

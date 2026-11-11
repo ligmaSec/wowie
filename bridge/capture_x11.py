@@ -304,24 +304,38 @@ def attrs(w):
     return a if ok and x_errors[0] == before else None
 
 
-def window_matches(w):
-    if args.window_name:
-        name = ctypes.c_void_p()
-        if X.XFetchName(dpy, w, ctypes.byref(name)) and name.value:
-            hit = args.window_name.lower() in ctypes.string_at(name.value).decode("utf-8", "replace").lower()
-            X.XFree(name.value)
-            return hit
-        return False
+def window_title(w):
+    name = ctypes.c_void_p()
+    if not X.XFetchName(dpy, w, ctypes.byref(name)) or not name.value:
+        return ""
+    try:
+        return ctypes.string_at(name.value).decode("utf-8", "replace")
+    finally:
+        X.XFree(name.value)
+
+
+def class_names(w):
     hint = XClassHint()
     if not X.XGetClassHint(dpy, w, ctypes.byref(hint)):
-        return False
-    want = args.process_name.lower() + ".exe"
-    hit = False
+        return []
+    names = []
     for ptr in (hint.res_name, hint.res_class):
         if ptr:
-            hit = hit or ctypes.string_at(ptr).decode("utf-8", "replace").lower() == want
+            names.append(ctypes.string_at(ptr).decode("utf-8", "replace"))
             X.XFree(ptr)
-    return hit
+    return names
+
+
+def window_matches(w):
+    if args.window_name:
+        return args.window_name.lower() in window_title(w).lower()
+    names = [n.lower() for n in class_names(w)]
+    if args.process_name.lower() + ".exe" in names:
+        return True
+    # Proton runtimes (Steam, umu-launcher, Faugus) give every window in the
+    # prefix the same WM_CLASS of steam_app_<appid>, so it names neither the exe
+    # nor the client. Their windows keep the game's title.
+    return any(n.startswith("steam_app_") for n in names) and "world of warcraft" in window_title(w).lower()
 
 
 def find_window():
@@ -349,23 +363,9 @@ def mask_shift(mask):
     return s, (mask >> s) if mask else 1
 
 
-def grab(w):
-    """Capture the strip region of window w from the root window (what is on screen)."""
-    a = attrs(w)
-    if not a or a.map_state != IS_VIEWABLE:
-        return None
-    rx, ry, child = ctypes.c_int(), ctypes.c_int(), Window()
+def grab_from(drawable, x, y, width, height):
     before = x_errors[0]
-    X.XTranslateCoordinates(dpy, w, root, 0, 0, ctypes.byref(rx), ctypes.byref(ry), ctypes.byref(child))
-    ra = attrs(root)
-    if x_errors[0] != before or not ra:
-        return None
-    x0, y0 = max(0, rx.value), max(0, ry.value)
-    gw = min(W + SLACK, a.width, ra.width - x0)
-    gh = min(H + SLACK, a.height, ra.height - y0)
-    if gw <= 0 or gh <= 0:
-        return None
-    img = X.XGetImage(dpy, root, x0, y0, gw, gh, ALL_PLANES, ZPIXMAP)
+    img = X.XGetImage(dpy, drawable, x, y, width, height, ALL_PLANES, ZPIXMAP)
     X.XSync(dpy, 0)
     if not img or x_errors[0] != before:
         return None
@@ -389,6 +389,32 @@ def grab(w):
         v = int.from_bytes(buf[o:o + bpp], order)
         return tuple(((v >> s) & m) * 255 // m for s, m in chans)
     return px, width, height
+
+
+def grab(w):
+    """Capture the strip region of window w, from the root window when it can be read
+    (that is what is on screen), else from the window's own drawable. Xwayland answers
+    BadMatch for XGetImage on the root window even though the game window reads fine."""
+    a = attrs(w)
+    if not a or a.map_state != IS_VIEWABLE:
+        return None
+    ra = attrs(root)
+    if ra:
+        rx, ry, child = ctypes.c_int(), ctypes.c_int(), Window()
+        before = x_errors[0]
+        X.XTranslateCoordinates(dpy, w, root, 0, 0, ctypes.byref(rx), ctypes.byref(ry), ctypes.byref(child))
+        if x_errors[0] == before:
+            x0, y0 = max(0, rx.value), max(0, ry.value)
+            gw = min(W + SLACK, a.width, ra.width - x0)
+            gh = min(H + SLACK, a.height, ra.height - y0)
+            if gw > 0 and gh > 0:
+                g = grab_from(root, x0, y0, gw, gh)
+                if g:
+                    return g
+    gw, gh = min(W + SLACK, a.width), min(H + SLACK, a.height)
+    if gw <= 0 or gh <= 0:
+        return None
+    return grab_from(w, 0, 0, gw, gh)
 
 
 def run():

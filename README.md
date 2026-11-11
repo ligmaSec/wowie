@@ -6,7 +6,7 @@
 
 Chat with your local coding agents from inside **World of Warcraft: Forever**: [Claude Code](https://claude.com/claude-code), [OpenAI Codex](https://developers.openai.com/codex), [xAI's Grok Build](https://docs.x.ai/build/overview), Google's Antigravity CLI and Hermes Agent. Send a task, go back to questing, get pinged in-game when the answer lands. No alt-tabbing, no `/reload` per message.
 
-- Multiple chats, each its own persistent agent session (like separate terminals), running in parallel. Each chat picks its agent and its folder
+- Multiple chats, each its own persistent agent session (like separate terminals), running in parallel. Each chat picks its agent, model, reasoning effort and folder
 - Live progress while the agent works: action count, elapsed time, the files it's editing and commands it's running
 - Replies echoed into the game chat; `/r` replies to the agent when it was the last to message you
 - The agent knows your character, level, zone, talents, professions and quest log (optional), and you can shift-click items, spells and quests into a message
@@ -38,11 +38,11 @@ The bridge drives whichever of these you have installed; each chat can use a dif
 | **Antigravity** (`agy`) | `agy -p=<prompt> --output-format stream-json`, resumed with `--conversation` | Antigravity permission switches | no |
 | **Hermes** (`hermes`) | `hermes chat --query-file -`, resumed with `--resume` | default only; the bridge never uses `--yolo` | no |
 
-`agent` in `bridge/config.json` is the default (`claude`). `/wow-ai agent codex` switches the current chat, or right-click a chat in the left panel and pick **Agent...**; the reply bubbles and the game-chat echo are labelled with whoever answered. A session belongs to the agent that made it, so a chat that changes agent starts a fresh session there (its transcript stays). Install notes, the exact command lines, what each permission mode means per agent, and known limits are in [docs/AGENTS.md](docs/AGENTS.md).
+`agent` in `bridge/config.json` is the default (`claude`). Use the **Agent** selector above the transcript to switch the current chat, or `/wow-ai agent codex` / **Agent...** in a chat's right-click menu. **Model** and **Reasoning** beside it configure the next message. The reply bubbles and game-chat echo are labelled with whoever answered. Changing agent starts a fresh session (the transcript stays). Install notes, CLI switches and limits are in [docs/AGENTS.md](docs/AGENTS.md).
 
 ## Requirements
 
-- Windows (NTFS), or Linux with the game under Wine on an **X11** session and python3 (see [docs/INSTALL-LINUX.md](docs/INSTALL-LINUX.md)), or macOS with a native client and python3
+- Windows (NTFS), or Linux with the game using Wine/Proton's X11 backend on **X11 or Xwayland** and python3 (see [docs/INSTALL-LINUX.md](docs/INSTALL-LINUX.md)), or macOS with a native client and python3
 - World of Warcraft: Forever (tested on 1.60.1.69913 and 1.60.1.69977, TOC 16001), **windowed or borderless** (exclusive fullscreen blocks screen capture)
 - [Node.js](https://nodejs.org) 22.2 or newer
 - At least one agent CLI, installed and logged in:
@@ -86,7 +86,7 @@ node setup.js --project ~/path/to/the/project   # finds the client in $WINEPREFI
 npm start
 ```
 
-The bridge captures the game window through X11 (`bridge/capture_x11.py`, no packages needed) and writes the slot files straight into the Wine prefix. Check the capture once: send any message from the game and, while the strip of colored squares is in the top-left corner, run `npm run probe` in a second terminal. It saves what the capture sees to `bridge/probe.png` and says whether it decoded the strip.
+The bridge captures the game window through X11/Xwayland (`bridge/capture_x11.py`, no packages needed), including clients launched through Proton runtimes such as Steam, umu-launcher and Faugus, and writes the slot files straight into the Wine prefix. Check the capture once: send any message from the game and, while the strip of colored squares is in the top-left corner, run `npm run probe` in a second terminal. It saves what the capture sees to `bridge/probe.png` and says whether it decoded the strip.
 
 ### macOS (native client)
 
@@ -131,6 +131,8 @@ Every chat that hasn't picked its own folder now works in `realms`, and the pane
 In game: `/wow-ai` opens the window. Until the bridge has answered, a **Connect** button sits where Send would be: start the bridge, click it, and the light turns green (a message typed before that stays in the box). Then click the input box, type, Enter. The reply arrives with the whisper sound; the window's light shows the bridge state (green/yellow/red, hover for details), and **Reconnect** shows up if the bridge goes quiet.
 
 Right-clicking a chat in the left panel opens a small menu with **Rename...**, **Folder...** and **Agent...** (right-click again to close it); the trash can on the row deletes the chat after an OK/Cancel confirm. **Folder...** sets the folder this chat's agent works in (same as `/wow-ai cd` below), **Agent...** which agent answers it (same as `/wow-ai agent`); each chat keeps its own, so you can have chats on different projects, with different agents, side by side.
+
+The **Agent**, **Model** and **Reasoning** selectors above the transcript are saved per chat; new chats inherit the current choices. **Model** offers configured models, Claude aliases and Antigravity's live catalog, plus **Custom model...** for any CLI-supported ID. **Reasoning** is available for Claude, Codex and Antigravity; Grok and Hermes show **Not supported**. Choices apply to the next message, never an in-flight request or its resend. **Default** uses the bridge / CLI setting; resetting an explicit model or reasoning choice to Default starts a fresh session so the CLI cannot retain its previous override. Changing agent clears model and reasoning choices.
 
 | Command | What it does |
 |---|---|
@@ -213,6 +215,7 @@ The keys you are most likely to touch. Every key, flag and environment variable 
 | `defaultCwd` | folder for chats that haven't been given one with `/wow-ai cd` |
 | `agent` | the agent for chats that haven't picked one with `/wow-ai agent` (`claude`, `codex`, `grok`, `agy` or `hermes`) |
 | `agents.<id>.permissionMode`, `.allowedTools`, `.deniedTools`, `.model` | that agent's permissions, allowlist, denylist and model; `.path` where its executable is if the bridge can't find it, `.extraArgs` anything else to pass it |
+| `agents.<id>.reasoning`, `.models` | default reasoning effort for Claude/Codex/Antigravity; optional model IDs to add to the in-game picker |
 | `agents.codex.networkAccess` | let Codex's sandbox reach the network (default `false`) |
 | `maxParallel` | how many chats may run an agent at once (default 3) |
 | `gameContext` | `false` never tells the agent about your character, whatever the addon sends (default `true`) |
@@ -225,7 +228,7 @@ The keys you are most likely to touch. Every key, flag and environment variable 
 ## Troubleshooting
 
 - **Connect says "No answer from the bridge" / light stays red** — is the bridge running? Is the game window on screen and not minimized? Exclusive fullscreen blocks capture. `bridge.log` shows `strip #N` when a message is decoded and `strip seen but rejected: ...` when one is misread.
-- **Linux: `bridge.log` keeps saying `waiting for Wow window`** — the game isn't running or its window has another name: set `capture.processName` to the exe name, or `capture.windowName` to part of the window title. On Wayland the capture can't see other windows; use an X11 session.
+- **Linux: `bridge.log` keeps saying `waiting for Wow window`** — the game isn't running or its window has another name: set `capture.processName` to the exe name, or `capture.windowName` to part of the window title. On Wayland, the game must use Wine/Proton's X11 backend (Xwayland); Wine's native Wayland windows cannot be captured.
 - **Linux: `npm run probe` shows a black or stale picture** — the compositor is letting the game present on its own. Try `"keepComposited": true` under `capture`, then windowed mode, then `nvidia-settings -a AllowFlipping=0` on NVIDIA; `/wow-ai mode reload` works without any capture.
 - **No herb/ore pins after `/wow-ai map ore`** — `/wow-ai map` says whether the `WoWAI_Nodes` data addon is installed; pins show on zone maps only, and with `filter skill` only what your skill can gather.
 - **The reply says "X is not installed on the bridge PC"** — the bridge's banner shows where it looked for each agent. Install the CLI, or put the full path of its executable in `agents.<id>.path` in `bridge/config.json` and restart the bridge.

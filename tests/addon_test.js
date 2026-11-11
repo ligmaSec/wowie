@@ -10,6 +10,8 @@ const fs = require('fs');
 const path = require('path');
 const fengari = require('fengari');
 const { lua, lauxlib, lualib, to_luastring, to_jsstring } = fengari;
+const P = require('../bridge/protocol');
+const A = require('../bridge/agents');
 
 const ADDON = path.join(__dirname, '..', 'addon', 'WoWAI');
 const CELLS_PER_ROW = 200;
@@ -43,17 +45,26 @@ function newVM() {
 function decodeStrip(vm) {
   if (vm.evaluate('WoWAIStrip and WoWAIStrip.shown') !== 'true') return null;
   vm.run(`
-    local parts = {}
+    local source, lastRow = {}, 0
     for _, t in ipairs(WoWAIStrip.textures) do
       if t.shown and t.color then
         local c, r = math.floor(t.x / 4), math.floor(-t.y / 4)
-        local v = (t.color[1] >= 0.5 and 4 or 0) + (t.color[2] >= 0.5 and 2 or 0) + (t.color[3] >= 0.5 and 1 or 0)
-        parts[#parts + 1] = (r * ${CELLS_PER_ROW} + c) .. ":" .. v
+        source[r * ${CELLS_PER_ROW} + c] = (t.color[1] >= 0.5 and 4 or 0) + (t.color[2] >= 0.5 and 2 or 0) + (t.color[3] >= 0.5 and 1 or 0)
+        lastRow = math.max(lastRow, r)
+      end
+    end
+    local _, height = GetPhysicalScreenSize()
+    local pixelsPerUnit = WoWAIStrip:GetEffectiveScale() * height * GetScreenDPIScale() / 768
+    local parts = {}
+    for r = 0, math.min(48, math.ceil((lastRow + 1) * pixelsPerUnit)) - 1 do
+      for c = 0, ${CELLS_PER_ROW} - 1 do
+        -- Sample the rendered texture at each physical four-pixel cell's center.
+        local sc, sr = math.floor((c + 0.5) / pixelsPerUnit), math.floor((r + 0.5) / pixelsPerUnit)
+        parts[#parts + 1] = tostring(sc < ${CELLS_PER_ROW} and source[sr * ${CELLS_PER_ROW} + sc] or 0)
       end
     end
     RESULT = table.concat(parts, ",")`);
-  const cells = [];
-  for (const p of vm.evaluate('RESULT').split(',')) { const [i, v] = p.split(':').map(Number); cells[i] = v; }
+  const cells = vm.evaluate('RESULT').split(',').map(Number);
   const bytes = [];
   let acc = 0, nbits = 0;
   for (let i = 0; i < cells.length; i++) {
@@ -122,6 +133,19 @@ test('hello goes out on the strip after login', () => {
   assert.equal(recs[0].flags, 'h;c', 'a hello always carries the game context');
   assert.equal(recs[0].text, '');
   assert.equal(recs[0].session, vm.evaluate('WoWAIDB.session'));
+});
+
+test('hello remains readable in physical pixels across DPI and UI-scale changes', () => {
+  const vm = newVM();
+  vm.run('STUB.screenHeight = 1080; STUB.dpiScale = 1354 / 1080; UIParent:SetScale(0.89)');
+  login(vm);
+  vm.run('STUB.RunTimers()');
+  const hello = stripRecords(vm);
+  assert.equal(hello[0].flags, 'h;c');
+  assert.equal(hello[0].session, vm.evaluate('WoWAIDB.session'));
+
+  vm.run('STUB.screenHeight = 1440; STUB.dpiScale = 1.5; UIParent:SetScale(1.1); STUB.FireEvent("UI_SCALE_CHANGED")');
+  assert.deepEqual(stripRecords(vm), hello, 'an already visible hello stays readable after changing monitors');
 });
 
 test('outbound records replace field separators inside user text', () => {
@@ -442,17 +466,49 @@ test('a chat can pick its agent: the strip says so, replies are labelled by thei
   vm.run('SlashCmdList.WOWAI("agent default")');
   assert.equal(vm.evaluate('WoWAIDB.chats[1].agent'), '');
   assert.ok(vm.evaluate('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].text').includes('agent reset to the bridge\'s default: Claude'));
-  // The Agent... menu item opens a prompt prefilled with the chat's agent.
-  vm.run('WoWAI.SetAgent("grok"); WoWAI.AgentPrompt()');
-  assert.equal(vm.evaluate('STUB.popup.which'), 'WOWAI_AGENT');
-  assert.equal(vm.evaluate('STUB.popup.data.agent'), 'grok');
-  vm.run(`
-    local dialog = { editBox = { GetText = function() return " codex " end } }
-    StaticPopupDialogs.WOWAI_AGENT.OnAccept(dialog, STUB.popup.data)`);
-  assert.equal(vm.evaluate('WoWAIDB.chats[1].agent'), 'codex');
   // A new chat inherits the agent, like the folder.
-  vm.run('WoWAI.NewChat("Second")');
+  vm.run('WoWAI.SetAgent("codex"); WoWAI.NewChat("Second")');
   assert.equal(vm.evaluate('WoWAIDB.chats[2].agent'), 'codex');
+});
+
+test('selector changes leave an in-flight request unchanged when resent, including after transport state is rebuilt', () => {
+  const vm = newVM();
+  login(vm);
+  vm.run('STUB.RunTimers()');
+  const options = A.selectionOptions({ agents: { codex: { models: ['code-model', 'review-model'] } } });
+  vm.run(`STUB.onLoadAddOn = function()
+    ${P.luaTable('WoWAI_SlotData', [], { now: vm.num('time()') * 1000, agent: 'claude', agents: A.agentIds(), agentOptions: options })}
+  end`);
+  vm.run('STUB.now = STUB.now + 6; STUB.Tick(); WoWAI.Toggle(true)');
+  vm.run(`
+    function Pick(key, value)
+      WoWAI.ShowSelection(key)
+      for _, item in ipairs(WoWAISelectionMenu.items) do
+        if item.shown and item.value == value then item.scripts.OnClick(item); return end
+      end
+      error("missing selection: " .. key .. "=" .. value)
+    end
+    Pick("agent", "codex")
+    Pick("model", "code-model")
+    Pick("reasoning", "high")
+    WoWAI.Send("original request")
+  `);
+  const original = stripRecords(vm).find(r => r.text === 'original request');
+  const job = P.jobsFromStrip(original.id, [original.session, original.chat, original.id, original.cwd, original.flags, original.name, original.text].join('\x1f'))[0];
+  assert.equal(job.agent, 'codex');
+  assert.equal(job.model, 'code-model');
+  assert.equal(job.reasoning, 'high');
+  vm.run('Pick("model", "review-model"); Pick("reasoning", "low"); WoWAI.Resend()');
+  assert.deepEqual(stripRecords(vm).find(r => r.id === original.id), original, 'resending keeps the original run choices, not the current selectors');
+  // Login rebuilds run.outbound: the SavedVariables snapshot must carry the choices.
+  vm.run('STUB.FireEvent("PLAYER_LOGIN"); WoWAI.Resend()');
+  assert.deepEqual(stripRecords(vm).find(r => r.id === original.id), original, 'the request survives loss of transient transport state');
+  connect(vm);
+  vm.run('SlashCmdList.WOWAI("cancel"); WoWAI.Send("next request")');
+  const next = stripRecords(vm).find(r => r.text === 'next request');
+  const nextFlags = P.parseFlags(next.flags);
+  assert.equal(nextFlags.model, 'review-model');
+  assert.equal(nextFlags.reasoning, 'low');
 });
 
 test('replies saved under the old "claude" role are read as assistant replies from Claude', () => {

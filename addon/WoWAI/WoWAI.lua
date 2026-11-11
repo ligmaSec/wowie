@@ -124,6 +124,12 @@ end
 local function ChatAgentName(c)
 	return AgentName(ChatAgent(c))
 end
+local NO_OPTIONS = {}
+
+local function ChatOptions(c)
+	return (run.agentOptions or NO_OPTIONS)[ChatAgent(c)] or NO_OPTIONS
+end
+
 
 -- The name to show on a reply: the agent the bridge says wrote it, else the chat's.
 local function ReplyAgentName(c, agent)
@@ -176,6 +182,8 @@ local function AddChat(name, cwd)
 		name = name or ("Chat " .. (#db.chats + 1)),
 		cwd = cwd or (current and current.cwd) or DEFAULT_CWD,
 		agent = (current and current.agent) or "",
+		model = (current and current.model) or "",
+		reasoning = (current and current.reasoning) or "",
 		history = {},
 		unread = 0,
 		created = time(),
@@ -242,6 +250,8 @@ local function InitDB()
 	-- Chats from before agents had names: replies were stored with role "claude".
 	for _, c in ipairs(db.chats) do
 		c.agent = c.agent or ""
+		c.model = c.model or ""
+		c.reasoning = c.reasoning or ""
 		for _, m in ipairs(c.history or {}) do
 			if m.role == "claude" then m.role, m.agent = "assistant", m.agent or "claude" end
 		end
@@ -318,21 +328,24 @@ local strip
 local cellPool = {}
 
 local function EnsureStrip()
-	if strip then return strip end
-	strip = CreateFrame("Frame", "WoWAIStrip", UIParent)
-	strip:SetFrameStrata("TOOLTIP")
-	strip:SetFrameLevel(10000)
-	-- Scale so that one UI unit is exactly one physical pixel (see Blizzard's PixelUtil).
+	if not strip then
+		strip = CreateFrame("Frame", "WoWAIStrip", UIParent)
+		strip:SetFrameStrata("TOOLTIP")
+		strip:SetFrameLevel(10000)
+		if strip.SetIgnoreParentScale then strip:SetIgnoreParentScale(true) end
+		strip:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 0, 0)
+		strip:SetSize(CELLS_PER_ROW * CELL, MAX_ROWS * CELL)
+		strip:Hide()
+	end
+	-- GetPhysicalScreenSize excludes the DPI factor used by the rendered window.
+	-- Refresh on every send as well as UI_SCALE_CHANGED so cells stay physical pixels.
 	local physH = 1080
 	if GetPhysicalScreenSize then
 		local _, h = GetPhysicalScreenSize()
 		physH = h or physH
 	end
-	if strip.SetIgnoreParentScale then strip:SetIgnoreParentScale(true) end
-	strip:SetScale(768 / physH)
-	strip:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 0, 0)
-	strip:SetSize(CELLS_PER_ROW * CELL, MAX_ROWS * CELL)
-	strip:Hide()
+	local dpiScale = GetScreenDPIScale and GetScreenDPIScale() or 1
+	strip:SetScale(768 / (physH * dpiScale))
 	return strip
 end
 
@@ -736,6 +749,8 @@ local function ImportRestore(r)
 				name = (rc.name and rc.name ~= "") and rc.name or ("Chat " .. (#db.chats + 1)),
 				cwd = rc.cwd or DEFAULT_CWD,
 				agent = "",
+				model = "",
+				reasoning = "",
 				history = {},
 				unread = 0,
 				created = time(),
@@ -793,6 +808,7 @@ local function TryLoadSlot(why)
 	if type(data) == "table" then
 		if type(data.agent) == "string" and data.agent ~= "" then run.bridgeAgent = data.agent end
 		if type(data.agents) == "table" and #data.agents > 0 then run.bridgeAgents = data.agents end
+		if type(data.agentOptions) == "table" then run.agentOptions = data.agentOptions end
 	end
 	local matched = ApplyReplies(type(data) == "table" and data.replies or nil)
 	if type(data) == "table" and data.restore then ImportRestore(data.restore) end
@@ -899,6 +915,7 @@ local function ProcessInbox()
 	if type(inbox.cwd) == "string" and inbox.cwd ~= "" then run.bridgeCwd = inbox.cwd end
 	if type(inbox.agent) == "string" and inbox.agent ~= "" then run.bridgeAgent = inbox.agent end
 	if type(inbox.agents) == "table" and #inbox.agents > 0 then run.bridgeAgents = inbox.agents end
+	if type(inbox.agentOptions) == "table" then run.agentOptions = inbox.agentOptions end
 	ApplyReplies(inbox.replies)
 	if inbox.restore then ImportRestore(inbox.restore) end
 	if inbox.map and WoWAIMap then WoWAIMap.Sync(inbox.map) end
@@ -907,6 +924,7 @@ end
 Finish = function(chat, role, text, denied, agent, summary, macros)
 	AddHistory(chat, role, text, chat.pendingId, denied, agent, macros)
 	chat.pendingId = nil
+	chat.request = nil
 	chat.progress = nil
 	if run.act then run.act[chat.id] = nil end
 	NotedBridge()
@@ -1217,7 +1235,8 @@ function WoWAI.Send(text, allow)
 	-- Shift-clicked links become [Name] plus their tooltip, which is what the agent can read.
 	local links
 	text, links = WoWAI.ExpandLinks(text)
-	local limit = Codec.MAX_PAYLOAD - 300
+	local model = c.model ~= "" and ToHex(c.model) or nil
+	local limit = Codec.MAX_PAYLOAD - 300 - #(model or "") - #c.reasoning
 	if #text > limit then
 		AddHistory(c, "system", "That message is too long for one send (" .. #text .. " chars, max ~" .. limit .. "). Split it up." .. (links > 0 and " Each linked item adds its tooltip to the message." or ""))
 		WoWAI.Render()
@@ -1231,6 +1250,8 @@ function WoWAI.Send(text, allow)
 	local tokens = {}
 	if c.resetNext then table.insert(tokens, "n") end
 	if c.agent and c.agent ~= "" then table.insert(tokens, "agent=" .. c.agent) end
+	if model then table.insert(tokens, "model=" .. model) end
+	if c.reasoning ~= "" then table.insert(tokens, "reasoning=" .. c.reasoning) end
 	local allowHex
 	if type(allow) == "table" and #allow > 0 then
 		table.insert(tokens, "allow=" .. table.concat(allow, ","))
@@ -1247,6 +1268,8 @@ function WoWAI.Send(text, allow)
 		cwd = ToHex(c.cwd),
 		ctx = ctx and ToHex(ctx) or nil,
 		agent = (c.agent and c.agent ~= "") and c.agent or nil,
+		model = model,
+		reasoning = c.reasoning ~= "" and c.reasoning or nil,
 		allow = allowHex,
 		newSession = newSession,
 		t = time(),
@@ -1265,6 +1288,9 @@ function WoWAI.Send(text, allow)
 		if first then c.name = AutoTitle(text) or c.name end
 	end
 	db.settings.shown = true
+	-- Snapshot the run settings: changing a selector only affects future sends,
+	-- including when the pending message is resent after a UI reload.
+	c.request = { chat = c.id, cwd = c.cwd, flags = flags, name = c.name, text = text, ctx = ctx }
 
 	if db.settings.mode == "pixel" then
 		run.outbound[id] = { chat = c.id, cwd = c.cwd, flags = flags, name = c.name, text = text, ctx = ctx, sentAt = GetTime() }
@@ -1341,7 +1367,12 @@ function WoWAI.Resend()
 		end
 	end
 	if not text then return end
-	run.outbound[c.pendingId] = { chat = c.id, cwd = c.cwd, flags = (c.agent and c.agent ~= "") and ("agent=" .. c.agent) or "", name = c.name, text = text, sentAt = GetTime() }
+	local rec = {}
+	for k, v in pairs(c.request or { chat = c.id, cwd = c.cwd, flags = (c.agent and c.agent ~= "") and ("agent=" .. c.agent) or "", name = c.name, text = text }) do
+		rec[k] = v
+	end
+	rec.sentAt = GetTime()
+	run.outbound[c.pendingId] = rec
 	run.sentAt = GetTime()
 	run.polls = 0
 	ScheduleNextPoll()
@@ -1379,6 +1410,7 @@ function WoWAI.SwitchChat(id)
 		local typed = Trim(ui.input:GetText() or "")
 		prev.draft = typed ~= "" and typed or nil
 	end
+	if ui.selectionMenu then ui.selectionMenu:Hide() end
 	db.activeChat = c.id
 	c.unread = 0
 	if ui.input then
@@ -1483,6 +1515,7 @@ function WoWAI.SetAgent(rest, c)
 	end
 	local changed = rest ~= (c.agent or "")
 	c.agent = rest
+	if changed then c.model, c.reasoning = "", "" end
 	if rest ~= "" then
 		AddHistory(c, "system", "agent set to " .. AgentName(rest) .. (changed and #c.history > 1 and "; the next message starts a fresh session with it" or ""))
 	elseif changed then
@@ -1493,20 +1526,46 @@ function WoWAI.SetAgent(rest, c)
 	WoWAI.Render()
 end
 
-StaticPopupDialogs["WOWAI_AGENT"] = {
-	text = "Agent for this chat\n\nOne of: %s.\nEmpty = the bridge's default (%s). Changing it starts a fresh session.",
+-- The direct Agent selector and the chat menu use the same picker.
+function WoWAI.AgentPrompt(id)
+	WoWAI.ShowSelection("agent", ui.agentSelector, id)
+end
+
+function WoWAI.SetModel(value, c)
+	c = c or ActiveChat()
+	if not c then return end
+	value = Trim(value or "")
+	if value == "-" or value == "default" then value = "" end
+	if value == "" and c.model ~= "" then c.resetNext = true end
+	c.model = value
+	WoWAI.Render()
+end
+
+function WoWAI.SetReasoning(value, c)
+	c = c or ActiveChat()
+	if not c then return end
+	value = Trim(value or ""):lower()
+	if value == "-" or value == "default" then value = "" end
+	if value ~= "" and not Contains(ChatOptions(c).reasoningLevels, value) then return end
+	if value == "" and c.reasoning ~= "" then c.resetNext = true end
+	c.reasoning = value
+	WoWAI.Render()
+end
+
+StaticPopupDialogs["WOWAI_MODEL"] = {
+	text = "Model for this chat\n\nEnter a model ID or alias accepted by the selected agent.\nEmpty = the bridge / CLI default. Applies to the next message.",
 	button1 = OKAY,
 	button2 = CANCEL,
 	hasEditBox = 1,
-	editBoxWidth = 200,
-	maxLetters = 32,
+	editBoxWidth = 280,
+	maxLetters = 120,
 	timeout = 0,
 	whileDead = true,
 	hideOnEscape = true,
 	OnShow = function(dialog, data)
 		local box = dialog.GetEditBox and dialog:GetEditBox() or dialog.editBox
 		if box then
-			box:SetText(data and data.agent or "")
+			box:SetText(data and data.model or "")
 			box:HighlightText()
 			box:SetFocus()
 		end
@@ -1514,23 +1573,19 @@ StaticPopupDialogs["WOWAI_AGENT"] = {
 	OnAccept = function(dialog, data)
 		local box = dialog.GetEditBox and dialog:GetEditBox() or dialog.editBox
 		local chat = data and FindChat(data.id)
-		if chat and box then WoWAI.SetAgent(box:GetText(), chat) end
+		if chat and box then WoWAI.SetModel(box:GetText(), chat) end
 	end,
 	EditBoxOnEnterPressed = function(box)
 		local dialog = box:GetParent()
-		StaticPopupDialogs["WOWAI_AGENT"].OnAccept(dialog, dialog.data)
+		StaticPopupDialogs["WOWAI_MODEL"].OnAccept(dialog, dialog.data)
 		dialog:Hide()
 	end,
-	EditBoxOnEscapePressed = function(box)
-		box:GetParent():Hide()
-	end,
+	EditBoxOnEscapePressed = function(box) box:GetParent():Hide() end,
 }
 
--- Agent dialog for a chat (the active one when no id is given).
-function WoWAI.AgentPrompt(id)
+function WoWAI.ModelPrompt(id)
 	local c = (id and FindChat(id)) or ActiveChat()
-	if not c then return end
-	StaticPopup_Show("WOWAI_AGENT", AgentList(), run.bridgeAgent and AgentName(run.bridgeAgent) or "unknown until connected", { id = c.id, agent = c.agent or "" })
+	if c then StaticPopup_Show("WOWAI_MODEL", nil, nil, { id = c.id, model = c.model }) end
 end
 
 StaticPopupDialogs["WOWAI_RENAME"] = {
@@ -1854,6 +1909,7 @@ function WoWAI.UpdateStatus()
 	ui.cwd:SetText("cwd: " .. cwdText .. "   agent: " .. agentText .. "   mode: " .. mode)
 	if ui.resend then ui.resend:SetShown(c and c.pendingId ~= nil and mode == "pixel") end
 	if ui.refresh then ui.refresh:SetShown(mode ~= "pixel" or run.slotsExhausted or run.slotsMissing or run.pixelFailed or false) end
+	WoWAI.UpdateSelectors()
 	WoWAI.UpdateMini()
 end
 
@@ -2310,6 +2366,159 @@ local function MakeButton(parent, label, width, onClick)
 end
 
 local PANEL_W = 150
+local function MakeSelectors(parent, panel)
+	local row = CreateFrame("Frame", "WoWAISelectors", parent)
+	row:SetPoint("TOPLEFT", panel, "TOPRIGHT", 8, 0)
+	row:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -32, -52)
+	row:SetHeight(40)
+	local buttons = {}
+	local specs = {
+		{ key = "agent", label = "Agent", tip = "Choose the coding agent for this chat. Changing agent resets Model and Reasoning and starts a fresh session on the next message." },
+		{ key = "model", label = "Model", tip = "Choose a model or enter a custom model ID. Default uses the bridge / CLI setting. Changes apply to the next message." },
+		{ key = "reasoning", label = "Reasoning", tip = "Reasoning effort for the next message. Levels depend on the agent and model; Grok and Hermes have no reasoning switch in this bridge." },
+	}
+	for i, spec in ipairs(specs) do
+		local b = MakeButton(row, "", 120, function(self)
+			WoWAI.ShowSelection(spec.key, self)
+		end)
+		if i == 1 then b:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -16)
+		else b:SetPoint("LEFT", buttons[i - 1], "RIGHT", 6, 0) end
+		local title = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+		title:SetPoint("BOTTOMLEFT", b, "TOPLEFT", 2, 2)
+		title:SetText(spec.label)
+		b.label = b:GetFontString()
+		b.label:ClearAllPoints()
+		b.label:SetPoint("LEFT", b, "LEFT", 8, 0)
+		b.label:SetPoint("RIGHT", b, "RIGHT", -18, 0)
+		b.label:SetJustifyH("LEFT")
+		b.label:SetWordWrap(false)
+		local arrow = b:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+		arrow:SetPoint("RIGHT", b, "RIGHT", -6, 0)
+		arrow:SetText("v")
+		b:SetScript("OnEnter", function(self)
+			GameTooltip:SetOwner(self, "ANCHOR_TOP")
+			GameTooltip:SetText(spec.label .. ": " .. (self.valueText or "Default"))
+			GameTooltip:AddLine(spec.tip, 0.8, 0.8, 0.8, true)
+			GameTooltip:Show()
+		end)
+		b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+		buttons[i] = b
+		ui[spec.key .. "Selector"] = b
+	end
+	local function Layout(_, width)
+		for _, b in ipairs(buttons) do b:SetWidth((width - 12) / 3) end
+	end
+	row:HookScript("OnSizeChanged", Layout)
+	Layout(row, row:GetWidth())
+
+	local menu = CreateFrame("Frame", "WoWAISelectionMenu", parent, "BackdropTemplate")
+	menu:SetFrameStrata("TOOLTIP")
+	menu:SetClampedToScreen(true)
+	menu:SetBackdrop(BACKDROP)
+	menu:SetBackdropColor(0.08, 0.08, 0.1, 0.98)
+	menu:SetBackdropBorderColor(0.6, 0.6, 0.6, 1)
+	menu:EnableMouse(true)
+	local scroll = CreateFrame("ScrollFrame", "WoWAISelectionScroll", menu, "UIPanelScrollFrameTemplate")
+	scroll:SetPoint("TOPLEFT", menu, "TOPLEFT", 6, -6)
+	scroll:SetPoint("BOTTOMRIGHT", menu, "BOTTOMRIGHT", -28, 6)
+	local content = CreateFrame("Frame", nil, scroll)
+	scroll:SetScrollChild(content)
+	menu.items = {}
+	menu:SetScript("OnUpdate", function(self, dt)
+		if not MouseIsOver then return end
+		if MouseIsOver(self) or (self.owner and MouseIsOver(self.owner)) then self.away = 0
+		else
+			self.away = (self.away or 0) + dt
+			if self.away > 0.5 then self:Hide() end
+		end
+	end)
+	menu:Hide()
+	ui.selectionMenu = menu
+
+	function WoWAI.ShowSelection(key, anchor, id)
+		local c = (id and FindChat(id)) or ActiveChat()
+		if not c then return end
+		anchor = anchor or ui[key .. "Selector"]
+		if menu:IsShown() and menu.owner == anchor and menu.key == key and menu.chatId == c.id then menu:Hide(); return end
+		if ui.chatMenu then ui.chatMenu:Hide() end
+		local o, choices = ChatOptions(c), {}
+		local function Choice(value, label, action)
+			table.insert(choices, { value = value, label = label, action = action })
+		end
+		local selected = c[key] or ""
+		if key == "agent" then
+			Choice("", "Default (" .. AgentName(run.bridgeAgent) .. ")")
+			for _, agent in ipairs(run.bridgeAgents or { "claude", "codex", "grok", "agy", "hermes" }) do Choice(agent, AgentName(agent)) end
+		elseif key == "model" then
+			Choice("", o.model and o.model ~= "" and ("Default (" .. o.model .. ")") or "Default")
+			local models = {}
+			if c.model ~= "" then table.insert(models, c.model) end
+			for _, model in ipairs(o.models or {}) do
+				if not Contains(models, model) then table.insert(models, model) end
+			end
+			for _, model in ipairs(models) do Choice(model, model) end
+			Choice(nil, "Custom model...", function() WoWAI.ModelPrompt(c.id) end)
+		elseif key == "reasoning" then
+			if not o.reasoningLevels or #o.reasoningLevels == 0 then menu:Hide(); return end
+			Choice("", o.reasoning and o.reasoning ~= "" and ("Default (" .. o.reasoning .. ")") or "Default")
+			for _, level in ipairs(o.reasoningLevels) do Choice(level, AgentName(level)) end
+		else return end
+		local width = math.max(260, anchor:GetWidth())
+		menu:SetSize(width, math.min(220, #choices * 22) + 12)
+		content:SetSize(width - 34, #choices * 22)
+		scroll:SetVerticalScroll(0)
+		for i, choice in ipairs(choices) do
+			local b = menu.items[i]
+			if not b then
+				b = CreateFrame("Button", nil, content)
+				b:SetHeight(22)
+				b:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -(i - 1) * 22)
+				local hl = b:CreateTexture(nil, "HIGHLIGHT")
+				hl:SetAllPoints()
+				hl:SetColorTexture(1, 1, 1, 0.12)
+				b.label = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+				b.label:SetPoint("LEFT", b, "LEFT", 6, 0)
+				b.label:SetPoint("RIGHT", b, "RIGHT", -4, 0)
+				b.label:SetJustifyH("LEFT")
+				b.label:SetWordWrap(false)
+				menu.items[i] = b
+			end
+			b:SetWidth(width - 34)
+			b.value = choice.value
+			b.label:SetText((choice.value == selected and "|cff55ff55> |r" or "   ") .. Display(choice.label))
+			b:SetScript("OnClick", function()
+				menu:Hide()
+				if choice.action then choice.action()
+				elseif key == "agent" then WoWAI.SetAgent(choice.value, c)
+				elseif key == "model" then WoWAI.SetModel(choice.value, c)
+				else WoWAI.SetReasoning(choice.value, c) end
+			end)
+			b:Show()
+		end
+		for i = #choices + 1, #menu.items do menu.items[i]:Hide() end
+		menu.owner, menu.key, menu.chatId, menu.away = anchor, key, c.id, 0
+		menu:ClearAllPoints()
+		menu:SetPoint("TOPRIGHT", anchor, "BOTTOMRIGHT", 0, -2)
+		menu:Show()
+	end
+	return row
+end
+
+function WoWAI.UpdateSelectors()
+	local c = ActiveChat()
+	if not c or not ui.agentSelector then return end
+	local o = ChatOptions(c)
+	local function Set(button, value)
+		button.valueText = value
+		button:SetText(Display(value))
+	end
+	Set(ui.agentSelector, c.agent ~= "" and AgentName(c.agent) or ("Default (" .. AgentName(run.bridgeAgent) .. ")"))
+	Set(ui.modelSelector, c.model ~= "" and c.model or (o.model and o.model ~= "" and ("Default (" .. o.model .. ")") or "Default"))
+	local supported = o.reasoningLevels and #o.reasoningLevels > 0
+	ui.reasoningSelector:SetEnabled(supported and true or false)
+	Set(ui.reasoningSelector, supported and (c.reasoning ~= "" and AgentName(c.reasoning) or (o.reasoning and o.reasoning ~= "" and ("Default (" .. o.reasoning .. ")") or "Default")) or (run.agentOptions and "Not supported" or "Connect first"))
+end
+
 
 local function BuildUI()
 	if ui.frame then return end
@@ -2408,6 +2617,7 @@ local function BuildUI()
 	-- Esc (via UISpecialFrames) just calls Hide(); treat that as a minimize unless
 	-- we're hiding on purpose. Ignore hides caused by the whole UI going away.
 	f:SetScript("OnHide", function()
+		if ui.selectionMenu then ui.selectionMenu:Hide() end
 		if ui.quitting then
 			ui.quitting = nil
 			return
@@ -2564,10 +2774,12 @@ local function BuildUI()
 		b:Hide()
 		ui.chatButtons[i] = b
 	end
+	local selectors = MakeSelectors(f, panel)
+
 
 	-- Transcript: a scrolling stack of message bubbles
 	local scroll = CreateFrame("ScrollFrame", "WoWAIScroll", f, "UIPanelScrollFrameTemplate")
-	scroll:SetPoint("TOPLEFT", panel, "TOPRIGHT", 8, 0)
+	scroll:SetPoint("TOPLEFT", selectors, "BOTTOMLEFT", 0, -4)
 	scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -32, 110)
 	ui.scroll = scroll
 
@@ -3067,6 +3279,7 @@ SlashCmdList["WOWAI"] = function(msg)
 			run.outbound[c.pendingId] = nil
 			if run.act then run.act[c.id] = nil end
 			c.pendingId = nil
+			c.request = nil
 			c.progress = nil
 			RefreshStrip()
 			if not AnyPending() then keyCatcher:Hide() end
@@ -3089,6 +3302,7 @@ end
 local ev = CreateFrame("Frame")
 ev:RegisterEvent("ADDON_LOADED")
 ev:RegisterEvent("PLAYER_LOGIN")
+ev:RegisterEvent("UI_SCALE_CHANGED")
 ev:RegisterEvent("PLAYER_REGEN_ENABLED")
 ev:RegisterEvent("UPDATE_MACROS")
 ev:RegisterEvent("CHAT_MSG_WHISPER")
@@ -3101,6 +3315,8 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 	elseif event == "CHAT_MSG_WHISPER" or event == "CHAT_MSG_BN_WHISPER" then
 		-- A real person whispered: /r belongs to them again.
 		run.lastMessenger = "player"
+	elseif event == "UI_SCALE_CHANGED" then
+		if strip then EnsureStrip() end
 	elseif event == "PLAYER_LOGIN" then
 		if not db then InitDB() end
 		BuildUI()

@@ -41,6 +41,8 @@ function shellInner(cmd) {
 // bubble; session: the agent's session id, for the next run's resume; denied:
 // allowlist rules (Claude syntax) the run was refused; notes: text the bridge
 // appends to the reply; done: the reply itself, once the run has produced it.
+// Optional finish({ stdout, stderr, code }) runs after stdout is drained, so a
+// parser can finalize its status using diagnostics outside the JSON stream.
 function empty() { return { progress: [], denied: [], notes: [] }; }
 
 // ---------------------------------------------------------------------------
@@ -278,6 +280,7 @@ function grokParser() {
 
 function agyParser() {
   let response = '';
+  let completed = null;
   return {
     feed(ev) {
       const out = empty();
@@ -305,8 +308,33 @@ function agyParser() {
         const result = ev.result || {};
         if (result.conversation_id) out.session = result.conversation_id;
         const ok = result.status === 'SUCCESS';
-        out.done = { text: String(result.response || response), error: !ok };
+        let text = String(result.response || response);
+        if (!ok && result.error) {
+          if (text.trim()) out.notes.push(String(result.error));
+          else text = String(result.error);
+        }
+        completed = { text, error: !ok };
+        out.done = completed;
         if (!ok) out.notes.push(`agy status: ${result.status || 'unknown'}`);
+      }
+      return out;
+    },
+    finish({ stderr, code }) {
+      const out = empty();
+      if (!completed) return out;
+      const detail = String(stderr || '').replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').trim().slice(-1500);
+      if (!completed.text.trim()) {
+        out.done = {
+          text: 'Antigravity returned no reply.\n' +
+            (detail || 'Run agy in the chat folder to inspect the conversation and its permissions.'),
+          error: true,
+        };
+      } else {
+        out.done = completed;
+        if (code !== 0 && !completed.error) {
+          out.done = { ...completed, error: true };
+          out.notes.push(`agy exited with code ${code}${detail ? ': ' + detail : ''}`);
+        }
       }
       return out;
     },
@@ -342,6 +370,8 @@ function contextBlock(text) {
 const AGENTS = {
   claude: {
     name: 'Claude',
+    models: ['sonnet', 'opus', 'haiku'],
+    reasoningLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
     command: 'claude',
     install: 'https://claude.com/claude-code, then run `claude` once and log in',
     windowsPaths: () => [path.join(os.homedir(), '.local', 'bin', 'claude.exe')],
@@ -353,6 +383,7 @@ const AGENTS = {
       const denied = Array.isArray(cfg.deniedTools) ? cfg.deniedTools.filter(Boolean) : [];
       if (denied.length) a.push('--disallowedTools', ...denied);
       if (cfg.model) a.push('--model', cfg.model);
+      if (cfg.reasoning) a.push('--effort', cfg.reasoning);
       if (resume) a.push('--resume', resume);
       if (system) a.push('--append-system-prompt', system);
       return a.concat(Array.isArray(cfg.extraArgs) ? cfg.extraArgs : []);
@@ -366,6 +397,7 @@ const AGENTS = {
   },
   codex: {
     name: 'Codex',
+    reasoningLevels: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
     command: 'codex',
     install: 'npm install -g @openai/codex, then run `codex` once and log in',
     windowsPaths: () => [],
@@ -375,6 +407,7 @@ const AGENTS = {
     args({ cfg, resume, cwd, images }) {
       const a = [];
       if (cfg.networkAccess) a.push('-c', 'sandbox_workspace_write.network_access=true');
+      if (cfg.reasoning) a.push('-c', `model_reasoning_effort=${JSON.stringify(cfg.reasoning)}`);
       a.push('exec', '--json', '--skip-git-repo-check', '-C', cwd);
       const mode = cfg.permissionMode || 'acceptEdits';
       if (mode === 'bypassPermissions') a.push('--dangerously-bypass-approvals-and-sandbox');
@@ -433,6 +466,7 @@ const AGENTS = {
   },
   agy: {
     name: 'Antigravity', command: 'agy',
+    reasoningLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
     install: 'Install Google Antigravity CLI (agy) and run `agy` once to log in.',
     windowsPaths: () => [path.join(process.env.LOCALAPPDATA || '', 'agy', 'bin', 'agy.exe')],
     posixPaths: () => [],
@@ -450,6 +484,7 @@ const AGENTS = {
       else a.push('--dangerously-skip-permissions', '--disable-slash-commands');
       if (resume) a.push('--conversation', resume);
       if (cfg.model) a.push('--model', cfg.model);
+      if (cfg.reasoning) a.push('--effort', cfg.reasoning);
       return a.concat(Array.isArray(cfg.extraArgs) ? cfg.extraArgs : []);
     },
     input: () => ({}), env: env => env, parser: agyParser,
@@ -496,15 +531,52 @@ function displayName(id) {
 // An agent's block of config.json. Before agents existed, Claude's settings sat
 // at the top level (claudePath, model, permissionMode, allowedTools); those are
 // still read, under anything in agents.claude.
-function agentConfig(cfg, id) {
+function agentConfig(cfg, id, selection = {}) {
   const own = (cfg && cfg.agents && cfg.agents[id]) || {};
-  if (id !== 'claude') return { ...own };
   const legacy = {};
-  if (cfg && cfg.claudePath) legacy.path = cfg.claudePath;
-  if (cfg && cfg.model) legacy.model = cfg.model;
-  if (cfg && cfg.permissionMode) legacy.permissionMode = cfg.permissionMode;
-  if (cfg && Array.isArray(cfg.allowedTools)) legacy.allowedTools = cfg.allowedTools;
-  return { ...legacy, ...own };
+  if (id === 'claude') {
+    if (cfg && cfg.claudePath) legacy.path = cfg.claudePath;
+    if (cfg && cfg.model) legacy.model = cfg.model;
+    if (cfg && cfg.permissionMode) legacy.permissionMode = cfg.permissionMode;
+    if (cfg && Array.isArray(cfg.allowedTools)) legacy.allowedTools = cfg.allowedTools;
+  }
+  const out = { ...legacy, ...own };
+  if (selection.model) out.model = selection.model;
+  if (selection.reasoning) out.reasoning = selection.reasoning;
+  // Explicit chat choices beat matching extraArgs too, without duplicate CLI flags.
+  if ((selection.model || selection.reasoning) && Array.isArray(out.extraArgs)) {
+    const args = out.extraArgs;
+    out.extraArgs = [];
+    for (let i = 0; i < args.length; i++) {
+      const arg = String(args[i]);
+      if ((selection.model && (arg === '--model' || arg === '-m'))
+          || (selection.reasoning && arg === '--effort')) { i++; continue; }
+      if ((selection.model && /^(--model=|-m=)/.test(arg))
+          || (selection.reasoning && arg.startsWith('--effort='))) continue;
+      if (id === 'codex') {
+        const key = selection.model && /^model\s*=/;
+        const effort = selection.reasoning && /^model_reasoning_effort\s*=/;
+        const matches = value => (key && key.test(value)) || (effort && effort.test(value));
+        if ((arg === '-c' || arg === '--config') && matches(String(args[i + 1]))) { i++; continue; }
+        if (/^(--config=|-c=?)/.test(arg) && matches(arg.replace(/^(--config=|-c=?)/, ''))) continue;
+      }
+      out.extraArgs.push(args[i]);
+    }
+  }
+  return out;
+}
+
+// Only public selection metadata crosses into the addon, never paths or tool grants.
+function selectionOptions(cfg) {
+  return Object.fromEntries(agentIds().map(id => {
+    const acfg = agentConfig(cfg, id);
+    const models = [acfg.model, ...(Array.isArray(acfg.models) ? acfg.models : []), ...(AGENTS[id].models || [])];
+    return [id, {
+      model: acfg.model || '', reasoning: acfg.reasoning || '',
+      models: [...new Set(models.filter(m => typeof m === 'string' && m))],
+      reasoningLevels: AGENTS[id].reasoningLevels || [],
+    }];
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -598,7 +670,7 @@ function resolveCommand(id, cfg = {}) {
 }
 
 module.exports = {
-  AGENTS, DEFAULT_AGENT, agentIds, normalizeAgent, displayName, agentConfig,
+  AGENTS, DEFAULT_AGENT, agentIds, normalizeAgent, displayName, agentConfig, selectionOptions,
   grokRules, snippet, contextBlock,
   claudeParser, codexParser, grokParser, agyParser, hermesParser, codexItemLine, grokCall, grokRefusal, shellInner,
   resolveCommand, unwrapShim, nativeNextTo,

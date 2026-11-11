@@ -114,6 +114,7 @@ function sameFolder(a, b) {
 // running, "c" = the record carries a game-context field before the text (an
 // empty one clears the context the bridge keeps), "agent=codex" = run this
 // chat with that agent instead of the bridge's default (see agents.js).
+// "model=<hex>" overrides the model; "reasoning=high" overrides reasoning effort.
 function parseFlags(flags) {
   const out = { newSession: false, hello: false, forget: false, context: false, allow: [], agent: '' };
   for (const tok of String(flags || '').split(';')) {
@@ -123,6 +124,8 @@ function parseFlags(flags) {
     else if (tok === 'c') out.context = true;
     else if (tok.startsWith('allow=')) out.allow.push(...tok.slice(6).split(',').map(s => s.trim()).filter(Boolean));
     else if (tok.startsWith('agent=')) out.agent = tok.slice(6).trim().toLowerCase();
+    else if (tok.startsWith('model=')) out.model = fromHex(tok.slice(6));
+    else if (tok.startsWith('reasoning=')) out.reasoning = tok.slice(10).trim().toLowerCase();
   }
   return out;
 }
@@ -169,6 +172,10 @@ function parseOutbox(src) {
   if (ctx) job.ctx = fromHex(ctx[1]);
   const agent = b.match(/\["agent"\]\s*=\s*"([0-9a-zA-Z_-]*)"/);
   if (agent && agent[1]) job.agent = agent[1].toLowerCase();
+  const model = b.match(/\["model"\]\s*=\s*"([0-9a-fA-F]*)"/);
+  if (model && model[1]) job.model = fromHex(model[1]);
+  const reasoning = b.match(/\["reasoning"\]\s*=\s*"([a-z]*)"/);
+  if (reasoning && reasoning[1]) job.reasoning = reasoning[1];
   const allow = b.match(/\["allow"\]\s*=\s*"([0-9a-fA-F]*)"/);
   if (allow && allow[1]) job.allow = fromHex(allow[1]).split('\x1F').filter(Boolean);
   return job;
@@ -333,6 +340,13 @@ function luaTable(globalName, records, opts = {}) {
     lines.push('\t\t},');
   }
   lines.push('\t},');
+  if (opts.agentOptions) {
+    lines.push('\tagentOptions = {');
+    for (const [id, o] of Object.entries(opts.agentOptions)) {
+      lines.push(`\t\t[${luaStr(id)}] = { model = ${luaStr(o.model)}, reasoning = ${luaStr(o.reasoning)}, models = { ${(o.models || []).map(luaStr).join(', ')} }, reasoningLevels = { ${(o.reasoningLevels || []).map(luaStr).join(', ')} } },`);
+    }
+    lines.push('\t},');
+  }
   if (opts.map) lines.push(luaMap(opts.map));
   const restore = opts.restore;
   if (restore) {

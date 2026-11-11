@@ -53,6 +53,13 @@ function Methods.SetSize(self, w, h) self.width, self.height = w, h end
 function Methods.SetWidth(self, w) self.width = w end
 function Methods.SetHeight(self, h) self.height = h end
 function Methods.GetSize(self) return self:GetWidth(), self:GetHeight() end
+function Methods.SetScale(self, scale) self.scale = scale end
+function Methods.GetScale(self) return self.scale or 1 end
+function Methods.SetIgnoreParentScale(self, ignore) self.ignoreParentScale = ignore end
+function Methods.GetEffectiveScale(self)
+	local parentScale = self.parent and not self.ignoreParentScale and self.parent:GetEffectiveScale() or 1
+	return self:GetScale() * parentScale
+end
 function Methods.GetStringHeight(self) return 14 end
 function Methods.GetStringWidth(self) return 100 end
 function Methods.GetFontString(self) return self end
@@ -169,7 +176,8 @@ C_Texture = { GetAtlasExists = function() return true end }
 function PlaySound() end
 function PlaySoundFile(path) if STUB.sounds[path] then return true, 1 end return false end
 function StopSound() end
-function GetPhysicalScreenSize() return 1920, 1080 end
+function GetPhysicalScreenSize() return STUB.screenWidth or 1920, STUB.screenHeight or 1080 end
+function GetScreenDPIScale() return STUB.dpiScale or 1 end
 function SetBinding(key, cmd) STUB.bindings[key] = cmd end
 function SaveBindings() end
 function GetCurrentBindingSet() return 1 end
