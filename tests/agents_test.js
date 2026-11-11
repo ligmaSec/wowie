@@ -49,6 +49,41 @@ test('chat choices override matching extraArgs without mutating defaults or anot
   assert.deepEqual(cfg, before, 'per-chat overrides never alter shared config');
 });
 
+function codexModelServer(t, onList) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wowai-models-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const script = path.join(dir, 'server.js');
+  fs.writeFileSync(script, `
+    const lines = require('readline').createInterface({ input: process.stdin });
+    const reply = response => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...response }) + '\\n');
+    lines.on('line', line => {
+      const request = JSON.parse(line);
+      if (request.method === 'initialize') reply({ id: request.id, result: {} });
+      else if (request.method === 'model/list') { ${onList} }
+    });
+    lines.on('close', () => process.exit(0));
+  `);
+  return { path: script };
+}
+
+test('Codex model discovery follows pagination, excludes hidden models and uses CLI model IDs rather than catalog row IDs', async t => {
+  const cfg = codexModelServer(t, `
+    reply({ method: 'catalog/updated', params: {} });
+    reply({ id: request.id, result: request.params.cursor
+      ? { data: [{ id: 'duplicate', model: 'code-model' }, { id: 'row-2', model: 'review-model' }], nextCursor: null }
+      : { data: [null, { id: 'row-1', model: 'code-model' }, { model: 'hidden-model', hidden: true }], nextCursor: 'next-page' }
+    });
+  `);
+  assert.deepEqual(await A.discoverModels('codex', cfg), ['code-model', 'review-model']);
+});
+
+test('Codex catalog RPC errors are reported instead of silently presenting an empty successful model list', async t => {
+  const cfg = codexModelServer(t, `
+    reply({ id: request.id, error: { code: -32601, message: 'model/list unavailable' } });
+  `);
+  await assert.rejects(A.discoverModels('codex', cfg), /model\/list unavailable/);
+});
+
 test('Claude Code: headless stream-json with the allowlist, resume and system prompt; prompt on stdin', () => {
   const cfg = { permissionMode: 'acceptEdits', allowedTools: ['WebSearch', 'Bash(git:*)'], model: 'opus' };
   const args = A.AGENTS.claude.args({ cfg, resume: 'sess-1', system: SYS, cwd: 'C:\\p' });

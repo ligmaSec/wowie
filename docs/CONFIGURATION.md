@@ -29,14 +29,14 @@ Keys under `agents.claude`, `agents.codex`, `agents.grok`, `agents.agy` and `age
 | `deniedTools` | `[]` | Rules the agent may never use, same syntax. Claude: `--disallowedTools`; Grok: `--deny`, which wins over everything, `bypassPermissions` included; ignored by Codex. |
 | `model` | `""` | Passed to the CLI (`--model` / `-m`) when non-empty. Empty uses the CLI's default. |
 | `reasoning` | `""` | Default effort for Claude and Antigravity (`--effort low\|medium\|high\|xhigh\|max`) or Codex (`-c model_reasoning_effort=\"<level>\"`, including `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`). Availability depends on the CLI and model. Empty leaves the CLI default; unsupported for Grok/Hermes. |
-| `models` | `[]` | Additional model IDs shown in the in-game Model selector. The configured `model`, Claude aliases and Antigravity's catalog are added automatically. Other/custom model IDs can always be entered in the UI. |
+| `models` | `[]` | Additional model IDs shown in the in-game Model selector. The configured `model`, Claude aliases and live Codex/Antigravity catalogs are added automatically. Custom IDs remain available when discovery fails. |
 | `path` | `""` | Full path to the executable. Empty means: look in the installer's folder, then (for Codex) `CODEX_BIN`, then `PATH`, then npm's launcher. A `.js` path is run with the bridge's Node. |
 | `extraArgs` | `[]` | More command-line arguments, added verbatim (before Codex's `resume` subcommand). |
 | `networkAccess` (codex only) | `false` | `true` lets commands inside Codex's `workspace-write` sandbox reach the network (`-c sandbox_workspace_write.network_access=true`). |
 
 A `config.json` from before agents existed kept Claude's settings at the top level (`claudePath`, `model`, `permissionMode`, `allowedTools`). The bridge still reads them, under anything in `agents.claude`; `setup.js` moves them down.
 
-The addon's **Agent**, **Model** and **Reasoning** controls save per-chat choices in `WoWAIDB`, send them with each request on both transports, and leave these bridge defaults unchanged. New chats inherit the current choices. Explicit model/effort selections override matching CLI switches in `extraArgs`; unrelated arguments remain. Returning an explicit choice to **Default** starts a fresh session so a resumed CLI cannot retain the old override. Switching agent clears that chat's model and effort. Pending messages, including resends after `/reload`, keep their original selection.
+The addon's **Defaults...** panel saves an agent/model/reasoning tuple in `WoWAIDB.settings.defaults`; **Save** applies it, **Cancel** discards edits, and **Bridge defaults → Save** clears it. Per-chat selectors take precedence, followed by addon defaults for that agent, these bridge settings, and finally CLI defaults. The addon sends resolved choices on both transports without changing `config.json`. New chats inherit the current chat's choices. Explicit model/effort selections override matching `extraArgs`; unrelated arguments remain. Default-agent changes preserve provider-specific chat overrides on their original agent. Clearing an override starts a fresh session when needed; pending requests, including resends after `/reload`, keep their original selection.
 
 ## Runs
 

@@ -27,7 +27,7 @@
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
-const { spawn, execFile } = require('child_process');
+const { spawn } = require('child_process');
 const P = require('./protocol'); // the pure protocol code, unit-tested in tests/bridge_test.js
 const A = require('./agents');   // how each agent is launched and read, unit-tested in tests/agents_test.js
 
@@ -811,18 +811,15 @@ function banner() {
   console.log('Leave this window open while you play. Ctrl+C to stop.\n');
 }
 
-// Antigravity exposes its account's model catalog. Keep custom/configured models
-// selectable if discovery is unavailable; never delay capture or a chat for it.
+// Query installed CLI catalogs independently; capture and chats never wait on them.
 function discoverModels() {
-  const cmd = A.resolveCommand('agy', A.agentConfig(cfg, 'agy'));
-  if (!cmd.found) return;
-  execFile(cmd.file, [...cmd.args, 'models'], { timeout: 15000, maxBuffer: 256 * 1024, windowsHide: true }, (err, stdout) => {
-    if (err) { log('Antigravity model list unavailable:', err.message); return; }
-    const models = String(stdout).split(/\r?\n/).map(line => line.match(/^([^\s]+)\t/)).filter(Boolean).map(m => m[1]);
-    if (!models.length) return;
-    agentOptions.agy.models = [...new Set([...agentOptions.agy.models, ...models])];
-    publishNow();
-  });
+  for (const id of A.agentIds()) {
+    A.discoverModels(id, A.agentConfig(cfg, id)).then(models => {
+      if (!models || !models.length) return;
+      agentOptions[id].models = [...new Set([...agentOptions[id].models, ...models])];
+      publishNow();
+    }).catch(err => log(`${A.displayName(id)} model list unavailable:`, err.message));
+  }
 }
 
 findSavedVars();

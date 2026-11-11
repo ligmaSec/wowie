@@ -7,14 +7,16 @@
 //   codex   OpenAI Codex  `codex exec --json`, prompt on stdin
 //   grok    xAI Grok      `grok --prompt-file … --output-format streaming-json`
 //
-// Everything is pure (no I/O) except resolveCommand, which looks for the
-// executable on disk. Adding an agent: an entry in AGENTS (args, input, parser,
+// Everything is pure except command resolution and model catalog discovery.
+// Adding an agent: an entry in AGENTS (args, input, parser,
 // optionally denialRule/allowFlag), a block in config.example.json, a section
 // in docs/AGENTS.md, a case in tests/agents_test.js.
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawn, execFile } = require('child_process');
+const readline = require('readline');
 const { describeToolUse, ruleFor, baseName } = require('./protocol');
 
 const PROGRESS_CHARS = 140;
@@ -398,6 +400,7 @@ const AGENTS = {
   codex: {
     name: 'Codex',
     reasoningLevels: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    modelCatalog: codexModels,
     command: 'codex',
     install: 'npm install -g @openai/codex, then run `codex` once and log in',
     windowsPaths: () => [],
@@ -467,6 +470,7 @@ const AGENTS = {
   agy: {
     name: 'Antigravity', command: 'agy',
     reasoningLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    modelCatalog: agyModels,
     install: 'Install Google Antigravity CLI (agy) and run `agy` once to log in.',
     windowsPaths: () => [path.join(process.env.LOCALAPPDATA || '', 'agy', 'bin', 'agy.exe')],
     posixPaths: () => [],
@@ -669,9 +673,85 @@ function resolveCommand(id, cfg = {}) {
   return { file: A.command + '.exe', args: [], found: false, note: `install it (${A.install}) or set agents.${id}.path in config.json` };
 }
 
+// Catalog discovery never starts a conversation or runs the model.
+function agyModels(cmd) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd.file, [...cmd.args, 'models'], { timeout: 15000, maxBuffer: 256 * 1024, windowsHide: true }, (err, stdout) => {
+      if (err) { reject(err); return; }
+      resolve(String(stdout).split(/\r?\n/).map(line => line.match(/^([^\s]+)\t/)).filter(Boolean).map(m => m[1]));
+    });
+  });
+}
+
+function codexModels(cmd, cfg) {
+  // Keep the provider/profile used by exec, without passing exec-only switches
+  // to app-server. Codex reads its normal CODEX_HOME configuration and login.
+  const globalArgs = [];
+  const extra = Array.isArray(cfg.extraArgs) ? cfg.extraArgs : [];
+  for (let i = 0; i < extra.length; i++) {
+    if (['-c', '--config', '-p', '--profile'].includes(extra[i]) && i + 1 < extra.length) {
+      globalArgs.push(extra[i], extra[++i]);
+    } else if (/^(--config=|--profile=|-c[^-]|-p[^-])/.test(String(extra[i]))) globalArgs.push(extra[i]);
+  }
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd.file, [...cmd.args, ...globalArgs, 'app-server'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const lines = readline.createInterface({ input: child.stdout });
+    const models = new Set();
+    const cursors = new Set();
+    let settled = false, stderr = '', pageId = 1;
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      lines.close();
+      child.stdin.end();
+      child.kill();
+      if (err) reject(err); else resolve([...models]);
+    };
+    const timer = setTimeout(() => finish(new Error('Codex model/list timed out')), 15000);
+    const send = message => child.stdin.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
+    child.on('error', finish);
+    child.stdin.on('error', finish);
+    child.stderr.on('data', data => { stderr = (stderr + data).slice(-1200); });
+    child.on('close', code => finish(new Error(`Codex app-server exited (${code})${stderr.trim() ? ': ' + stderr.trim() : ''}`)));
+    lines.on('line', line => {
+      if (settled) return;
+      let response;
+      try { response = JSON.parse(line); } catch { return; }
+      if (response.id !== 0 && response.id !== pageId) return;
+      if (response.error) { finish(new Error(response.error.message || JSON.stringify(response.error))); return; }
+      if (response.id === 0) {
+        send({ method: 'initialized' });
+        send({ id: pageId, method: 'model/list', params: { includeHidden: false } });
+        return;
+      }
+      if (!response.result || !Array.isArray(response.result.data)) {
+        finish(new Error('Codex model/list returned no model catalog'));
+        return;
+      }
+      for (const model of response.result.data) {
+        if (model && !model.hidden && typeof model.model === 'string' && model.model) models.add(model.model);
+      }
+      const cursor = response.result.nextCursor;
+      if (!cursor) { finish(); return; }
+      if (cursors.has(cursor)) { finish(new Error('Codex model/list repeated a pagination cursor')); return; }
+      cursors.add(cursor);
+      send({ id: ++pageId, method: 'model/list', params: { cursor, includeHidden: false } });
+    });
+    send({ id: 0, method: 'initialize', params: { clientInfo: { name: 'wowie', version: '0.5.0' }, capabilities: {} } });
+  });
+}
+
+function discoverModels(id, cfg = {}) {
+  const agent = AGENTS[id];
+  if (!agent || !agent.modelCatalog) return Promise.resolve(null);
+  const cmd = resolveCommand(id, cfg);
+  return cmd.found ? agent.modelCatalog(cmd, cfg) : Promise.resolve(null);
+}
+
 module.exports = {
   AGENTS, DEFAULT_AGENT, agentIds, normalizeAgent, displayName, agentConfig, selectionOptions,
   grokRules, snippet, contextBlock,
   claudeParser, codexParser, grokParser, agyParser, hermesParser, codexItemLine, grokCall, grokRefusal, shellInner,
-  resolveCommand, unwrapShim, nativeNextTo,
+  resolveCommand, unwrapShim, nativeNextTo, discoverModels,
 };

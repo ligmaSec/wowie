@@ -7,6 +7,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 ### Added
 
 - Direct **Agent**, **Model** and **Reasoning** selectors above the addon's transcript, saved per chat and inherited by new chats. Models include configured IDs, Claude aliases, Antigravity's live catalog and a custom-ID dialog. Claude/Antigravity effort uses `--effort`; Codex uses `model_reasoning_effort`. Unsupported reasoning controls are disabled. Both transports carry per-request choices; resends retain the original selection even after `/reload`. Agent changes clear model/effort, and returning an explicit choice to Default starts a fresh session.
+- A **Defaults...** panel for persistent addon-wide agent/model/reasoning choices, with Save, Cancel and Bridge defaults. Per-chat overrides win; provider-specific choices do not leak across default-agent changes, and pending resends keep their original settings.
+- Live Codex model discovery through the installed CLI's paginated `app-server` `model/list` API, alongside Antigravity's catalog. Configured/custom IDs remain selectable when discovery is unavailable.
 
 ### Fixed
 

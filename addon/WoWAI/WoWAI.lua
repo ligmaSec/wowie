@@ -107,7 +107,7 @@ end
 
 -- Agents are named by id as the bridge knows them ("claude", "codex", "grok");
 -- the bridge lists the ones it has, and its default, in every slot file. A chat
--- with no agent of its own runs on the bridge's default.
+-- with no agent of its own uses addon defaults, then the bridge's default.
 local AGENT_NAMES = { claude = "Claude", codex = "Codex", grok = "Grok", agy = "Antigravity", hermes = "Hermes" }
 
 local function AgentName(id)
@@ -116,9 +116,27 @@ local function AgentName(id)
 	return AGENT_NAMES[id] or (id:sub(1, 1):upper() .. id:sub(2))
 end
 
-local function ChatAgent(c)
-	if c and c.agent and c.agent ~= "" then return c.agent end
+local function DefaultAgent(defaults)
+	defaults = defaults or (db and db.settings.defaults)
+	if defaults and defaults.agent and defaults.agent ~= "" then return defaults.agent end
 	return run.bridgeAgent or ""
+end
+
+local function ChatAgent(c, defaults)
+	if c and c.agent and c.agent ~= "" then return c.agent end
+	return DefaultAgent(defaults)
+end
+
+-- Model/effort defaults belong to their agent, never to another provider.
+local function InheritedChoice(c, key, defaults)
+	defaults = defaults or db.settings.defaults
+	if defaults.agent ~= "" and ChatAgent(c, defaults) == defaults.agent then return defaults[key] or "" end
+	return ""
+end
+
+local function ChatChoice(c, key, defaults)
+	if c and c[key] and c[key] ~= "" then return c[key] end
+	return InheritedChoice(c, key, defaults)
 end
 
 local function ChatAgentName(c)
@@ -204,6 +222,10 @@ local function InitDB()
 	db = WoWAIDB
 	db.settings = db.settings or {}
 	local s = db.settings
+	s.defaults = s.defaults or {}
+	for _, key in ipairs({ "agent", "model", "reasoning" }) do
+		s.defaults[key] = s.defaults[key] or ""
+	end
 	if s.autoRefresh == nil then s.autoRefresh = true end
 	if s.signal == nil then s.signal = true end
 	if s.context == nil then s.context = true end -- tell the agent about the character, zone, etc.
@@ -1235,8 +1257,10 @@ function WoWAI.Send(text, allow)
 	-- Shift-clicked links become [Name] plus their tooltip, which is what the agent can read.
 	local links
 	text, links = WoWAI.ExpandLinks(text)
-	local model = c.model ~= "" and ToHex(c.model) or nil
-	local limit = Codec.MAX_PAYLOAD - 300 - #(model or "") - #c.reasoning
+	local agent = c.agent ~= "" and c.agent or db.settings.defaults.agent
+	local chosenModel, reasoning = ChatChoice(c, "model"), ChatChoice(c, "reasoning")
+	local model = chosenModel ~= "" and ToHex(chosenModel) or nil
+	local limit = Codec.MAX_PAYLOAD - 300 - #(model or "") - #reasoning
 	if #text > limit then
 		AddHistory(c, "system", "That message is too long for one send (" .. #text .. " chars, max ~" .. limit .. "). Split it up." .. (links > 0 and " Each linked item adds its tooltip to the message." or ""))
 		WoWAI.Render()
@@ -1249,9 +1273,9 @@ function WoWAI.Send(text, allow)
 	local id = db.lastSeq
 	local tokens = {}
 	if c.resetNext then table.insert(tokens, "n") end
-	if c.agent and c.agent ~= "" then table.insert(tokens, "agent=" .. c.agent) end
+	if agent ~= "" then table.insert(tokens, "agent=" .. agent) end
 	if model then table.insert(tokens, "model=" .. model) end
-	if c.reasoning ~= "" then table.insert(tokens, "reasoning=" .. c.reasoning) end
+	if reasoning ~= "" then table.insert(tokens, "reasoning=" .. reasoning) end
 	local allowHex
 	if type(allow) == "table" and #allow > 0 then
 		table.insert(tokens, "allow=" .. table.concat(allow, ","))
@@ -1267,9 +1291,9 @@ function WoWAI.Send(text, allow)
 		text = ToHex(text),
 		cwd = ToHex(c.cwd),
 		ctx = ctx and ToHex(ctx) or nil,
-		agent = (c.agent and c.agent ~= "") and c.agent or nil,
+		agent = agent ~= "" and agent or nil,
 		model = model,
-		reasoning = c.reasoning ~= "" and c.reasoning or nil,
+		reasoning = reasoning ~= "" and reasoning or nil,
 		allow = allowHex,
 		newSession = newSession,
 		t = time(),
@@ -1496,9 +1520,8 @@ function WoWAI.FolderPrompt(id)
 	StaticPopup_Show("WOWAI_FOLDER", run.bridgeCwd or "unknown until connected", nil, { id = c.id, cwd = c.cwd })
 end
 
--- The agent this chat talks to, by id. Empty (or
--- "-" / "default") = the bridge's default. The bridge starts a fresh session
--- when a chat changes agent, since a session belongs to the agent that made it.
+-- Empty (or "-" / "default") uses the saved addon agent, then the bridge's.
+-- A different agent starts a fresh session, since sessions belong to their agent.
 local function AgentList()
 	return run.bridgeAgents and table.concat(run.bridgeAgents, ", ") or "claude, codex, grok, agy, hermes"
 end
@@ -1514,14 +1537,16 @@ function WoWAI.SetAgent(rest, c)
 		return
 	end
 	local changed = rest ~= (c.agent or "")
+	local defaultSource = db.settings.defaults.agent ~= "" and "addon's default: " or "bridge's default: "
+	local defaultName = DefaultAgent() ~= "" and AgentName(DefaultAgent()) or "unknown until connected"
 	c.agent = rest
 	if changed then c.model, c.reasoning = "", "" end
 	if rest ~= "" then
 		AddHistory(c, "system", "agent set to " .. AgentName(rest) .. (changed and #c.history > 1 and "; the next message starts a fresh session with it" or ""))
 	elseif changed then
-		AddHistory(c, "system", "agent reset to the bridge's default: " .. (run.bridgeAgent and AgentName(run.bridgeAgent) or "unknown until connected"))
+		AddHistory(c, "system", "agent reset to the " .. defaultSource .. defaultName)
 	else
-		AddHistory(c, "system", "agent is the bridge's default: " .. (run.bridgeAgent and AgentName(run.bridgeAgent) or "unknown until connected") .. " (/wow-ai agent <name>, or right-click the chat and pick Agent, to change; agents: " .. AgentList() .. ")")
+		AddHistory(c, "system", "agent is the " .. defaultSource .. defaultName .. " (/wow-ai agent <name>, or use the Agent selector, to change; agents: " .. AgentList() .. ")")
 	end
 	WoWAI.Render()
 end
@@ -1552,8 +1577,29 @@ function WoWAI.SetReasoning(value, c)
 	WoWAI.Render()
 end
 
+function WoWAI.SaveDefaults()
+	local draft = ui.defaultsDraft
+	if not draft then return end
+	local nextDefaults = { agent = draft.agent, model = draft.model, reasoning = draft.reasoning }
+	if nextDefaults.agent == "" then nextDefaults.model, nextDefaults.reasoning = "", "" end
+	for _, c in ipairs(db.chats) do
+		local agent = ChatAgent(c)
+		local model, reasoning = ChatChoice(c, "model"), ChatChoice(c, "reasoning")
+		-- Preserve provider-specific per-chat overrides if the default agent changes.
+		if c.agent == "" and agent ~= "" and agent ~= DefaultAgent(nextDefaults)
+			and (c.model ~= "" or c.reasoning ~= "") then c.agent = agent end
+		-- A resumed CLI must not retain an override that was just cleared.
+		if agent == ChatAgent(c, nextDefaults)
+			and ((model ~= "" and ChatChoice(c, "model", nextDefaults) == "")
+			or (reasoning ~= "" and ChatChoice(c, "reasoning", nextDefaults) == "")) then c.resetNext = true end
+	end
+	db.settings.defaults = nextDefaults
+	ui.defaultsPanel:Hide()
+	WoWAI.Render()
+end
+
 StaticPopupDialogs["WOWAI_MODEL"] = {
-	text = "Model for this chat\n\nEnter a model ID or alias accepted by the selected agent.\nEmpty = the bridge / CLI default. Applies to the next message.",
+	text = "Model selection\n\nEnter a model ID or alias accepted by the selected agent.\nEmpty inherits the default. Applies to future messages.",
 	button1 = OKAY,
 	button2 = CANCEL,
 	hasEditBox = 1,
@@ -1572,8 +1618,12 @@ StaticPopupDialogs["WOWAI_MODEL"] = {
 	end,
 	OnAccept = function(dialog, data)
 		local box = dialog.GetEditBox and dialog:GetEditBox() or dialog.editBox
-		local chat = data and FindChat(data.id)
-		if chat and box then WoWAI.SetModel(box:GetText(), chat) end
+		if data and data.defaults then
+			if ui.defaultsDraft and box then WoWAI.SetDefaultChoice("model", box:GetText()) end
+		else
+			local chat = data and FindChat(data.id)
+			if chat and box then WoWAI.SetModel(box:GetText(), chat) end
+		end
 	end,
 	EditBoxOnEnterPressed = function(box)
 		local dialog = box:GetParent()
@@ -1583,9 +1633,9 @@ StaticPopupDialogs["WOWAI_MODEL"] = {
 	EditBoxOnEscapePressed = function(box) box:GetParent():Hide() end,
 }
 
-function WoWAI.ModelPrompt(id)
-	local c = (id and FindChat(id)) or ActiveChat()
-	if c then StaticPopup_Show("WOWAI_MODEL", nil, nil, { id = c.id, model = c.model }) end
+function WoWAI.ModelPrompt(id, defaults)
+	local c = defaults and ui.defaultsDraft or ((id and FindChat(id)) or ActiveChat())
+	if c then StaticPopup_Show("WOWAI_MODEL", nil, nil, { id = c.id, model = c.model, defaults = defaults }) end
 end
 
 StaticPopupDialogs["WOWAI_RENAME"] = {
@@ -1901,6 +1951,8 @@ function WoWAI.UpdateStatus()
 	local agentText
 	if c and c.agent and c.agent ~= "" then
 		agentText = AgentName(c.agent)
+	elseif db.settings.defaults.agent ~= "" then
+		agentText = AgentName(DefaultAgent()) .. " (addon default)"
 	elseif run.bridgeAgent then
 		agentText = AgentName(run.bridgeAgent) .. " (bridge default)"
 	else
@@ -2366,20 +2418,19 @@ local function MakeButton(parent, label, width, onClick)
 end
 
 local PANEL_W = 150
-local function MakeSelectors(parent, panel)
-	local row = CreateFrame("Frame", "WoWAISelectors", parent)
-	row:SetPoint("TOPLEFT", panel, "TOPRIGHT", 8, 0)
-	row:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -32, -52)
+local function MakeSelectorRow(parent, name, defaults)
+	local row = CreateFrame("Frame", name, parent)
 	row:SetHeight(40)
 	local buttons = {}
+	row.buttons = buttons
 	local specs = {
-		{ key = "agent", label = "Agent", tip = "Choose the coding agent for this chat. Changing agent resets Model and Reasoning and starts a fresh session on the next message." },
-		{ key = "model", label = "Model", tip = "Choose a model or enter a custom model ID. Default uses the bridge / CLI setting. Changes apply to the next message." },
+		{ key = "agent", label = "Agent", tip = "Changing agent clears Model and Reasoning. Per-chat choices override addon defaults." },
+		{ key = "model", label = "Model", tip = defaults and "Choose an agent first. Default uses its bridge / CLI model." or "Choose a model or custom ID. Default uses addon defaults, then the bridge / CLI setting. Changes apply to the next message." },
 		{ key = "reasoning", label = "Reasoning", tip = "Reasoning effort for the next message. Levels depend on the agent and model; Grok and Hermes have no reasoning switch in this bridge." },
 	}
 	for i, spec in ipairs(specs) do
 		local b = MakeButton(row, "", 120, function(self)
-			WoWAI.ShowSelection(spec.key, self)
+			WoWAI.ShowSelection(spec.key, self, nil, defaults)
 		end)
 		if i == 1 then b:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -16)
 		else b:SetPoint("LEFT", buttons[i - 1], "RIGHT", 6, 0) end
@@ -2403,13 +2454,22 @@ local function MakeSelectors(parent, panel)
 		end)
 		b:SetScript("OnLeave", function() GameTooltip:Hide() end)
 		buttons[i] = b
-		ui[spec.key .. "Selector"] = b
+		buttons[spec.key] = b
 	end
 	local function Layout(_, width)
 		for _, b in ipairs(buttons) do b:SetWidth((width - 12) / 3) end
 	end
 	row:HookScript("OnSizeChanged", Layout)
 	Layout(row, row:GetWidth())
+	return row
+end
+
+local function MakeSelectors(parent, panel)
+	local row = MakeSelectorRow(parent, "WoWAISelectors")
+	row:SetPoint("TOPLEFT", panel, "TOPRIGHT", 8, 0)
+	row:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -32, -52)
+	ui.selectorRow = row
+	for _, key in ipairs({ "agent", "model", "reasoning" }) do ui[key .. "Selector"] = row.buttons[key] end
 
 	local menu = CreateFrame("Frame", "WoWAISelectionMenu", parent, "BackdropTemplate")
 	menu:SetFrameStrata("TOOLTIP")
@@ -2435,32 +2495,43 @@ local function MakeSelectors(parent, panel)
 	menu:Hide()
 	ui.selectionMenu = menu
 
-	function WoWAI.ShowSelection(key, anchor, id)
-		local c = (id and FindChat(id)) or ActiveChat()
+	function WoWAI.ShowSelection(key, anchor, id, defaults)
+		local c
+		if defaults then c = ui.defaultsDraft else c = (id and FindChat(id)) or ActiveChat() end
 		if not c then return end
-		anchor = anchor or ui[key .. "Selector"]
-		if menu:IsShown() and menu.owner == anchor and menu.key == key and menu.chatId == c.id then menu:Hide(); return end
+		if defaults and key ~= "agent" and c.agent == "" then menu:Hide(); return end
+		anchor = anchor or (defaults and ui.defaultsRow.buttons[key] or ui[key .. "Selector"])
+		local targetId = defaults and "defaults" or c.id
+		if menu:IsShown() and menu.owner == anchor and menu.key == key and menu.chatId == targetId then menu:Hide(); return end
 		if ui.chatMenu then ui.chatMenu:Hide() end
-		local o, choices = ChatOptions(c), {}
+		local agent = defaults and (c.agent ~= "" and c.agent or run.bridgeAgent) or ChatAgent(c)
+		local o, choices = (run.agentOptions or NO_OPTIONS)[agent or ""] or NO_OPTIONS, {}
+		local function Inherited(key)
+			local value = not defaults and InheritedChoice(c, key) or ""
+			return value ~= "" and value or (o[key] or "")
+		end
 		local function Choice(value, label, action)
 			table.insert(choices, { value = value, label = label, action = action })
 		end
 		local selected = c[key] or ""
 		if key == "agent" then
-			Choice("", "Default (" .. AgentName(run.bridgeAgent) .. ")")
+			Choice("", (defaults and "Bridge default (" or "Default (") .. AgentName(defaults and (run.bridgeAgent or "") or DefaultAgent()) .. ")")
 			for _, agent in ipairs(run.bridgeAgents or { "claude", "codex", "grok", "agy", "hermes" }) do Choice(agent, AgentName(agent)) end
 		elseif key == "model" then
-			Choice("", o.model and o.model ~= "" and ("Default (" .. o.model .. ")") or "Default")
+			local inherited = Inherited("model")
+			Choice("", inherited ~= "" and ("Default (" .. inherited .. ")") or "Default")
 			local models = {}
 			if c.model ~= "" then table.insert(models, c.model) end
+			if inherited ~= "" and not Contains(models, inherited) then table.insert(models, inherited) end
 			for _, model in ipairs(o.models or {}) do
 				if not Contains(models, model) then table.insert(models, model) end
 			end
 			for _, model in ipairs(models) do Choice(model, model) end
-			Choice(nil, "Custom model...", function() WoWAI.ModelPrompt(c.id) end)
+			Choice(nil, "Custom model...", function() WoWAI.ModelPrompt(c.id, defaults) end)
 		elseif key == "reasoning" then
 			if not o.reasoningLevels or #o.reasoningLevels == 0 then menu:Hide(); return end
-			Choice("", o.reasoning and o.reasoning ~= "" and ("Default (" .. o.reasoning .. ")") or "Default")
+			local inherited = Inherited("reasoning")
+			Choice("", inherited ~= "" and ("Default (" .. inherited .. ")") or "Default")
 			for _, level in ipairs(o.reasoningLevels) do Choice(level, AgentName(level)) end
 		else return end
 		local width = math.max(260, anchor:GetWidth())
@@ -2489,6 +2560,7 @@ local function MakeSelectors(parent, panel)
 			b:SetScript("OnClick", function()
 				menu:Hide()
 				if choice.action then choice.action()
+				elseif defaults then WoWAI.SetDefaultChoice(key, choice.value)
 				elseif key == "agent" then WoWAI.SetAgent(choice.value, c)
 				elseif key == "model" then WoWAI.SetModel(choice.value, c)
 				else WoWAI.SetReasoning(choice.value, c) end
@@ -2496,7 +2568,7 @@ local function MakeSelectors(parent, panel)
 			b:Show()
 		end
 		for i = #choices + 1, #menu.items do menu.items[i]:Hide() end
-		menu.owner, menu.key, menu.chatId, menu.away = anchor, key, c.id, 0
+		menu.owner, menu.key, menu.chatId, menu.away, menu.defaults = anchor, key, targetId, 0, defaults
 		menu:ClearAllPoints()
 		menu:SetPoint("TOPRIGHT", anchor, "BOTTOMRIGHT", 0, -2)
 		menu:Show()
@@ -2504,19 +2576,109 @@ local function MakeSelectors(parent, panel)
 	return row
 end
 
-function WoWAI.UpdateSelectors()
-	local c = ActiveChat()
-	if not c or not ui.agentSelector then return end
-	local o = ChatOptions(c)
+local function UpdateSelectorRow(row, c, defaults)
+	local inheritedAgent = defaults and (run.bridgeAgent or "") or DefaultAgent()
+	local agent = c.agent ~= "" and c.agent or inheritedAgent
+	local o = (run.agentOptions or NO_OPTIONS)[agent] or NO_OPTIONS
 	local function Set(button, value)
 		button.valueText = value
 		button:SetText(Display(value))
 	end
-	Set(ui.agentSelector, c.agent ~= "" and AgentName(c.agent) or ("Default (" .. AgentName(run.bridgeAgent) .. ")"))
-	Set(ui.modelSelector, c.model ~= "" and c.model or (o.model and o.model ~= "" and ("Default (" .. o.model .. ")") or "Default"))
+	local function Inherited(key)
+		local value = not defaults and InheritedChoice(c, key) or ""
+		return value ~= "" and value or (o[key] or "")
+	end
+	Set(row.buttons.agent, c.agent ~= "" and AgentName(c.agent) or ((defaults and "Bridge (" or "Default (") .. AgentName(inheritedAgent) .. ")"))
+	local model = Inherited("model")
+	local chooseAgent = defaults and c.agent == ""
+	row.buttons.model:SetEnabled(not chooseAgent)
+	Set(row.buttons.model, chooseAgent and "Choose agent" or (c.model ~= "" and c.model or (model ~= "" and ("Default (" .. model .. ")") or "Default")))
 	local supported = o.reasoningLevels and #o.reasoningLevels > 0
-	ui.reasoningSelector:SetEnabled(supported and true or false)
-	Set(ui.reasoningSelector, supported and (c.reasoning ~= "" and AgentName(c.reasoning) or (o.reasoning and o.reasoning ~= "" and ("Default (" .. o.reasoning .. ")") or "Default")) or (run.agentOptions and "Not supported" or "Connect first"))
+	row.buttons.reasoning:SetEnabled(supported and not chooseAgent and true or false)
+	local reasoning = Inherited("reasoning")
+	Set(row.buttons.reasoning, chooseAgent and "Choose agent" or (supported and (c.reasoning ~= "" and AgentName(c.reasoning) or (reasoning ~= "" and ("Default (" .. reasoning .. ")") or "Default")) or (run.agentOptions and "Not supported" or "Connect first")))
+end
+
+function WoWAI.UpdateSelectors()
+	local c = ActiveChat()
+	if c and ui.selectorRow then UpdateSelectorRow(ui.selectorRow, c) end
+	if ui.defaultsDraft and ui.defaultsRow then UpdateSelectorRow(ui.defaultsRow, ui.defaultsDraft, true) end
+end
+
+local function MakeDefaultsPanel(parent)
+	local panel = CreateFrame("Frame", "WoWAIDefaults", parent, "BackdropTemplate")
+	panel:SetSize(520, 220)
+	panel:SetPoint("CENTER")
+	panel:SetFrameStrata("DIALOG")
+	panel:SetToplevel(true)
+	panel:SetClampedToScreen(true)
+	panel:EnableMouse(true)
+	panel:SetMovable(true)
+	panel:RegisterForDrag("LeftButton")
+	panel:SetScript("OnDragStart", panel.StartMoving)
+	panel:SetScript("OnDragStop", panel.StopMovingOrSizing)
+	panel:SetBackdrop(BACKDROP)
+	panel:SetBackdropColor(0.05, 0.05, 0.07, 0.98)
+	panel:SetBackdropBorderColor(0.6, 0.6, 0.6, 1)
+	tinsert(UISpecialFrames, "WoWAIDefaults")
+	local title = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+	title:SetPoint("TOPLEFT", panel, "TOPLEFT", 16, -14)
+	title:SetText("Addon defaults")
+	local description = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	description:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -10)
+	description:SetWidth(488)
+	description:SetJustifyH("LEFT")
+	description:SetText("Used by chats whose selectors are on Default. Choose an agent to set its model and reasoning. Saved across reloads; bridge/config.json is unchanged.")
+	local row = MakeSelectorRow(panel, "WoWAIDefaultSelectors", true)
+	row:SetPoint("TOPLEFT", panel, "TOPLEFT", 16, -78)
+	row:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, -78)
+	local note = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+	note:SetPoint("TOPLEFT", row, "BOTTOMLEFT", 0, -12)
+	note:SetWidth(488)
+	note:SetJustifyH("LEFT")
+	note:SetText("Per-chat choices take priority. Pending requests keep their original settings. New chats inherit the current chat's choices.")
+	local reset = MakeButton(panel, "Bridge defaults", 132, function()
+		ui.defaultsDraft = { agent = "", model = "", reasoning = "" }
+		if ui.selectionMenu then ui.selectionMenu:Hide() end
+		WoWAI.UpdateSelectors()
+	end)
+	reset:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 16, 16)
+	local save = MakeButton(panel, "Save", 80, WoWAI.SaveDefaults)
+	save:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -16, 16)
+	local cancel = MakeButton(panel, "Cancel", 80, function() panel:Hide() end)
+	cancel:SetPoint("RIGHT", save, "LEFT", -6, 0)
+	panel:Hide()
+	panel:SetScript("OnHide", function()
+		if ui.selectionMenu and ui.selectionMenu.defaults then ui.selectionMenu:Hide() end
+		ui.defaultsDraft = nil
+	end)
+	ui.defaultsPanel, ui.defaultsRow = panel, row
+
+	function WoWAI.ShowDefaults()
+		local d = db.settings.defaults
+		ui.defaultsDraft = { agent = d.agent, model = d.model, reasoning = d.reasoning }
+		if ui.selectionMenu then ui.selectionMenu:Hide() end
+		WoWAI.Toggle(true)
+		panel:Show()
+		WoWAI.UpdateSelectors()
+	end
+
+	function WoWAI.SetDefaultChoice(key, value)
+		local d = ui.defaultsDraft
+		if not d then return end
+		value = Trim(value or "")
+		if value == "-" or value == "default" then value = "" end
+		if key == "agent" then
+			d.agent, d.model, d.reasoning = value, "", ""
+		elseif d.agent ~= "" and key == "model" then
+			d.model = value
+		elseif d.agent ~= "" and key == "reasoning" then
+			local o = ChatOptions(d)
+			if value ~= "" and not Contains(o.reasoningLevels, value) then return end
+			d.reasoning = value
+		end
+		WoWAI.UpdateSelectors()
+	end
 end
 
 
@@ -2618,6 +2780,7 @@ local function BuildUI()
 	-- we're hiding on purpose. Ignore hides caused by the whole UI going away.
 	f:SetScript("OnHide", function()
 		if ui.selectionMenu then ui.selectionMenu:Hide() end
+		if ui.defaultsPanel then ui.defaultsPanel:Hide() end
 		if ui.quitting then
 			ui.quitting = nil
 			return
@@ -2775,6 +2938,7 @@ local function BuildUI()
 		ui.chatButtons[i] = b
 	end
 	local selectors = MakeSelectors(f, panel)
+	MakeDefaultsPanel(f)
 
 
 	-- Transcript: a scrolling stack of message bubbles
@@ -2866,6 +3030,9 @@ local function BuildUI()
 	resend:SetPoint("LEFT", clear, "RIGHT", 6, 0)
 	resend:Hide()
 	ui.resend = resend
+
+	local defaults = MakeButton(f, "Defaults...", 94, WoWAI.ShowDefaults)
+	defaults:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", PANEL_W + 22, 16)
 
 	-- A named, always-present button so a keybinding can click it (see /wow-ai bind).
 	local hotkey = CreateFrame("Button", "WoWAIRefreshButton", UIParent)
@@ -3031,7 +3198,7 @@ local HELP = table.concat({
 	"/wow-ai rename [name]          rename the current chat (no name = dialog; right-clicking the chat in the left panel offers it too)",
 	"/wow-ai delete                 delete the current chat",
 	"/wow-ai cd <folder>            folder this chat's agent works in (relative to the bridge's folder; no folder = back to default). Right-clicking the chat in the left panel and picking Folder does the same",
-	"/wow-ai agent [name]           which agent this chat talks to (no name = show; default = the bridge's). Right-clicking the chat and picking Agent does the same",
+	"/wow-ai agent [name]           which agent this chat talks to (no name = show; default = saved addon default, then the bridge's). Defaults... in the window sets addon-wide agent/model/reasoning",
 	"/wow-ai reset                  next message in this chat starts a fresh agent session",
 	"/wow-ai context [on|off]       what the agent is told about your character and where you are (no argument = show it)",
 	"/wow-ai map [...]              map layers the agent drew, the route navigator and herb/ore nodes (no argument = status and subcommands; /aimap is the same)",

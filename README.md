@@ -132,7 +132,9 @@ In game: `/wow-ai` opens the window. Until the bridge has answered, a **Connect*
 
 Right-clicking a chat in the left panel opens a small menu with **Rename...**, **Folder...** and **Agent...** (right-click again to close it); the trash can on the row deletes the chat after an OK/Cancel confirm. **Folder...** sets the folder this chat's agent works in (same as `/wow-ai cd` below), **Agent...** which agent answers it (same as `/wow-ai agent`); each chat keeps its own, so you can have chats on different projects, with different agents, side by side.
 
-The **Agent**, **Model** and **Reasoning** selectors above the transcript are saved per chat; new chats inherit the current choices. **Model** offers configured models, Claude aliases and Antigravity's live catalog, plus **Custom model...** for any CLI-supported ID. **Reasoning** is available for Claude, Codex and Antigravity; Grok and Hermes show **Not supported**. Choices apply to the next message, never an in-flight request or its resend. **Default** uses the bridge / CLI setting; resetting an explicit model or reasoning choice to Default starts a fresh session so the CLI cannot retain its previous override. Changing agent clears model and reasoning choices.
+The **Agent**, **Model** and **Reasoning** selectors above the transcript are saved per chat; new chats inherit the current chat's choices. **Model** offers configured IDs, Claude aliases, and live Codex/Antigravity catalogs, plus **Custom model...**. **Reasoning** is available for Claude, Codex and Antigravity; Grok and Hermes show **Not supported**. Choices apply to future messages, never an in-flight request or its resend. Changing agent clears that chat's model and reasoning choices.
+
+Click **Defaults...** on the bottom toolbar to choose an addon-wide default agent, model and reasoning level, then **Save**. These survive `/reload` and logout in `WoWAIDB`; they do not edit `bridge/config.json`. **Cancel** discards edits; **Bridge defaults**, then Save, removes the addon overrides. Precedence is **per-chat choice → addon default for the same agent → bridge config → CLI default**. Chats left on Default follow saved defaults; explicit chat choices keep priority. Clearing a model/effort override starts a fresh session when needed so the CLI cannot retain it.
 
 | Command | What it does |
 |---|---|
@@ -141,7 +143,7 @@ The **Agent**, **Model** and **Reasoning** selectors above the transcript are sa
 | `/r <text>` | replies to the agent when it was the last to message you; otherwise the normal whisper reply |
 | `/wow-ai new [name]` | new chat = new agent session. Unnamed chats take their title from your first message |
 | `/wow-ai chat <n\|name>` | switch chats (or click the left panel; right-click a row for Rename, Folder and Agent, its trash can deletes it) |
-| `/wow-ai agent [claude\|codex\|grok\|agy\|hermes]` | which agent this chat talks to; no name shows the current one and the bridge's default, `default` goes back to the bridge's. A chat that changes agent starts a fresh session with it |
+| `/wow-ai agent [claude\|codex\|grok\|agy\|hermes]` | which agent this chat talks to; no name shows the current one, `default` uses the saved addon default (or the bridge's when unset). Changing agent starts a fresh session |
 | `/wow-ai cd <folder>` | folder this chat's agent works in (**Folder...** after right-clicking the chat opens the same thing as a dialog). Relative to the bridge's folder (`/wow-ai cd realms`, `/wow-ai cd ../other`), `~` works, a full path too; `/wow-ai cd` alone goes back to the bridge's default. A chat that changes folder starts a fresh session there |
 | `/wow-ai reset` | wipe this chat's agent memory, keep the transcript |
 | `/wow-ai context [on\|off]` | show what the agent is told about your character and location, or turn it on/off |

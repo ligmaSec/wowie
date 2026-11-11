@@ -511,6 +511,99 @@ test('selector changes leave an in-flight request unchanged when resent, includi
   assert.equal(nextFlags.reasoning, 'low');
 });
 
+function connectAgentOptions(vm) {
+  vm.run('STUB.RunTimers()');
+  const agentOptions = A.selectionOptions({ agents: {
+    claude: { model: 'sonnet' },
+    codex: { models: ['code-model', 'review-model'] },
+    agy: { models: ['gemini-model'] },
+  } });
+  vm.run(`STUB.onLoadAddOn = function()
+    ${P.luaTable('WoWAI_SlotData', [], { now: vm.num('time()') * 1000, agent: 'claude', agents: A.agentIds(), agentOptions })}
+  end`);
+  vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
+}
+
+function pickSelection(vm, key, value, defaults = false) {
+  const row = defaults ? 'WoWAIDefaultSelectors' : 'WoWAISelectors';
+  vm.run(`
+    local b = ${row}.buttons[${P.luaStr(key)}]
+    b.scripts.OnClick(b)
+    for _, item in ipairs(WoWAISelectionMenu.items) do
+      if item.shown and item.value == ${P.luaStr(value)} then item.scripts.OnClick(item); return end
+    end
+    error("missing ${key} selection")
+  `);
+}
+
+test('addon defaults persist, per-chat choices win, and changing defaults cannot rewrite an in-flight request', () => {
+  const vm = newVM();
+  login(vm);
+  connectAgentOptions(vm);
+  vm.run('WoWAI.ShowDefaults()');
+  pickSelection(vm, 'agent', 'codex', true);
+  pickSelection(vm, 'model', 'code-model', true);
+  pickSelection(vm, 'reasoning', 'high', true);
+  vm.run('WoWAI.SaveDefaults(); WoWAI.Send("inherited original")');
+  const original = stripRecords(vm).find(r => r.text === 'inherited original');
+  assert.equal(P.parseFlags(original.flags).agent, 'codex');
+  assert.equal(P.parseFlags(original.flags).model, 'code-model');
+  assert.equal(P.parseFlags(original.flags).reasoning, 'high');
+  vm.run('STUB.FireEvent("ADDON_LOADED", "WoWAI"); STUB.FireEvent("PLAYER_LOGIN")');
+  connectAgentOptions(vm);
+  assert.equal(vm.evaluate('WoWAIDB.settings.defaults.model'), 'code-model', 'initialization preserves saved defaults');
+  vm.run('WoWAI.ShowDefaults()');
+  pickSelection(vm, 'model', 'review-model', true);
+  pickSelection(vm, 'reasoning', 'low', true);
+  vm.run('WoWAI.SaveDefaults(); WoWAI.Resend()');
+  assert.deepEqual(stripRecords(vm).find(r => r.id === original.id), original, 'pending settings are frozen even when addon defaults change');
+  vm.run('SlashCmdList.WOWAI("cancel"); WoWAI.Send("new defaults")');
+  const flags = text => P.parseFlags(stripRecords(vm).find(r => r.text === text).flags);
+  assert.equal(flags('new defaults').model, 'review-model');
+  assert.equal(flags('new defaults').reasoning, 'low');
+  vm.run('SlashCmdList.WOWAI("cancel"); WoWAI.ShowDefaults()');
+  pickSelection(vm, 'model', '', true);
+  pickSelection(vm, 'reasoning', '', true);
+  vm.run('WoWAI.SaveDefaults(); WoWAI.Send("cleared defaults")');
+  assert.equal(flags('cleared defaults').newSession, true, 'cleared overrides cannot stick inside a resumed CLI');
+  assert.equal(flags('cleared defaults').model, undefined);
+  assert.equal(flags('cleared defaults').reasoning, undefined);
+  vm.run('SlashCmdList.WOWAI("cancel"); WoWAI.SetModel("per-chat-model"); WoWAI.SetReasoning("high"); WoWAI.Send("per-chat choices")');
+  assert.equal(flags('per-chat choices').model, 'per-chat-model');
+  assert.equal(flags('per-chat choices').reasoning, 'high');
+});
+
+test('default agent changes preserve provider-specific chat choices, and cancelled defaults stay unapplied', () => {
+  const vm = newVM();
+  login(vm);
+  connectAgentOptions(vm);
+  vm.run('WoWAI.ShowDefaults()');
+  pickSelection(vm, 'agent', 'codex', true);
+  pickSelection(vm, 'model', 'code-model', true);
+  pickSelection(vm, 'reasoning', 'high', true);
+  vm.run('WoWAI.SaveDefaults(); WoWAI.SetModel("codex-only-model"); WoWAI.ShowDefaults()');
+  pickSelection(vm, 'agent', 'agy', true);
+  pickSelection(vm, 'model', 'gemini-model', true);
+  pickSelection(vm, 'reasoning', 'low', true);
+  vm.run('WoWAI.SaveDefaults(); WoWAI.Send("preserved override")');
+  const flags = text => P.parseFlags(stripRecords(vm).find(r => r.text === text).flags);
+  assert.equal(flags('preserved override').agent, 'codex', 'an agent-specific override must not be sent to the new default provider');
+  assert.equal(flags('preserved override').model, 'codex-only-model');
+  assert.equal(flags('preserved override').reasoning, undefined, 'Antigravity reasoning does not leak into an explicit Codex chat');
+  assert.equal(flags('preserved override').newSession, true, 'the old inherited effort is cleared in the CLI too');
+  vm.run('SlashCmdList.WOWAI("cancel"); WoWAI.SetAgent("default"); WoWAI.ShowDefaults()');
+  pickSelection(vm, 'agent', 'claude', true);
+  pickSelection(vm, 'model', 'opus', true);
+  vm.run('WoWAIDefaults:Hide(); WoWAI.NewChat("Uses defaults"); WoWAI.Send("after cancel")');
+  assert.equal(flags('after cancel').agent, 'agy');
+  assert.equal(flags('after cancel').model, 'gemini-model');
+  assert.equal(flags('after cancel').reasoning, 'low');
+  vm.run('SlashCmdList.WOWAI("cancel"); WoWAI.SetAgent("claude"); WoWAI.Send("other provider")');
+  assert.equal(flags('other provider').agent, 'claude');
+  assert.equal(flags('other provider').model, undefined, 'another agent uses its own bridge default');
+  assert.equal(flags('other provider').reasoning, undefined);
+});
+
 test('replies saved under the old "claude" role are read as assistant replies from Claude', () => {
   const vm = newVM();
   vm.run('WoWAIDB = { chats = { { id = "c1", name = "Old", cwd = "", history = { { role = "user", text = "q", id = 1, t = 1 }, { role = "claude", text = "a", id = 1, t = 2 } }, unread = 0, created = 1 } }, activeChat = "c1", settings = {} }');
