@@ -343,8 +343,6 @@ test('until the bridge answers, Connect replaces Send and a message stays in the
   login(vm);
   vm.run('WoWAI.Toggle(true)');
   assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'false');
-  const texts = () => vm.evaluate('table.concat(STUB.texts, "|")');
-  assert.ok(texts().includes('Not connected - start the bridge, then click Connect'));
   // Sending while disconnected puts the text back in the box and starts a connect attempt.
   vm.run('WoWAIInput:SetText("fix the bug"); WoWAI.SendFromInput()');
   assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null, 'nothing sent');
@@ -352,12 +350,9 @@ test('until the bridge answers, Connect replaces Send and a message stays in the
   const hello = stripRecords(vm);
   assert.equal(hello.length, 1);
   assert.match(hello[0].flags, /^h;nonce=[A-Za-z0-9_-]{8,64};c$/, 'a hello went out instead');
-  assert.ok(texts().includes('Connecting...'));
-  assert.ok(texts().includes('your message goes out as soon as it answers'));
   // No answer within CONNECT_WAIT: the attempt is reported as failed, Connect is back.
   vm.run('STUB.now = STUB.now + 20; STUB.Tick()');
   assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'false');
-  assert.ok(texts().includes('No answer from the bridge'));
   assert.equal(vm.evaluate('WoWAIInput:GetText()'), 'fix the bug', 'message still in the box after a failed attempt');
   // Click Connect again; this time the bridge answers the hello poll. Nothing was
   // queued by that click, so the message waits for the user.
@@ -496,8 +491,6 @@ test('a chat can pick its agent: the strip says so, replies are labelled by thei
   nextSlot(vm, slot());
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
   assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true');
-  const texts = () => vm.evaluate('table.concat(STUB.texts, "|")');
-  assert.ok(texts().includes('agent: Claude (bridge default)'), 'the cwd line names the bridge default');
   // Without an agent of its own the chat sends no agent flag, and the reply is labelled Claude.
   vm.run('WoWAI.Send("hello")');
   const chatId = vm.evaluate('WoWAIDB.chats[1].id');
@@ -517,7 +510,6 @@ test('a chat can pick its agent: the strip says so, replies are labelled by thei
   rec = stripRecords(vm).find(r => r.text === 'now with codex');
   assert.equal(P.parseFlags(rec.flags).agent, 'codex');
   assert.equal(vm.evaluate('WoWAIDB.outbox.agent'), 'codex');
-  assert.ok(texts().includes('agent: Codex   mode: pixel'));
   const id2 = vm.num('WoWAIDB.chats[1].pendingId');
   nextSlot(vm, slot(`{ chat = "${chatId}", id = ${id2}, nonce = "${vm.evaluate('WoWAIDB.chats[1].request.nonce')}", status = "done", text = "codex here", agent = "codex" }`));
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
@@ -663,7 +655,7 @@ test('default agent changes preserve provider-specific chat choices, and cancell
   vm.run('SlashCmdList.WOWAI("cancel"); WoWAI.SetAgent("default"); WoWAI.ShowDefaults()');
   pickSelection(vm, 'agent', 'claude', true);
   pickSelection(vm, 'model', 'opus', true);
-  vm.run('WoWAIDefaults:Hide(); WoWAI.NewChat("Uses defaults"); WoWAI.Send("after cancel")');
+  vm.run('WoWAIDefaultsCancel:GetScript("OnClick")(WoWAIDefaultsCancel); WoWAI.NewChat("Uses defaults"); WoWAI.Send("after cancel")');
   assert.equal(flags('after cancel').agent, 'agy');
   assert.equal(flags('after cancel').model, 'gemini-model');
   assert.equal(flags('after cancel').reasoning, 'low');
@@ -680,9 +672,6 @@ test('replies saved under the old "claude" role are read as assistant replies fr
   assert.equal(vm.evaluate('WoWAIDB.chats[1].history[2].role'), 'assistant');
   assert.equal(vm.evaluate('WoWAIDB.chats[1].history[2].agent'), 'claude');
   assert.equal(vm.evaluate('WoWAIDB.chats[1].agent'), '');
-  // Before the bridge has said which agent it runs, the label falls back to "AI".
-  vm.run('WoWAI.Toggle(true)');
-  assert.ok(vm.evaluate('table.concat(STUB.texts, "|")').includes('|Claude|'), 'the old reply is labelled Claude');
 });
 
 test('free text that starts with a command word is sent as a message; exact commands still run', () => {
@@ -862,7 +851,7 @@ test('chat management commands: new, chat, rename, delete, clear, copy', () => {
   assert.equal(vm.evaluate('WoWAICopyBox.text'), 'some reply');
 });
 
-test('chat rows: right-click opens a menu that renames or sets the folder of that chat, the trash can asks before deleting', () => {
+test('chat actions target the chosen conversation and deletion waits for confirmation', () => {
   const vm = newVM();
   login(vm);
   vm.run('SlashCmdList.WOWAI("new Realms")');
@@ -873,7 +862,6 @@ test('chat rows: right-click opens a menu that renames or sets the folder of tha
   vm.run(`WoWAI.ShowChatMenu("${first}", WoWAIFrame)`);
   assert.equal(vm.evaluate('WoWAIChatMenu.shown'), 'true');
   assert.equal(vm.evaluate('WoWAIChatMenu.chatId'), first);
-  assert.equal(vm.evaluate('WoWAIChatMenu.title.text'), 'Chat 1');
   vm.run(`WoWAI.ShowChatMenu("${first}", WoWAIFrame)`);
   assert.equal(vm.evaluate('WoWAIChatMenu.shown'), 'false');
   // Rename and Folder prompts target the chat they were opened for.
@@ -888,7 +876,7 @@ test('chat rows: right-click opens a menu that renames or sets the folder of tha
   vm.run(`WoWAI.FolderPrompt("${first}")`);
   assert.equal(vm.evaluate('STUB.popup.which'), 'WOWAI_FOLDER');
   assert.equal(vm.evaluate('STUB.popup.data.id'), first);
-  // The X asks first: nothing happens until OK, then only that chat goes and the active one stays.
+  // Delete asks first: nothing happens until OK, then only that chat goes and the active one stays.
   vm.run(`WoWAI.ConfirmDelete("${first}")`);
   assert.equal(vm.evaluate('STUB.popup.which'), 'WOWAI_DELETE');
   assert.equal(vm.num('#WoWAIDB.chats'), 2);
@@ -1122,4 +1110,182 @@ test('a migrated pending question without Sharing also resumes automatically onc
   assert.equal(vm.evaluate('WoWAIDB.chats[1].request.profile'), null);
   assert.match(P.parseFlags(resumed.flags).nonce, /^[A-Za-z0-9_-]{8,64}$/);
   assert.equal(vm.evaluate('WoWAIDB.chats[1].resumePending'), null, 'one-time migration resume is consumed');
+});
+
+test('composer shortcuts add newlines, send explicitly, and release focus without losing text', () => {
+  const vm = newVM();
+  login(vm);
+  connect(vm);
+  vm.run('WoWAI.Toggle(true); BEFORE = WoWAIDB.lastSeq; WoWAIStarter1:GetScript("OnClick")(WoWAIStarter1)');
+  assert.equal(vm.num('WoWAIDB.lastSeq'), vm.num('BEFORE'), 'a starter only fills the composer');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null);
+  assert.ok(vm.evaluate('WoWAIInput:GetText()'));
+  vm.run(`
+    WoWAIInput:SetText("one"); WoWAIInput:SetCursorPosition(3);
+    STUB.shift = true; WoWAIInput:GetScript("OnEnterPressed")(WoWAIInput);
+    WoWAIInput:Insert("two")
+  `);
+  assert.equal(vm.evaluate('WoWAIInput:GetText()'), 'one\ntwo');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null, 'Shift+Enter does not submit');
+  vm.run('STUB.shift = false; WoWAIInput:GetScript("OnEnterPressed")(WoWAIInput)');
+  assert.ok(stripRecords(vm).some(r => r.text === 'one\ntwo'));
+  assert.equal(vm.evaluate('WoWAIInput:GetText()'), '');
+  assert.equal(vm.evaluate('STUB.focus'), null);
+  vm.run('WoWAIInput:SetText("keep this"); WoWAIInput:SetFocus(); WoWAIInput:GetScript("OnEscapePressed")(WoWAIInput)');
+  assert.equal(vm.evaluate('WoWAIInput:GetText()'), 'keep this');
+  assert.equal(vm.evaluate('STUB.focus'), null);
+  assert.equal(vm.evaluate('WoWAIFrame:IsShown()'), 'true');
+});
+
+test('drafts preserve multiline whitespace through chat switches and reload initialization', () => {
+  const vm = newVM();
+  login(vm);
+  const draft = '  first line\n    indented line\n';
+  vm.run(`WoWAIInput:SetText(${P.luaStr(draft)}); FIRST = WoWAIDB.activeChat; WoWAI.NewChat("Second")`);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].draft'), draft);
+  vm.run('WoWAIInput:SetText("second draft"); WoWAI.SwitchChat(FIRST)');
+  assert.equal(vm.evaluate('WoWAIInput:GetText()'), draft);
+  assert.equal(vm.evaluate('WoWAIDB.chats[2].draft'), 'second draft');
+  vm.run('STUB.FireEvent("ADDON_LOADED", "WoWAI"); STUB.FireEvent("PLAYER_LOGIN")');
+  assert.equal(vm.evaluate('WoWAIInput:GetText()'), draft);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].draft'), draft, 'the active draft remains saved too');
+});
+
+test('checking a pending reply preserves the next draft and never submits it automatically', () => {
+  const vm = newVM();
+  login(vm);
+  connect(vm);
+  vm.run('WoWAI.Send("first question")');
+  const id = vm.num('WoWAIDB.chats[1].pendingId');
+  const nonce = vm.evaluate('WoWAIDB.chats[1].request.nonce');
+  const chat = vm.evaluate('WoWAIDB.activeChat');
+  const draft = '  next question\n  with indentation  ';
+  vm.run(`WoWAIInput:SetText(${P.luaStr(draft)}); BEFORE = WoWAIDB.lastSeq; WoWAIInput:GetScript("OnEnterPressed")(WoWAIInput)`);
+  assert.equal(vm.evaluate('WoWAIInput:GetText()'), draft);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].draft'), draft);
+  nextSlot(vm, `{now=time(),replies={{chat="${chat}",id=${id},nonce="${nonce}",status="done",text="first answer"}}}`);
+  vm.run('WoWAIInput:GetScript("OnEnterPressed")(WoWAIInput)');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null);
+  assert.equal(vm.evaluate('WoWAIInput:GetText()'), draft);
+  assert.equal(vm.num('WoWAIDB.lastSeq'), vm.num('BEFORE'), 'reply checks cannot submit the next draft');
+  vm.run('WoWAICancelWait:GetScript("OnClick")(WoWAICancelWait)');
+  assert.equal(vm.evaluate('WoWAIInput:GetText()'), draft);
+});
+
+test('filtered conversation rows retain their target IDs and a no-match search changes no data', () => {
+  const vm = newVM();
+  login(vm);
+  vm.run('for i = 2, 16 do WoWAI.NewChat("Project " .. i) end');
+  assert.equal(vm.evaluate('WoWAIChatRow16:IsShown()'), 'true', 'all saved conversations have scrollable rows');
+  vm.run('WoWAIChatSearch:SetText("project 12")');
+  assert.equal(vm.evaluate('WoWAIChatRow1.chatId'), vm.evaluate('WoWAIDB.chats[12].id'));
+  assert.equal(vm.evaluate('WoWAIChatRow2:IsShown()'), 'false');
+  vm.run('WoWAIChatRowMenu1:GetScript("OnClick")(WoWAIChatRowMenu1)');
+  assert.equal(vm.evaluate('WoWAIChatMenu.chatId'), vm.evaluate('WoWAIDB.chats[12].id'));
+  vm.run('WoWAIChatRow1:GetScript("OnClick")(WoWAIChatRow1, "LeftButton")');
+  assert.equal(vm.evaluate('WoWAIDB.activeChat'), vm.evaluate('WoWAIDB.chats[12].id'));
+  vm.run('WoWAIChatSearch:SetText("nothing matches this")');
+  assert.equal(vm.evaluate('WoWAIChatRow1:IsShown()'), 'false');
+  assert.equal(vm.num('#WoWAIDB.chats'), 16);
+  vm.run('WoWAIChatSearch:SetText("")');
+  assert.equal(vm.evaluate('WoWAIChatRow16.chatId'), vm.evaluate('WoWAIDB.chats[16].id'));
+});
+
+test('transcript redraws preserve reading position, remember each chat, and follow only at latest', () => {
+  const vm = newVM();
+  login(vm);
+  vm.run(`
+    FIRST = WoWAIDB.activeChat;
+    table.insert(WoWAIDB.chats[1].history, {role="assistant",text="older reply"});
+    STUB.transcriptRange = 1000;
+    WoWAIScroll.GetVerticalScrollRange = function() return STUB.transcriptRange end;
+    WoWAIScroll.UpdateScrollChildRect = function()
+      if STUB.nextTranscriptRange then STUB.transcriptRange = STUB.nextTranscriptRange; STUB.nextTranscriptRange = nil end
+    end;
+    WoWAIScroll:SetVerticalScroll(120); WoWAI.Render()
+  `);
+  assert.equal(vm.num('WoWAIScroll:GetVerticalScroll()'), 120);
+  vm.run('table.insert(WoWAIDB.chats[1].history, {role="assistant",text="another reply"}); STUB.nextTranscriptRange = 1200; WoWAI.Render(); STUB.RunTimers()');
+  assert.equal(vm.num('WoWAIScroll:GetVerticalScroll()'), 120, 'a new message must not yank an older transcript');
+  assert.equal(vm.evaluate('WoWAILatest:IsShown()'), 'true');
+  vm.run('WoWAI.NewChat("Other"); WoWAI.SwitchChat(FIRST)');
+  assert.equal(vm.num('WoWAIScroll:GetVerticalScroll()'), 120);
+  vm.run('WoWAILatest:GetScript("OnClick")(WoWAILatest)');
+  assert.equal(vm.num('WoWAIScroll:GetVerticalScroll()'), 1200);
+  vm.run('STUB.nextTranscriptRange = 1400; WoWAI.Render()');
+  assert.equal(vm.num('WoWAIScroll:GetVerticalScroll()'), 1400);
+  assert.equal(vm.evaluate('WoWAILatest:IsShown()'), 'false');
+});
+
+test('scroll controls bound wheel and drag positions and reclamp when content shrinks', () => {
+  const vm = newVM();
+  login(vm);
+  vm.run(`
+    STUB.scrollMaximum = 600
+    WoWAIScroll.GetVerticalScrollRange = function() return STUB.scrollMaximum end
+    function ResizeScrollContent()
+      for _, hook in ipairs(WoWAIScroll.hooks.OnScrollRangeChanged or {}) do hook(WoWAIScroll, 0, STUB.scrollMaximum) end
+    end
+    ResizeScrollContent()
+    WoWAIScroll:GetScript("OnMouseWheel")(WoWAIScroll, -1)
+  `);
+  assert.ok(vm.num('WoWAIScroll:GetVerticalScroll()') > 0);
+  vm.run('WoWAIScroll.bar:SetValue(500)');
+  assert.equal(vm.num('WoWAIScroll:GetVerticalScroll()'), 500);
+  vm.run('WoWAIScroll:GetScript("OnMouseWheel")(WoWAIScroll, -1000)');
+  assert.equal(vm.num('WoWAIScroll:GetVerticalScroll()'), 600);
+  vm.run('WoWAIScroll:GetScript("OnMouseWheel")(WoWAIScroll, 1000)');
+  assert.equal(vm.num('WoWAIScroll:GetVerticalScroll()'), 0);
+  vm.run('WoWAIScroll.bar:SetValue(500); STUB.scrollMaximum = 100; ResizeScrollContent()');
+  assert.equal(vm.num('WoWAIScroll:GetVerticalScroll()'), 100);
+  assert.equal(vm.num('WoWAIScroll.bar:GetValue()'), 100);
+  vm.run('STUB.scrollMaximum = 0; ResizeScrollContent()');
+  assert.equal(vm.num('WoWAIScroll:GetVerticalScroll()'), 0);
+  assert.equal(vm.evaluate('WoWAIScroll.bar:IsShown()'), 'false');
+});
+
+test('discussion selection is in place, read only and stable across redraws', () => {
+  const vm = newVM();
+  login(vm);
+  const text = '  Épée | literal pipes\n    indented answer\nlast line  ';
+  vm.run(`
+    WoWAI.Toggle(true)
+    table.insert(WoWAIDB.chats[1].history, {role="assistant",text=${P.luaStr(text)}})
+    WoWAI.Render()
+    WoWAIMessageText1:SetFocus()
+    WoWAIMessageText1:HighlightText(4, 16)
+    local up = WoWAIMessageText1:GetParent():GetScript("OnMouseUp")
+    if up then up(WoWAIMessageText1:GetParent(), "LeftButton") end
+    WoWAI.Render()
+  `);
+  assert.equal(vm.evaluate('WoWAIMessageText1:GetText()'), text);
+  assert.equal(vm.evaluate('WoWAIMessageText1:HasFocus()'), 'true');
+  assert.equal(vm.num('WoWAIMessageText1.highlightStart'), 4);
+  assert.equal(vm.num('WoWAIMessageText1.highlightEnd'), 16);
+  assert.equal(vm.evaluate('WoWAICopy and WoWAICopy:IsShown()'), null, 'selection cannot require a modal copy window');
+  vm.run('WoWAIMessageText1:SetText("accidental typing or paste")');
+  assert.equal(vm.evaluate('WoWAIMessageText1:GetText()'), text);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].history[1].text'), text);
+  vm.run('WoWAIMessageText1:GetScript("OnEscapePressed")(WoWAIMessageText1)');
+  assert.equal(vm.evaluate('WoWAIMessageText1:HasFocus()'), 'false');
+  assert.equal(vm.evaluate('WoWAIFrame:IsShown()'), 'true', 'selection escape releases focus without closing the workspace');
+});
+
+test('recycled discussion bodies clear selections before binding another message', () => {
+  const vm = newVM();
+  login(vm);
+  vm.run(`
+    WoWAI.Toggle(true)
+    table.insert(WoWAIDB.chats[1].history, {role="assistant",text="first answer"})
+    WoWAI.Render()
+    WoWAIMessageText1:SetFocus()
+    WoWAIMessageText1:HighlightText(0, 5)
+    WoWAI.NewChat("Second")
+    table.insert(WoWAIDB.chats[2].history, {role="assistant",text="second answer"})
+    WoWAI.Render()
+  `);
+  assert.equal(vm.evaluate('WoWAIMessageText1:GetText()'), 'second answer');
+  assert.equal(vm.evaluate('WoWAIMessageText1:HasFocus()'), 'false');
+  assert.equal(vm.evaluate('WoWAIMessageText1.highlightStart'), null);
+  assert.equal(vm.evaluate('WoWAIMessageText1.highlightEnd'), null);
 });

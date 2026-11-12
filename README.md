@@ -38,7 +38,7 @@ The bridge drives whichever of these you have installed; each chat can use a dif
 | **Antigravity** (`agy`) | `agy -p=<prompt> --output-format stream-json`, resumed with `--conversation` | Antigravity permission switches | no |
 | **Hermes** (`hermes`) | `hermes chat --query-file -`, resumed with `--resume` | default only; the bridge never uses `--yolo` | no |
 
-`agent` in `bridge/config.json` is the default (`claude`). Use the **Agent** selector above the transcript to switch the current chat, or `/wow-ai agent codex` / **Agent...** in a chat's right-click menu. **Model** and **Reasoning** beside it configure the next message. The reply bubbles and game-chat echo are labelled with whoever answered. Changing agent starts a fresh session (the transcript stays). Install notes, CLI switches and limits are in [docs/AGENTS.md](docs/AGENTS.md).
+`agent` in `bridge/config.json` is the default (`claude`). Use the **Agent** selector in the discussion header to switch the current chat, or `/wow-ai agent codex` / **Agent...** in its conversation menu. **Model** and **Reasoning** beside it configure the next message. Reply bubbles and game-chat echo identify whoever answered. Changing agent starts a fresh session while keeping the transcript. Install notes, CLI switches and limits are in [docs/AGENTS.md](docs/AGENTS.md).
 
 ## Requirements
 
@@ -124,17 +124,19 @@ cd C:\path\to\realms
 wow-ai
 ```
 
-Every chat that hasn't picked its own folder now works in `realms`, and the panel's cwd line shows it. `wow-ai --project <dir>` names the folder explicitly; `npm start` inside this repo falls back to `defaultCwd` in the config. Only one bridge can run at a time (two would fight over the screen and the slot files), so this sets the default folder rather than giving you one bridge per project.
+Every chat that hasn't picked its own folder now works in `realms`, and the workspace header shows it. `wow-ai --project <dir>` names the folder explicitly; `npm start` inside this repo falls back to `defaultCwd` in the config. Only one bridge can run at a time (two would fight over the screen and the slot files), so this sets the default folder rather than giving you one bridge per project.
 
 ## Use
 
-In game: `/wow-ai` opens the window. Until the bridge has answered, a **Connect** button sits where Send would be: start the bridge, click it, and the light turns green (a message typed before that stays in the box). Then click the input box, type, Enter. The reply arrives with the whisper sound; the window's light shows the bridge state (green/yellow/red, hover for details), and **Reconnect** shows up if the bridge goes quiet.
+In game, `/wow-ai` opens the wow-ai workspace. Its header shows a labeled connection state; **Connect** appears beside the composer until the bridge answers. Start the bridge and click Connect. Messages written before connection stay in the box. **Connection...** holds reconnect, check/retry and reload recovery actions instead of crowding the main toolbar.
 
-Right-clicking a chat in the left panel opens a small menu with **Rename...**, **Folder...** and **Agent...** (right-click again to close it); the trash can on the row deletes the chat after an OK/Cancel confirm. **Folder...** sets the folder this chat's agent works in (same as `/wow-ai cd` below), **Agent...** which agent answers it (same as `/wow-ai agent`); each chat keeps its own, so you can have chats on different projects, with different agents, side by side.
+The **Conversations** sidebar is searchable and scrollable. Click **New chat**, choose a conversation, or open its visible **...** menu (right-click also works) for rename, working folder, agent, copy, clear transcript, fresh agent session and delete actions. Destructive menu actions ask for confirmation. Each chat retains its own project, agent choices, transcript and multiline draft.
 
-The **Agent**, **Model** and **Reasoning** selectors above the transcript are saved per chat; new chats inherit the current chat's choices. **Model** offers configured IDs, Claude aliases, and live Codex/Antigravity catalogs, plus **Custom model...**. **Reasoning** is available for Claude, Codex and Antigravity; Grok and Hermes show **Not supported**. Choices apply to future messages, never an in-flight request or its resend. Changing agent clears that chat's model and reasoning choices.
+The compact **Agent**, **Model** and **Reasoning** selectors in the discussion header configure the **next message** in this chat. Pickers are searchable, include inherited values, and still offer a custom model ID. Model choices include configured IDs, Claude aliases, and live Codex/Antigravity catalogs; unsupported reasoning controls are disabled. Changing agent clears its model/effort overrides. Already-pending requests and resends keep their original settings.
 
-Click **Defaults...** on the bottom toolbar to choose an addon-wide default agent, model and reasoning level, then **Save**. These survive `/reload` and logout in `WoWAIDB`; they do not edit `bridge/config.json`. **Cancel** discards edits; **Bridge defaults**, then Save, removes the addon overrides. Precedence is **per-chat choice → addon default for the same agent → bridge config → CLI default**. Chats left on Default follow saved defaults; explicit chat choices keep priority. Clearing a model/effort override starts a fresh session when needed so the CLI cannot retain it.
+The discussion takes most of the window, with a compact multiline composer below it. **Enter** sends, **Shift+Enter** inserts a newline, and **Esc** releases keyboard focus without discarding a draft. One bottom action row separates connection recovery, status, **Cancel wait**, and Send/Connect/**Check reply**, including while disconnected with a pending request. Checking a reply keeps the next-message draft; cancel stops local waiting, not the external agent. Reading older messages does not snap to the bottom; **Latest** in the header returns to the newest reply without covering discussion text. The minimized bar retains its **Open** button and unread/working state.
+
+Click **Settings** for addon-wide agent/model/reasoning defaults, then **Save**. **Cancel** discards edits; **Use bridge defaults**, then Save, removes addon overrides. These choices survive `/reload` and logout in `WoWAIDB`, without editing `bridge/config.json`. Precedence remains **per-chat choice → addon default for the same agent → bridge config → CLI default**. Clearing a model/effort override starts a fresh session when necessary so a resumed CLI cannot retain it. This redesign changes only wow-ai's own windows; WoW's game UI, maps and other addons are unchanged.
 
 | Command | What it does |
 |---|---|
@@ -142,7 +144,7 @@ Click **Defaults...** on the bottom toolbar to choose an addon-wide default agen
 | `/ai <text>` | send from the normal chat box (`/wow-ai <text>` is the same). `/ai` is a full alias, so `/ai agent grok` or `/ai cd realms` work too; a message that merely starts with a command word, like `/ai help me with this macro` or `/ai delete the unused imports`, is still sent as a message because the rest of the line doesn't fit that command |
 | `/r <text>` | replies to the agent when it was the last to message you; otherwise the normal whisper reply |
 | `/wow-ai new [name]` | new chat = new agent session. Unnamed chats take their title from your first message |
-| `/wow-ai chat <n\|name>` | switch chats (or click the left panel; right-click a row for Rename, Folder and Agent, its trash can deletes it) |
+| `/wow-ai chat <n\|name>` | switch chats (or choose one in Conversations; its **...** menu exposes chat actions) |
 | `/wow-ai agent [claude\|codex\|grok\|agy\|hermes]` | which agent this chat talks to; no name shows the current one, `default` uses the saved addon default (or the bridge's when unset). Changing agent starts a fresh session |
 | `/wow-ai cd <folder>` | folder this chat's agent works in (**Folder...** after right-clicking the chat opens the same thing as a dialog). Relative to the bridge's folder (`/wow-ai cd realms`, `/wow-ai cd ../other`), `~` works, a full path too; `/wow-ai cd` alone goes back to the bridge's default. A chat that changes folder starts a fresh session there |
 | `/wow-ai reset` | wipe this chat's agent memory, keep the transcript |
@@ -158,7 +160,7 @@ Click **Defaults...** on the bottom toolbar to choose an addon-wide default agen
 | `/wow-ai diag`, `/wow-ai slots` | transport diagnostics |
 | `/wow-ai help` | the full list |
 
-Click any message, or `/wow-ai copy` for the last reply, to open it in a selectable box for Ctrl+C.
+Drag-select text directly inside a message and press **Ctrl+C**; no copy dialog is required. Message text is read-only, retains literal text/indentation, and stays selected across unchanged redraws. **Esc** releases message focus. Optional **Copy latest reply** in the chat menu and `/wow-ai copy` still open the separate whole-reply copy box. Drag the window by its header, not by discussion text.
 
 ### Short in the chat, full in the window
 
@@ -166,7 +168,7 @@ Every run tells the agent that only a short summary of its reply is printed in t
 
 ### Choose what the AI knows
 
-Click **Sharing...** on the bottom toolbar. Its searchable checkboxes cover 26 built-in information categories plus native API namespaces discovered from your client. The master checkbox pauses sharing without erasing your choices. **Common defaults** restores conservative choices; **Clear choices** removes all selected scopes, including saved API scopes that are not currently available.
+Click **Sharing** in the workspace header. **Character**, **Private / Social**, **Advanced API** and **Selected** views organize the 26 built-in categories and native API scopes discovered from your client; search filters the current view. Checkmarks and counts update immediately, and large catalogs reuse only visible rows. The master **Sharing on / paused** control pauses access without erasing your editable choices. **Common defaults** restores conservative choices; **Clear choices** removes every selected scope, including saved API scopes that are not currently available. Permissions save immediately—there is no separate Save action.
 
 | Information | Default | Availability |
 |---|---|---|

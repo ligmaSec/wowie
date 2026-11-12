@@ -28,25 +28,54 @@ local function NewObject(kind, name, parent)
 	if parent and type(parent) == "table" and parent.children then table.insert(parent.children, o) end
 	return o
 end
+local function RunScript(self, event, ...)
+	if self.scripts[event] then self.scripts[event](self, ...) end
+	for _, hook in ipairs(self.hooks[event] or {}) do hook(self, ...) end
+end
+
 
 function Methods.SetScript(self, name, fn) self.scripts[name] = fn end
 function Methods.GetScript(self, name) return self.scripts[name] end
 function Methods.HookScript(self, name, fn) self.hooks[name] = self.hooks[name] or {}; table.insert(self.hooks[name], fn) end
 function Methods.RegisterEvent(self, ev) self.events[ev] = true end
 function Methods.UnregisterEvent(self, ev) self.events[ev] = nil end
-function Methods.Show(self) self.shown = true end
+function Methods.Show(self)
+	local was = self.shown
+	self.shown = true
+	if not was then RunScript(self, "OnShow") end
+end
 function Methods.Hide(self)
 	local was = self.shown
 	self.shown = false
-	if was and self.scripts.OnHide then self.scripts.OnHide(self) end
+	if was then RunScript(self, "OnHide") end
 end
 function Methods.SetShown(self, v) if v then self:Show() else self:Hide() end end
 function Methods.IsShown(self) return self.shown end
 function Methods.IsVisible(self) return self.shown end
-function Methods.SetText(self, t) self.text = t; table.insert(STUB.texts, tostring(t)) end
+function Methods.SetText(self, t)
+	local changed = self.text ~= t
+	self.text = t
+	if self.fontString then self.fontString.text = t end
+	table.insert(STUB.texts, tostring(t))
+	if self.kind == "EditBox" then
+		self.cursorPosition = #tostring(t or "")
+		self.highlightStart, self.highlightEnd = nil, nil
+		if changed then RunScript(self, "OnTextChanged", false) end
+	end
+end
 function Methods.GetText(self) return self.text or "" end
 function Methods.SetChecked(self, checked) self.checked = checked and true or false end
 function Methods.GetChecked(self) return self.checked or false end
+function Methods.SetEnabled(self, enabled)
+	local previous = self.enabled ~= false
+	self.enabled = enabled and true or false
+	if previous ~= self.enabled then RunScript(self, self.enabled and "OnEnable" or "OnDisable") end
+end
+function Methods.IsEnabled(self) return self.enabled ~= false end
+function Methods.Enable(self) self:SetEnabled(true) end
+function Methods.Disable(self) self:SetEnabled(false) end
+function Methods.SetFrameLevel(self, level) self.level = level end
+function Methods.GetFrameLevel(self) return self.level or 1 end
 function Methods.GetName(self) return self.name end
 function Methods.GetParent(self) return self.parent end
 function Methods.GetWidth(self) return self.width or 400 end
@@ -64,14 +93,59 @@ function Methods.GetEffectiveScale(self)
 end
 function Methods.GetStringHeight(self) return 14 end
 function Methods.GetStringWidth(self) return 100 end
-function Methods.GetFontString(self) return self end
+function Methods.SetFontString(self, fontString) self.fontString = fontString end
+function Methods.GetFontString(self) return self.fontString or self end
+function Methods.SetFont(self, font, size, flags)
+	self.font, self.fontSize, self.fontFlags = font, size, flags or ""
+	return true
+end
+function Methods.GetFont(self) return self.font or "Fonts\\FRIZQT__.TTF", self.fontSize or 14, self.fontFlags or "" end
+function Methods.SetSpacing(self, spacing) self.spacing = spacing end
+function Methods.GetSpacing(self) return self.spacing or 0 end
+function Methods.GetNumLines(self)
+	local columns = math.max(1, math.floor(self:GetWidth() / ((self.fontSize or 14) * 0.55)))
+	local lines = 0
+	for line in (self:GetText() .. "\n"):gmatch("(.-)\n") do
+		lines = lines + math.max(1, math.ceil(#line:gsub("[\128-\191]", "") / columns))
+	end
+	return math.max(1, lines)
+end
+function Methods.HighlightText(self, first, last)
+	self.highlightStart, self.highlightEnd = first or 0, last or #self:GetText()
+end
+function Methods.ClearHighlightText(self) self.highlightStart, self.highlightEnd = nil, nil end
 function Methods.GetPoint(self) return "CENTER", nil, "CENTER", 0, 0 end
 function Methods.SetPoint(self, point, rel, relPoint, x, y)
 	if type(rel) == "number" then x, y = rel, relPoint end
 	self.x, self.y = x or 0, y or 0
 end
-function Methods.GetVerticalScrollRange(self) return 0 end
+function Methods.SetScrollChild(self, child) self.scrollChild = child end
+function Methods.GetScrollChild(self) return self.scrollChild end
+function Methods.GetVerticalScrollRange(self)
+	return math.max(0, (self.scrollChild and self.scrollChild:GetHeight() or 0) - self:GetHeight())
+end
 function Methods.GetVerticalScroll(self) return self.verticalScroll or 0 end
+function Methods.SetMinMaxValues(self, minimum, maximum)
+	self.minimum, self.maximum = minimum, maximum
+	if self.value ~= nil then self:SetValue(self.value) end
+end
+function Methods.GetMinMaxValues(self) return self.minimum or 0, self.maximum or 1 end
+function Methods.SetValue(self, value)
+	local minimum, maximum = self:GetMinMaxValues()
+	value = math.max(minimum, math.min(maximum, value))
+	if self.value == value then return end
+	self.value = value
+	RunScript(self, "OnValueChanged", value)
+end
+function Methods.GetValue(self) return self.value or 0 end
+function Methods.SetThumbTexture(self, texture)
+	if not self.thumb then
+		self.thumb = NewObject("Texture", nil, self)
+		table.insert(self.textures, self.thumb)
+	end
+	self.thumb:SetTexture(texture)
+end
+function Methods.GetThumbTexture(self) return self.thumb end
 function Methods.SetVerticalScroll(self, value) self.verticalScroll = value end
 function Methods.CreateTexture(self, name, layer)
 	local t = NewObject("Texture", name, self)
@@ -92,10 +166,25 @@ function Methods.SetBackdrop(self, t)
 	assert(type(t) == "table", "SetBackdrop called with " .. tostring(t) .. " on " .. tostring(self.name or self.kind))
 	self.backdrop = t
 end
-function Methods.SetFocus(self) STUB.focus = self end
-function Methods.ClearFocus(self) if STUB.focus == self then STUB.focus = nil end end
+function Methods.SetFocus(self)
+	if STUB.focus == self then return end
+	if STUB.focus then STUB.focus:ClearFocus() end
+	STUB.focus = self
+	RunScript(self, "OnEditFocusGained")
+end
+function Methods.ClearFocus(self)
+	if STUB.focus ~= self then return end
+	STUB.focus = nil
+	RunScript(self, "OnEditFocusLost")
+end
 function Methods.HasFocus(self) return STUB.focus == self end
-function Methods.Insert(self, t) self.text = (self.text or "") .. tostring(t) end
+function Methods.SetCursorPosition(self, position) self.cursorPosition = position end
+function Methods.GetCursorPosition(self) return self.cursorPosition or #self:GetText() end
+function Methods.Insert(self, t)
+	local current, position = self:GetText(), self:GetCursorPosition()
+	self:SetText(current:sub(1, position) .. tostring(t) .. current:sub(position + 1))
+	self.cursorPosition = position + #tostring(t)
+end
 function Methods.GetEditBox(self) return self.editBox end
 -- Tooltip scanning: SetHyperlink fills <name>TextLeft<i> / TextRight<i> from
 -- STUB.tooltips[link], a list of strings or { left, right } pairs.
@@ -160,6 +249,7 @@ function hooksecurefunc(a, b, c)
 	end
 end
 function InCombatLockdown() return false end
+function IsShiftKeyDown() return STUB.shift == true end
 function ReloadUI() STUB.reloaded = true end
 function GetTime() return STUB.now end
 function time() return STUB.epoch + math.floor(STUB.now) end
