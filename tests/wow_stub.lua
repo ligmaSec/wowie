@@ -45,6 +45,8 @@ function Methods.IsShown(self) return self.shown end
 function Methods.IsVisible(self) return self.shown end
 function Methods.SetText(self, t) self.text = t; table.insert(STUB.texts, tostring(t)) end
 function Methods.GetText(self) return self.text or "" end
+function Methods.SetChecked(self, checked) self.checked = checked and true or false end
+function Methods.GetChecked(self) return self.checked or false end
 function Methods.GetName(self) return self.name end
 function Methods.GetParent(self) return self.parent end
 function Methods.GetWidth(self) return self.width or 400 end
@@ -69,6 +71,8 @@ function Methods.SetPoint(self, point, rel, relPoint, x, y)
 	self.x, self.y = x or 0, y or 0
 end
 function Methods.GetVerticalScrollRange(self) return 0 end
+function Methods.GetVerticalScroll(self) return self.verticalScroll or 0 end
+function Methods.SetVerticalScroll(self, value) self.verticalScroll = value end
 function Methods.CreateTexture(self, name, layer)
 	local t = NewObject("Texture", name, self)
 	table.insert(self.textures, t)

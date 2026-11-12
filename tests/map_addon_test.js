@@ -92,7 +92,7 @@ function Methods.SetFrameLevel(self, l) self.level = l end
   run(stub);
   run(MAP_STUB);
   if (initialState) run(initialState);
-  for (const f of ['Codec.lua', 'Inbox.lua', 'WoWAI.lua', 'Map.lua']) run(fs.readFileSync(path.join(ADDON, f), 'utf8'), 'WoWAI');
+  for (const f of ['Codec.lua', 'Inbox.lua', 'WoWAI.lua', 'Context.lua', 'ContextUI.lua', 'Map.lua']) run(fs.readFileSync(path.join(ADDON, f), 'utf8'), 'WoWAI');
   run('STUB.FireEvent("ADDON_LOADED", "WoWAI"); STUB.FireEvent("PLAYER_LOGIN")');
   return { run, evaluate, num };
 }
@@ -364,8 +364,6 @@ test('herb/ore nodes toggle and follow the gathering skill', () => {
   assert.equal(shownPins(vm).length, 4);
   vm.run('SlashCmdList.WOWAIMAP("ore off"); SlashCmdList.WOWAIMAP("herb off")');
   assert.equal(shownPins(vm).length, 0);
-  // The game context reads professions from the same API.
-  assert.match(vm.evaluate('WoWAI.GameContext()'), /Professions: Bergbau 50\/75(\n|$)/);
 });
 
 test('/wow-ai map hide, show, nav and stop', () => {

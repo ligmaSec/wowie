@@ -9,7 +9,7 @@ Chat with your local coding agents from inside **World of Warcraft: Forever**: [
 - Multiple chats, each its own persistent agent session (like separate terminals), running in parallel. Each chat picks its agent, model, reasoning effort and folder
 - Live progress while the agent works: action count, elapsed time, the files it's editing and commands it's running
 - Replies echoed into the game chat; `/r` replies to the agent when it was the last to message you
-- The agent knows your character, level, zone, talents, professions and quest log (optional), and you can shift-click items, spells and quests into a message
+- Choose what the AI knows through searchable Sharing checkboxes: gear, bags, spells, skills, quests and other addon-readable information, with opt-in native API queries
 - The agent can mark your world map and track destinations on your map/minimap, with dotted routes through ShortestPathForever when enabled
 - Herb and ore spawns on the world map, filtered by your gathering skill (`/wow-ai map ore`, `/wow-ai map herb`)
 - Ready-made macros: ask for one and the reply carries a **Create macro** button that saves it and puts it on your cursor, ready to drop on an action bar (`/wow-ai macro undo` reverts it)
@@ -146,7 +146,7 @@ Click **Defaults...** on the bottom toolbar to choose an addon-wide default agen
 | `/wow-ai agent [claude\|codex\|grok\|agy\|hermes]` | which agent this chat talks to; no name shows the current one, `default` uses the saved addon default (or the bridge's when unset). Changing agent starts a fresh session |
 | `/wow-ai cd <folder>` | folder this chat's agent works in (**Folder...** after right-clicking the chat opens the same thing as a dialog). Relative to the bridge's folder (`/wow-ai cd realms`, `/wow-ai cd ../other`), `~` works, a full path too; `/wow-ai cd` alone goes back to the bridge's default. A chat that changes folder starts a fresh session there |
 | `/wow-ai reset` | wipe this chat's agent memory, keep the transcript |
-| `/wow-ai context [on\|off]` | show what the agent is told about your character and location, or turn it on/off |
+| `/wow-ai context [on\|off]` | show the selected short summary or pause/resume sharing; **Sharing...** controls individual information categories |
 | `/wow-ai rename`, `/wow-ai delete`, `/wow-ai clear` | manage the current chat |
 | `/wow-ai echo summary\|full\|short\|off\|<chars>` | how much of each reply to print into the game chat. `summary` (the default) prints only the agent's closing TL;DR lines, the full reply is in the window behind `[open]`; `full` prints up to 4000 chars, `short` one preview line |
 | `/wow-ai longchat on` | let the game chat box take 4000 characters, for long `/ai` messages |
@@ -164,9 +164,27 @@ Click any message, or `/wow-ai copy` for the last reply, to open it in a selecta
 
 Every run tells the agent that only a short summary of its reply is printed in the game chat, and asks it to end each reply with a `TL;DR:` block of one or two lines. The bridge splits that block off and the addon prints just those lines under `[Claude · chat]`, with the `[open]` link to the whole reply in the window (the window keeps the full text, TL;DR included). When an agent forgets the block, the first two lines of the reply are printed instead, with a hint to open the rest. `/wow-ai echo full` goes back to printing the whole reply.
 
-### The agent knows where you are
+### Choose what the AI knows
 
-The addon tells the agent which game and client you are on, your character (name, realm, level, race, class, faction, guild), where you are (zone, subzone and the map coordinates the minimap shows), your money, talents, professions with their skill, and your quest log (quest ids, marking the ones ready to turn in). A few lines, sent with the addon's hello and again whenever they change, and put into the agent's system prompt by the bridge (Claude and Grok take a system prompt; for Codex the bridge puts it at the top of the message, marked as context), so you can ask "what should I be doing at my level around here?" or "write me a macro for my class" without explaining yourself first. It is only a hint: for a chat about an unrelated project it changes nothing. `/wow-ai context` shows exactly what is sent; `/wow-ai context off` stops sending it (the bridge forgets it too), and `"gameContext": false` in `bridge/config.json` turns it off for good.
+Click **Sharing...** on the bottom toolbar. Its searchable checkboxes cover 26 built-in information categories plus native API namespaces discovered from your client. The master checkbox pauses sharing without erasing your choices. **Common defaults** restores conservative choices; **Clear choices** removes all selected scopes, including saved API scopes that are not currently available.
+
+| Information | Default | Availability |
+|---|---|---|
+| Identity, location, money, gear, carried items, player/pet spellbooks, professions/skills, talents and quests | On | Fresh snapshot with each question; uncached item details and unsupported APIs are explicit |
+| Reputation, auras, pet state, combat stats, currencies, achievements and collections | Off | Where the client exposes them |
+| Target/focus, party/raid, bank, mail, chat, guild, friends/Battle.net, UI and addon/global tables | Off | Sensitive/broad scopes; bank and mail require their windows open |
+| Mail message bodies | Off | Separate explicit consent: reading loaded messages marks them as read |
+| Advanced `api:<namespace>` scopes | Off | Permission-gated documented getters, queried only when the AI needs more data |
+
+Checked snapshot data accompanies your message and can reach the selected AI provider. The agent can request additional read-only data, and the addon checks the **current** permissions before reading it. Broad API/UI/addon permissions can overlap snapshot categories; their descriptions explain this. These controls govern the addon information channel, not the coding agent's separate host-file/tool permissions. No arbitrary Lua, setters, sending/deleting mail, movement or protected gameplay actions are exposed through addon queries. Closed-window, restricted, secret and unsupported values are reported as unavailable rather than guessed.
+
+Large snapshots are transferred across multiple pixel frames instead of being clipped to the short character summary. Updated bridges negotiate native zlib compression plus base64 and larger fragments; clients without native compression use plain base64. This is lossless: all selected information still arrives, and the capture cadence is unchanged. Short summaries reuse the same captured values instead of reading providers twice. API results support explicit pagination and nested paths.
+
+More snapshot categories still increase the AI's prompt size and processing time: transport compression does not reduce model tokens. For lower latency, choose a lower **Reasoning** setting or a faster **Model** in the UI. Snapshots over 4 MiB require fewer snapshot categories or paginated queries. **Changes affect future snapshots and current queries; already-sent information cannot be recalled.** Manually shift-clicked links still share their tooltip as part of your explicit message.
+
+`/wow-ai context` shows the short selected summary; `/wow-ai context off` pauses snapshot/query sharing, and `gameContext: false` disables it at the bridge. The pixel path needs no reload per query. The reload fallback stores pending snapshots/results in SavedVariables and uses its normal hardware-event reload cycle.
+
+Update both bridge and addon together. A first install of the Sharing panel needs a **full WoW restart**, because it adds Lua files; later Lua-only updates need a bridge restart and `/reload`. Requests carry immutable identities so a rolled-back saved counter cannot silently discard a new question. Pending pre-nonce questions migrate automatically on reload, preserving their original data and selections; do not retype them just to resume the transfer.
 
 Along with it, every run gets [docs/WOW-ADDON-PRIMER.md](docs/WOW-ADDON-PRIMER.md): a short reference on writing addons and macros for this client (TOC layout, sandbox rules, common frames and events, where to verify an API), so "write me an addon that..." works from any folder, not just this repo. Edit the file to suit your setup; the bridge re-reads it on every run. `"primerFile": ""` in the config drops it, and `/wow-ai context off` turns it off together with the character context.
 

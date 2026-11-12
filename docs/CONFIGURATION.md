@@ -38,11 +38,13 @@ A `config.json` from before agents existed kept Claude's settings at the top lev
 
 The addon's **Defaults...** panel saves an agent/model/reasoning tuple in `WoWAIDB.settings.defaults`; **Save** applies it, **Cancel** discards edits, and **Bridge defaults → Save** clears it. Per-chat selectors take precedence, followed by addon defaults for that agent, these bridge settings, and finally CLI defaults. The addon sends resolved choices on both transports without changing `config.json`. New chats inherit the current chat's choices. Explicit model/effort selections override matching `extraArgs`; unrelated arguments remain. Default-agent changes preserve provider-specific chat overrides on their original agent. Clearing an override starts a fresh session when needed; pending requests, including resends after `/reload`, keep their original selection.
 
+Information-sharing choices live separately in `WoWAIDB.settings.sharing` (category ID → boolean); `WoWAIDB.settings.context` is the master switch. Common character categories default on, sensitive/broad data and `api:<namespace>` scopes default off. Pausing the master preserves choices. Scope descriptions disclose overlap and window dependencies. Mail-body access has an additional explicit default-off permission because the game's read API marks messages as read. Snapshots reflect permissions when the question was sent; additional queries check current permissions. Already-sent data cannot be recalled, and these controls do not change the agent CLI's host-file/tool permissions.
+
 ## Runs
 
 | Key | Default | Meaning |
 |---|---|---|
-| `gameContext` | `true` | Put the character/zone context the addon sends into the agent's system prompt. `false` ignores it, for a bridge only ever used on unrelated projects. The addon has its own switch, `/wow-ai context off`, which also clears what the bridge holds. |
+| `gameContext` | `true` | Allow the selected short context, full information snapshots and permission-gated addon queries. `false` excludes all of them from agent input and disables query requests. The addon also has a master switch and individual **Sharing...** checkboxes. |
 | `primerFile` | `"docs/WOW-ADDON-PRIMER.md"` | A markdown file appended to the system prompt together with the game context, whatever folder the chat works in: how to write addons and macros for this client. Relative to the wow-ai folder, or absolute. Re-read on every run, so edits count at once. `""` sends none. Off whenever the context is off. |
 | `maxParallel` | `3` | How many chats may run an agent at the same time. Further messages queue per chat. |
 | `timeoutMs` | `1800000` (30 min) | A run longer than this is killed (with its children) and reported as an error in game. |
@@ -122,8 +124,8 @@ All of these are gitignored.
 | File | Contents |
 |---|---|
 | `bridge/config.json` | Your configuration. |
-| `bridge/state.json` | Agent session ids per chat, the folder and the agent each session ran with, handled message ids per addon session token, the presence counter, and the latest game context the addon sent (`context`). Delete it to forget all sessions. |
-| `bridge/transcripts.json` | The last 200 messages of every chat, with the agent that wrote each reply, so the addon can recover its chats after the client wipes saved data. |
+| `bridge/state.json` | Agent sessions, handled message IDs, presence/map state and the latest selected **short** context. Full snapshots/query results are held for the active job, not copied here. Delete it to forget all sessions. |
+| `bridge/transcripts.json` | The last 200 chat messages per conversation. Internal information requests do not duplicate user turns or store the raw full snapshot; ordinary final answers remain in history. |
 | `bridge/mapjobs/` | One map command file per running job (`WOW_AI_MAP_FILE`), read and deleted when the job ends. Map layers themselves live in `state.json` (`map`). |
 | `bridge/bridge.log` | Everything printed to the console, with timestamps. Grows without bound; delete it whenever you like. |
 | `bridge/tmp/` | Prompt files for agents that read the prompt from disk (Grok). Each is deleted when its run ends. |

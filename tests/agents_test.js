@@ -124,7 +124,6 @@ test('Codex: exec --json in the chat folder, sandbox from permissionMode, resume
 test('Antigravity arguments and captured stream parser', () => {
   const input = { cfg: {}, resume: '', cwd: 'C:\\work', prompt: 'PONG', system: SYS, systemShort: 'short' };
   const accept = A.AGENTS.agy.args({ ...input, cfg: { permissionMode: 'acceptEdits' } });
-  assert.equal(accept[0], `-p=${A.contextBlock(SYS)}PONG`);
   assert.ok(accept.includes('--add-dir') && accept.includes('C:\\work'));
   assert.ok(accept.includes('--mode') && accept.includes('accept-edits') && accept.includes('--disable-slash-commands'));
   const readOnly = A.AGENTS.agy.args({ ...input, cfg: { permissionMode: 'default' } });
@@ -198,7 +197,7 @@ test('Hermes command modes, image forwarding and plain text completion', () => {
   { session: '20260925_134414_e62607', done: { text: 'PONG', error: false } });
 });
 
-test('agy review fixes: hermes stderr errors, yolo spellings, flag-like images, agy arg bound', () => {
+test('headless argument safety: Hermes rejects yolo spellings and flag-like image paths', () => {
   const p = A.hermesParser();
   assert.deepEqual(p.finish({ stdout: '', stderr: '\x1b[2mSession_ID: abc\x1b[0m\nError: model not found\n', code: 1 }),
     { session: 'abc', done: { text: 'Error: model not found', error: true } });
@@ -207,8 +206,6 @@ test('agy review fixes: hermes stderr errors, yolo spellings, flag-like images, 
   assert.deepEqual(args.slice(-2), ['--max-turns', '3']);
   assert.ok(!args.some(x => /yolo|^-y$/.test(x)) && !args.includes('--image'));
   assert.ok(!A.AGENTS.codex.args({ cfg: {}, resume: '', cwd: 'x', images: ['-bad'] }).includes('-bad'));
-  const agy = A.AGENTS.agy.args({ cfg: {}, cwd: '.', resume: '', prompt: 'p'.repeat(30000), system: 's'.repeat(40000) });
-  assert.ok(agy[0].length <= 24100, `agy -p argument is ${agy[0].length} chars`);
 });
 
 test('Grok: streaming-json from a prompt file, dontAsk plus translated allow rules, resume and the system prompt', () => {

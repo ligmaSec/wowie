@@ -15,6 +15,10 @@ The bridge can drive three coding agents: Claude Code, OpenAI Codex and xAI's Gr
 
 All of them run headless on the bridge PC, so log in once by hand in a terminal there (`claude`, `codex`, `grok login`, `agy`, `hermes setup`); the bridge reuses the cached login.
 
+### Selected addon information
+
+**Sharing...** in the addon selects snapshot data and advanced read permissions. Full snapshots go through stdin for Claude/Codex/Hermes/Antigravity, and the prompt file for Grok; they are not expanded onto command lines. If the agent needs additional addon data, its prompt explains the reserved `wowcontext` JSON request block. The bridge publishes that request to the addon, receives current-permission-gated results, and resumes the same agent session automatically. These internal reads do not add duplicate player turns or become final chat replies. API calls are data-only: no arbitrary Lua or gameplay actions. Disabled/closed/restricted data is not guessed.
+
 ## The shared vocabulary
 
 Every agent's block in `config.json` has the same keys, and the bridge maps them to that agent's own switches:
@@ -64,9 +68,9 @@ Codex also checks `CODEX_BIN` before searching `PATH`, so a newer launcher can o
 ## Google Antigravity CLI
 
 - **Install:** Install Google Antigravity CLI (agy) and run `agy` once to log in. On Windows the bridge checks `%LOCALAPPDATA%\agy\bin\agy.exe`.
-- **Command line:** `agy -p=<prompt> --output-format stream-json --add-dir <folder> --print-timeout <seconds>s [--conversation <id>] [--model <m>] ...`. The prompt must be attached to `-p=`. The bridge sets both the process cwd and `--add-dir` to the chat folder.
+- **Command line:** `agy --input-format stream-json --output-format stream-json --add-dir <folder> --print-timeout <seconds>s [--conversation <id>] [--model <m>] ...`, with `{"event":"user","message":{"content":"..."}}` on stdin. This uses the CLI's [documented streaming input](https://antigravity.google/docs/cli/headless/#stream-prompts-from-stdin), so large selected context is not truncated by Windows command-line limits. Process cwd and `--add-dir` are the chat folder.
 - **Permissions:** `acceptEdits` uses `--mode accept-edits --disable-slash-commands`; `default` uses `--mode plan`; `bypassPermissions` uses `--dangerously-skip-permissions --disable-slash-commands`.
-- **Session and progress:** the `conversation_id` from `init` is resumed with `--conversation`. Active tool steps become progress lines, and `result` supplies the final reply. The context block goes at the top of the prompt. When needed, the user prompt is truncated to keep context under the Windows command-line limit.
+- **Session and progress:** the `conversation_id` from `init` is resumed with `--conversation`. Active tool steps become progress lines, and `result` supplies the reply. The context block and complete selected snapshot go through stdin, including on resumed turns.
 - **Headless approvals:** Antigravity cannot ask for tool approval inside WoW. A denied action can leave a successful CLI result with no response; the bridge reports that as an error and includes the CLI's diagnostic instead of showing “finished without a reply.” Provider errors are also preserved.
 
 To allow every shell command for Antigravity runs launched by this bridge, set these arguments under `agents.agy`:

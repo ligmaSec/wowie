@@ -38,24 +38,29 @@ function chatKey(job) { return `${job.session || ''}:${job.chat || 'default'}`; 
 function sessKey(job) { return job.chat ? 'chat:' + job.chat : chatKey(job); }
 
 // ---------------------------------------------------------------------------
-// Dedup: message ids restart whenever the addon's saved data is reset, so they
-// are only unique within the addon's session token.
+// Numeric ids are display/signal counters and may roll back within a session.
+// Only immutable request nonces are receipts; legacy numeric history is separate.
 // ---------------------------------------------------------------------------
 
+function validNonce(nonce) { return typeof nonce === 'string' && nonce.length >= 8 && nonce.length <= 64 && !/[^A-Za-z0-9_-]/.test(nonce); }
+
 function alreadyHandled(state, job) {
+  if (!validNonce(job.nonce)) return false;
+  const receipts = state.handledNonces || {};
   const key = job.session || '';
-  const h = state.handled[key];
-  if (!h) return key === '' && job.id <= state.lastId;
-  return !!h[job.id];
+  return Object.hasOwn(receipts, key) && Object.hasOwn(receipts[key], job.nonce);
 }
 
 function markHandled(state, job, now = Date.now()) {
+  if (!validNonce(job.nonce)) throw new Error('Request protocol 1 requires a valid request nonce');
   const key = job.session || '';
-  const h = (state.handled[key] = state.handled[key] || {});
-  h[job.id] = 1;
-  const ids = Object.keys(h);
-  if (ids.length > 1000) for (const k of ids.slice(0, ids.length - 1000)) delete h[k];
-  state.lastId = Math.max(state.lastId, job.id);
+  const receipts = state.handledNonces = state.handledNonces || {};
+  if (!Object.hasOwn(receipts, key)) Object.defineProperty(receipts, key, { value: {}, enumerable: true, configurable: true, writable: true });
+  const h = receipts[key];
+  Object.defineProperty(h, job.nonce, { value: 1, enumerable: true, configurable: true, writable: true });
+  const nonces = Object.keys(h);
+  if (nonces.length > 1000) for (const k of nonces.slice(0, nonces.length - 1000)) delete h[k];
+  state.lastId = Math.max(state.lastId || 0, job.id);
   (state.seen = state.seen || {})[key] = now;
 }
 
@@ -65,13 +70,18 @@ const MONTH_MS = 30 * 24 * 3600 * 1000;
 function pruneStale(state, transcripts, now = Date.now(), maxAgeMs = MONTH_MS) {
   let removed = 0;
   state.seen = state.seen || {};
-  for (const key of Object.keys(state.handled || {})) {
+  for (const key of new Set([...Object.keys(state.handled || {}), ...Object.keys(state.handledNonces || {})])) {
     if (key === '') continue;
     if (!state.seen[key]) { state.seen[key] = now; continue; } // grace period starts now
-    if (now - state.seen[key] > maxAgeMs) { delete state.handled[key]; delete state.seen[key]; removed++; }
+    if (now - state.seen[key] > maxAgeMs) {
+      if (state.handled) delete state.handled[key];
+      if (state.handledNonces) delete state.handledNonces[key];
+      delete state.seen[key];
+      removed++;
+    }
   }
   for (const key of Object.keys(state.seen)) {
-    if (!(state.handled || {})[key] && now - state.seen[key] > maxAgeMs) { delete state.seen[key]; }
+    if (!(state.handled || {})[key] && !(state.handledNonces || {})[key] && now - state.seen[key] > maxAgeMs) { delete state.seen[key]; }
   }
   for (const [tok, t] of Object.entries((transcripts && transcripts.tokens) || {})) {
     if (now - t > maxAgeMs) { delete transcripts.tokens[tok]; removed++; }
@@ -126,6 +136,15 @@ function parseFlags(flags) {
     else if (tok.startsWith('agent=')) out.agent = tok.slice(6).trim().toLowerCase();
     else if (tok.startsWith('model=')) out.model = fromHex(tok.slice(6));
     else if (tok.startsWith('reasoning=')) out.reasoning = tok.slice(10).trim().toLowerCase();
+    else if (tok.startsWith('nonce=')) out.nonce = tok.slice(6);
+    else if (tok.startsWith('profile=')) out.profile = tok.slice(8);
+    else if (tok.startsWith('data=')) out.data = tok.slice(5);
+    else if (tok.startsWith('request=')) out.request = tok.slice(8);
+    else if (tok.startsWith('encoding=')) out.encoding = tok.slice(9);
+    else if (tok.startsWith('part=')) {
+      const m = /^(\d+)\/(\d+)$/.exec(tok.slice(5));
+      if (m) { out.part = Number(m[1]); out.parts = Number(m[2]); }
+    }
   }
   return out;
 }
@@ -167,7 +186,8 @@ function parseOutbox(src) {
   const session = (b.match(/\["session"\]\s*=\s*"([0-9a-zA-Z]*)"/) || [])[1] || '';
   const chat = (b.match(/\["chat"\]\s*=\s*"([0-9a-zA-Z]*)"/) || [])[1] || '';
   const newSession = /\["newSession"\]\s*=\s*true/.test(b);
-  const job = { id, session, chat, text, cwd, newSession, via: 'reload' };
+  const nonce = (b.match(/\["nonce"\]\s*=\s*"([^"]*)"/) || [])[1] || '';
+  const job = { id, session, chat, nonce, text, cwd, newSession, via: 'reload' };
   const ctx = b.match(/\["ctx"\]\s*=\s*"([0-9a-fA-F]*)"/);
   if (ctx) job.ctx = fromHex(ctx[1]);
   const agent = b.match(/\["agent"\]\s*=\s*"([0-9a-zA-Z_-]*)"/);
@@ -178,7 +198,19 @@ function parseOutbox(src) {
   if (reasoning && reasoning[1]) job.reasoning = reasoning[1];
   const allow = b.match(/\["allow"\]\s*=\s*"([0-9a-fA-F]*)"/);
   if (allow && allow[1]) job.allow = fromHex(allow[1]).split('\x1F').filter(Boolean);
+  const profile = b.match(/\["profile"\]\s*=\s*"([0-9a-fA-F]*)"/);
+  if (profile && profile[1]) job.profilePayload = fromHex(profile[1]);
   return job;
+}
+
+function parseContextOutbox(src) {
+  const block = String(src || '').match(/\["contextOutbox"\]\s*=\s*\{([^}]*)\}/);
+  if (!block) return null;
+  const b = block[1];
+  const id = Number((b.match(/\["id"\]\s*=\s*(\d+)/) || [])[1]);
+  const field = name => (b.match(new RegExp(`\\["${name}"\\]\\s*=\\s*"([^"]*)"`)) || [])[1] || '';
+  if (!id || !field('request') || !field('text')) return null;
+  return { id, session: field('session'), chat: field('chat'), nonce: field('nonce'), request: field('request'), data: 'query', payload: fromHex(field('text')), via: 'reload' };
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +339,23 @@ function luaStr(s) {
     + '"';
 }
 
+// Only JSON data reaches this serializer; no executable Lua is accepted.
+function luaValue(value, argumentList = false) {
+  if (value == null) return 'nil';
+  if (typeof value === 'string') return luaStr(value);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (Array.isArray(value)) {
+    const fields = value.map((v, i) => `[${i + 1}] = ${luaValue(v)}`);
+    if (argumentList) fields.push(`n = ${value.length}`);
+    return `{ ${fields.join(', ')} }`;
+  }
+  if (typeof value === 'object') {
+    return `{ ${Object.entries(value).map(([k, v]) => `[${luaStr(k)}] = ${luaValue(v, k === 'args' && Array.isArray(v))}`).join(', ')} }`;
+  }
+  throw new Error('Unsupported addon query value');
+}
+
 // The slot file / Inbox.lua body: the latest record of every chat, the bridge's
 // clock, default folder and default agent (plus the agents it knows), and
 // (right after a saved-data reset) a restore bundle.
@@ -321,17 +370,23 @@ function luaTable(globalName, records, opts = {}) {
     `\tcwd = ${luaStr(opts.cwd || '')},`,
     `\tagent = ${luaStr(opts.agent || '')},`,
     `\tagents = { ${agents.map(luaStr).join(', ')} },`,
+    '\tcontextProtocol = 2,',
+    '\trequestProtocol = 1,',
+    `\tcontextEnabled = ${opts.contextEnabled === false ? 'false' : 'true'},`,
     '\treplies = {',
   ];
   for (const r of records) {
     lines.push('\t\t{');
     lines.push(`\t\t\tchat = ${luaStr(r.chat || '')},`);
     lines.push(`\t\t\tid = ${Number(r.id) || 0},`);
+    lines.push(`\t\t\tnonce = ${luaStr(r.nonce || '')},`);
     lines.push(`\t\t\tstatus = ${luaStr(r.status)},`);
     lines.push(`\t\t\ttext = ${luaStr(r.text)},`);
     lines.push(`\t\t\tcwd = ${luaStr(r.cwd || '')},`);
     lines.push(`\t\t\tsession = ${luaStr(r.session || '')},`);
     lines.push(`\t\t\tagent = ${luaStr(r.agent || '')},`);
+    if (r.request) lines.push(`\t\t\trequest = ${luaStr(r.request)},`);
+    if (Array.isArray(r.queries)) lines.push(`\t\t\tqueries = ${luaValue(r.queries)},`);
     if (r.summary) lines.push(`\t\t\tsummary = ${luaStr(r.summary)},`);
     if (Array.isArray(r.denied) && r.denied.length) {
       lines.push(`\t\t\tdenied = { ${r.denied.map(luaStr).join(', ')} },`);
@@ -561,11 +616,11 @@ function luaMacros(macros) {
 
 module.exports = {
   fromHex, pad3, slotNumber, chatKey, sessKey,
-  alreadyHandled, markHandled, pruneStale, MONTH_MS,
+  validNonce, alreadyHandled, markHandled, pruneStale, MONTH_MS,
   resolveCwd, sameFolder, baseName,
-  parseFlags, jobsFromStrip, parseOutbox, systemPrompt, splitSummary,
+  parseFlags, jobsFromStrip, parseOutbox, parseContextOutbox, systemPrompt, splitSummary,
   ruleFor, describeToolUse,
-  luaStr, luaTable, SILENT_WAV,
+  luaStr, luaValue, luaTable, SILENT_WAV,
   MAP_LIMITS, validateMapCommand, newMap, applyMapCommands, extractMapBlocks, parseMapFile, luaMap,
   MACRO_LIMITS, extractMacros, stripMacroBlocks, luaMacros,
 };

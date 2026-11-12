@@ -474,13 +474,8 @@ const AGENTS = {
     install: 'Install Google Antigravity CLI (agy) and run `agy` once to log in.',
     windowsPaths: () => [path.join(process.env.LOCALAPPDATA || '', 'agy', 'bin', 'agy.exe')],
     posixPaths: () => [],
-    args({ cfg, resume, cwd, prompt, system, systemShort, timeoutMs }) {
-      const text = String(prompt || '');
-      const note = '\n[User prompt truncated to fit the agy command line.]';
-      const context = contextBlock(resume ? systemShort || '' : system || '').slice(0, 12000);
-      const available = Math.max(0, 24000 - context.length - note.length);
-      const bounded = text.length > available ? text.slice(0, available) + note : text;
-      const a = [`-p=${context}${bounded}`, '--output-format', 'stream-json', '--add-dir', cwd,
+    args({ cfg, resume, cwd, timeoutMs }) {
+      const a = ['--input-format', 'stream-json', '--output-format', 'stream-json', '--add-dir', cwd,
         '--print-timeout', `${Math.max(1, Math.ceil((timeoutMs || 1800000) / 1000))}s`];
       const mode = cfg.permissionMode || 'acceptEdits';
       if (mode === 'acceptEdits') a.push('--mode', 'accept-edits', '--disable-slash-commands');
@@ -491,7 +486,10 @@ const AGENTS = {
       if (cfg.reasoning) a.push('--effort', cfg.reasoning);
       return a.concat(Array.isArray(cfg.extraArgs) ? cfg.extraArgs : []);
     },
-    input: () => ({}), env: env => env, parser: agyParser,
+    input: ({ prompt, system, systemShort, resume }) => ({
+      stdin: JSON.stringify({ event: 'user', message: { content: contextBlock(resume ? systemShort || '' : system || '') + prompt } }) + '\n',
+    }),
+    env: env => env, parser: agyParser,
   },
   hermes: {
     name: 'Hermes', command: 'hermes',

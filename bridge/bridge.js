@@ -28,8 +28,10 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const { spawn } = require('child_process');
+const { randomBytes } = require('node:crypto');
 const P = require('./protocol'); // the pure protocol code, unit-tested in tests/bridge_test.js
 const A = require('./agents');   // how each agent is launched and read, unit-tested in tests/agents_test.js
+const C = require('./context');  // permissioned snapshots and read-only query continuations
 
 const HERE = __dirname;
 const CONFIG_FILE = path.join(HERE, 'config.json');
@@ -117,14 +119,7 @@ function findSavedVars() {
 let state = readJson(STATE_FILE, { lastId: 0, sessions: {}, handled: {} });
 if (!state.handled) state.handled = {};
 if (!state.sessions) state.sessions = {};
-// Older versions stored handled[session] as "highest id so far"; expand to a map.
-for (const [k, v] of Object.entries(state.handled)) {
-  if (typeof v === 'number') {
-    const m = {};
-    for (let i = 1; i <= v; i++) m[i] = 1;
-    state.handled[k] = m;
-  }
-}
+// state.handled contains old numeric receipts only; never interpret them as nonces.
 
 // Bridge-side transcripts. The beta client sometimes wipes addon saved data; since
 // every prompt and reply passes through here, this copy lets the addon recover.
@@ -195,7 +190,12 @@ let lastMtime = 0;
 const running = new Map(); // chatKey -> { job, child }
 const queued = new Map();  // chatKey -> job waiting for that chat (or for a free parallel slot)
 const live = new Map();    // chatKey -> latest record shown to the game
+const contextTransfers = new C.Transfers();
+const contextProfiles = new Map();
+const pendingProfiles = new Map();
+const pendingQueries = new Map();
 let lastPublish = 0;
+let rejectedInput = false;
 let publishTimer = null;
 
 // ---------------------------------------------------------------------------
@@ -263,7 +263,7 @@ function mapLuaSize() {
 }
 
 function mapFileFor(job) {
-  return path.join(MAP_DIR, `${String(job.chat || 'default').replace(/[^\w-]/g, '_')}-${job.id}.jsonl`);
+  return path.join(MAP_DIR, `${String(job.chat || 'default').replace(/[^\w-]/g, '_')}-${job.nonce}.jsonl`);
 }
 
 // Collect what the run asked for (its map file, then ```wowmap blocks in its
@@ -291,7 +291,7 @@ function takeMapCommands(job, text) {
 // Slot file / Inbox.lua body: see protocol.luaTable.
 function slotFile(globalName, records, urgent = true) {
   const map = Date.now() < mapShareUntil && (urgent || mapLuaSize() <= MAP_PROGRESS_MAX) ? state.map : null;
-  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, agent: DEFAULT_AGENT, agents: A.agentIds(), agentOptions, map });
+  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, agent: DEFAULT_AGENT, agents: A.agentIds(), agentOptions, contextEnabled: cfg.gameContext !== false, map });
 }
 
 function addonInstalled() {
@@ -396,7 +396,7 @@ function readOutbox() {
 // It is kept in state.json so a restarted bridge still has it, and goes into
 // the agent's system prompt on every run (see protocol.systemPrompt).
 function setContext(job) {
-  const text = String(job.ctx || '').replace(/\r/g, '').trim().slice(0, 2000);
+  const text = cfg.gameContext === false ? '' : String(job.ctx || '').replace(/\r/g, '').trim().slice(0, 2000);
   const prev = (state.context && state.context.text) || '';
   if (text === prev) return;
   state.context = text ? { text, at: Date.now(), session: job.session || '' } : null;
@@ -447,9 +447,94 @@ function allowRules(agentId, rules) {
 // ---------------------------------------------------------------------------
 // Running an agent
 // ---------------------------------------------------------------------------
+function armContextWait(job) {
+  clearTimeout(job.contextTimer);
+  job.deadline = job.deadline || Date.now() + (cfg.timeoutMs || 1800000);
+  job.contextTimer = setTimeout(() => finish(job, 'error', 'Timed out waiting for addon information. Keep the game connected and retry the question.'), Math.max(1, job.deadline - Date.now()));
+  if (exitWhenIdle && !job.contextWatcher) job.contextWatcher = setInterval(pollSavedVariables, cfg.pollMs || 750);
+}
+
+function contextRecord(job, status, text, extra = {}) {
+  return { chat: job.chat, id: job.id, nonce: job.nonce, status, text, cwd: job.cwd, agent: job.agent || '', ...extra };
+}
+
+function receiveContextData(packet) {
+  if (cfg.gameContext === false) return;
+  const id = C.key(packet);
+  // Retransmitted profile parts cannot replace the snapshot already used by a run.
+  if (packet.data === 'profile' && contextProfiles.has(id)) return;
+  let result;
+  try {
+    result = packet.payload !== undefined ? { text: packet.payload } : contextTransfers.add(packet);
+    if (!result.text) {
+      const job = pendingProfiles.get(id);
+      if (job) publish(chatKey(job), contextRecord(job, 'context', `Receiving checked information: ${result.received}/${result.total} parts`), false);
+      return;
+    }
+    if (packet.data === 'profile') {
+      C.snapshot(result.text);
+      contextProfiles.set(id, { text: result.text, at: Date.now() });
+      const job = pendingProfiles.get(id);
+      if (job) {
+        pendingProfiles.delete(id);
+        clearTimeout(job.contextTimer);
+        job.profilePayload = result.text;
+        submit(job);
+      }
+    } else if (packet.data === 'query') {
+      const wait = pendingQueries.get(id);
+      if (!wait || wait.request !== packet.request) return;
+      const responses = JSON.parse(result.text);
+      if (!Array.isArray(responses) || responses.length !== wait.queries.length) throw new Error('Incomplete addon information query results');
+      wait.job.continuation = C.continuation(result.text);
+      pendingQueries.delete(id);
+      clearTimeout(wait.job.contextTimer);
+      running.delete(chatKey(wait.job));
+      runJob(wait.job);
+    }
+  } catch (err) {
+    const job = pendingProfiles.get(id) || (pendingQueries.get(id) || {}).job;
+    if (job) finish(job, 'error', `Could not read selected addon information: ${err.message}`);
+    else log(`information packet #${packet.id}: ${err.message}`);
+  }
+  contextTransfers.expire(Date.now() - (cfg.timeoutMs || 1800000));
+  for (const [k, profile] of contextProfiles) if (profile.at < Date.now() - (cfg.timeoutMs || 1800000)) contextProfiles.delete(k);
+}
+
+function requestContext(job, queries) {
+  if (cfg.gameContext === false || !job.profilePayload) {
+    finish(job, 'error', 'The agent requested addon information, but information sharing is disabled. Select the relevant checkboxes in Sharing first.');
+    return;
+  }
+  const request = `${job.id}-${(job.contextRound = (job.contextRound || 0) + 1)}`;
+  pendingQueries.set(C.key(job), { job, request, queries });
+  running.set(chatKey(job), { job, child: null });
+  armContextWait(job);
+  saveState();
+  publish(chatKey(job), contextRecord(job, 'context_query', 'Reading information allowed by your current Sharing checkboxes...', { request, queries }), true);
+  presenceBeat(); // gives a pending chat a prompt slot read without reusing cached signal files
+}
+
 
 function submit(job) {
+  if (!P.validNonce(job.nonce)) {
+    if (!rejectedInput) {
+      rejectedInput = true;
+      log(`#${job.id} rejected: Request protocol 1 requires a valid request nonce. Update the WoWAI addon and /reload; this request was not run.`);
+      // Old clients match replies by numeric ID alone. A fake error reply would
+      // erase their pending question before the nonce migration can resume it.
+      publishNow();
+    }
+    return;
+  }
   if (alreadyHandled(job)) return;
+  if (job.data) { receiveContextData(job); return; }
+  const key = chatKey(job);
+  const cur = running.get(key);
+  if (cur && cur.job.nonce === job.nonce) return;
+  const q = queued.get(key);
+  if (q && q.nonce === job.nonce) return;
+  if (pendingProfiles.has(C.key(job))) return;
   if (job.ctx !== undefined) setContext(job);
   if (job.forget) {
     // A deleted chat: forget it and ack. No agent run.
@@ -472,11 +557,23 @@ function submit(job) {
     log(`hello from session ${job.session}${pendingRestore ? ' (restore offered)' : ''}`);
     return;
   }
-  const key = chatKey(job);
-  const cur = running.get(key);
-  if (cur && cur.job.id === job.id) return;
-  const q = queued.get(key);
-  if (q && q.id === job.id) return;
+  if (cfg.gameContext === false) { delete job.profile; delete job.profilePayload; }
+  if (job.profilePayload) {
+    try { C.snapshot(job.profilePayload); } catch (err) { finish(job, 'error', err.message); return; }
+  } else if (job.profile) {
+    const id = C.key(job), ready = contextProfiles.get(id);
+    if (ready) job.profilePayload = ready.text;
+    else {
+      if (!pendingProfiles.has(id)) {
+        pendingProfiles.set(id, job);
+        armContextWait(job);
+        publish(chatKey(job), contextRecord(job, 'context', 'Receiving the information checked in Sharing...'), true);
+        presenceBeat();
+      }
+      return;
+    }
+  }
+  // Different nonces remain distinct even when the display counter is reused.
   if (cur || running.size >= MAX_PARALLEL) {
     queued.set(key, job);
     log(`#${job.id}${job.session ? '@' + job.session : ''} queued (${cur ? 'chat busy' : running.size + ' running'})`);
@@ -495,6 +592,9 @@ function drainQueue() {
 }
 
 function runJob(job) {
+  clearTimeout(job.contextTimer);
+  job.deadline = job.deadline || Date.now() + (cfg.timeoutMs || 1800000);
+  if (Date.now() >= job.deadline) { finish(job, 'error', 'The conversation timed out while retrieving addon information.'); return; }
   const key = chatKey(job);
   const cwd = resolveCwd(job.cwd);
   job.cwd = cwd;
@@ -533,7 +633,7 @@ function runJob(job) {
     return;
   }
   const skey = sessKey(job);
-  if (job.newSession) { delete state.sessions[skey]; delete state.sessions[key]; }
+  if (job.newSession) { delete state.sessions[skey]; delete state.sessions[key]; job.newSession = false; }
   // Agents keep sessions per project folder, and a session belongs to the agent
   // that made it, so a chat that changes either starts fresh.
   const prevCwd = state.sessionCwd && state.sessionCwd[skey];
@@ -551,21 +651,26 @@ function runJob(job) {
     log(`${tag} allowed for ${agentId}: ${job.allow.join(', ')}${added.length ? '' : ' (already allowed)'}`);
   }
   maybeOfferRestore(job);
-  noteMessage(job, 'user', job.text);
+  if (!job.userRecorded) { noteMessage(job, 'user', job.text); job.userRecorded = true; }
   const resume = state.sessions[skey] || state.sessions[key];
 
-  const ctx = gameContext();
+  // A full snapshot is permission-bound to this turn. Never re-inject an older
+  // global summary whose fields may since have been unchecked or belong to another chat.
+  const ctx = cfg.gameContext === false ? '' : job.profilePayload
+    ? 'The explicitly selected addon information is attached to this message as JSON. Use that snapshot, not older character facts.'
+    : gameContext();
   const system = P.systemPrompt(ctx, primer());
   const systemShort = P.systemPrompt(ctx, '');
   const promptFile = path.join(TMP_DIR, `prompt-${job.id}-${Date.now().toString(36)}.txt`);
-  const input = agent.input({ prompt: job.text, system, systemShort, resume, cfg: acfg });
+  const prompt = job.continuation || C.prompt(cfg.gameContext === false ? '' : job.profilePayload, job.text);
+  const input = agent.input({ prompt, system, systemShort, resume, cfg: acfg });
   if (input.promptFile !== undefined) {
     try { fs.mkdirSync(TMP_DIR, { recursive: true }); fs.writeFileSync(promptFile, input.promptFile); }
     catch (e) { finish(job, 'error', `Could not write the prompt file ${promptFile}: ${e.message}`); return; }
   }
   const args = [...cmd.args, ...agent.args({
     cfg: acfg, resume, cwd, system, systemShort, promptFile,
-    prompt: job.text, timeoutMs: cfg.timeoutMs,
+    prompt, timeoutMs: Math.max(1, job.deadline - Date.now()),
   })];
   const env = agent.env({ ...process.env });
   // Where this run's tools append map commands (docs/MAP.md); any agent can use it.
@@ -578,15 +683,15 @@ function runJob(job) {
   log(`${tag} (${job.via}) ${agent.name} starting in ${cwd}${resume ? ' (resume ' + resume.slice(0, 8) + ')' : ' (new session)'}${ctx ? ' [game context]' : ''}${running.size ? ' [' + (running.size + 1) + ' running]' : ''}`);
   const child = spawn(cmd.file, args, { cwd, env, windowsHide: true, stdio: [input.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
   running.set(key, { job, child });
-  publish(key, { chat: job.chat, id: job.id, status: 'working', text: resume ? 'thinking...' : 'starting a new session...', cwd, session: resume, agent: agentId }, true);
+  publish(key, { chat: job.chat, id: job.id, nonce: job.nonce, status: 'working', text: resume ? 'thinking...' : 'starting a new session...', cwd, session: resume, agent: agentId }, true);
   if (input.stdin !== undefined) { child.stdin.on('error', () => {}); child.stdin.end(input.stdin); }
 
   const parser = agent.parser();
   const progress = [];
   let sessionId = resume || '';
   let result = null;       // { text, error } once the agent has produced its reply
-  const denied = new Set(); // allowlist rules the run was refused (Claude syntax)
-  const notes = [];        // bridge remarks appended to the reply
+  const denied = new Set(job.contextDenied || []); // permission rules remain visible across read continuations
+  const notes = [...(job.contextNotes || [])];
   let stderr = '';
   let buffer = '';
   let stdoutText = '';
@@ -596,7 +701,7 @@ function runJob(job) {
     progress.push(line);
     while (progress.length > 10) progress.shift();
     beat(job);
-    publish(key, { chat: job.chat, id: job.id, status: 'working', text: progress.join('\n'), cwd, session: sessionId, agent: agentId }, false);
+    publish(key, { chat: job.chat, id: job.id, nonce: job.nonce, status: 'working', text: progress.join('\n'), cwd, session: sessionId, agent: agentId }, false);
   };
   if (agent.stream === 'text') pushProgress(`${agent.name} is working (no live progress)`);
   if (input.note) notes.push(input.note);
@@ -647,7 +752,7 @@ function runJob(job) {
   const timer = setTimeout(() => {
     log(`${tag} timed out after ${cfg.timeoutMs} ms, killing`);
     killTree(child);
-  }, cfg.timeoutMs || 1800000);
+  }, Math.max(1, job.deadline - Date.now()));
 
   const cleanup = () => {
     clearTimeout(timer);
@@ -662,6 +767,7 @@ function runJob(job) {
 
   child.on('close', (code) => {
     cleanup();
+    if (job.finished) return;
     if (buffer.trim()) handleLine(buffer.trim());
     if (!parserError && typeof parser.finish === 'function') {
       try {
@@ -682,6 +788,21 @@ function runJob(job) {
     const mapped = takeMapCommands(job, result ? result.text : '');
     if (result) result.text = mapped.text;
     if (mapped.note) notes.push(mapped.note);
+    if (result && !result.error) {
+      try {
+        const requested = C.requests(result.text);
+        if (requested.queries.length) {
+          job.contextNotes = notes;
+          job.contextDenied = [...denied];
+          requestContext(job, requested.queries);
+          return;
+        }
+        result.text = requested.text;
+      } catch (err) {
+        finish(job, 'error', `Invalid addon information request: ${err.message}`, sessionId);
+        return;
+      }
+    }
     const extra = notes.length ? `\n\n[bridge] ${notes.join('\n\n[bridge] ')}` : '';
     if (result && !result.error) {
       const body = String(result.text || '').trim() || (notes.length ? '' : `(${agent.name} finished without a reply)`);
@@ -697,7 +818,15 @@ function runJob(job) {
 function finish(job, status, text, session, denied) {
   if (job.finished) return; // spawn failures fire both 'error' and 'close'
   job.finished = true;
-  running.delete(chatKey(job));
+  clearTimeout(job.contextTimer);
+  clearInterval(job.contextWatcher);
+  pendingProfiles.delete(C.key(job));
+  pendingQueries.delete(C.key(job));
+  contextProfiles.delete(C.key(job));
+  contextTransfers.forget(job);
+  const key = chatKey(job);
+  if (running.get(key)?.job.nonce === job.nonce) running.delete(key);
+  if (queued.get(key)?.nonce === job.nonce) queued.delete(key);
   markHandled(job);
   saveState();
   // A finished reply ends with the "TL;DR:" block the system prompt asks for:
@@ -714,11 +843,11 @@ function finish(job, status, text, session, denied) {
     summary = P.stripMacroBlocks(summary);
   }
   noteMessage(job, status === 'done' ? 'assistant' : 'system', status === 'done' ? text : 'Bridge error: ' + text);
-  publish(chatKey(job), { chat: job.chat, id: job.id, status, text, summary, cwd: job.cwd, session, denied, macros, agent: job.agent || '' }, true);
+  publish(chatKey(job), { chat: job.chat, id: job.id, nonce: job.nonce, status, text, summary, cwd: job.cwd, session, denied, macros, agent: job.agent || '' }, true);
   signal('sig', job.id, true);
   log(`#${job.id}${job.session ? '@' + job.session : ''} ${status} (${text.length} chars${summary ? ', summary ' + summary.length : ', no summary'})`);
   drainQueue();
-  if (exitWhenIdle && running.size === 0) process.exit(status === 'done' ? 0 : 1);
+  if (exitWhenIdle && running.size === 0 && pendingProfiles.size === 0 && queued.size === 0) process.exit(status === 'done' ? 0 : 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -731,6 +860,9 @@ function pollSavedVariables() {
   try { st = fs.statSync(SAVED_VARS); } catch { return; }
   if (st.mtimeMs === lastMtime) return;
   lastMtime = st.mtimeMs;
+  let response;
+  try { response = P.parseContextOutbox(fs.readFileSync(SAVED_VARS, 'utf8')); } catch {}
+  if (response) submit(response);
   const job = readOutbox();
   if (job) submit(job);
 }
@@ -825,11 +957,11 @@ function discoverModels() {
 findSavedVars();
 banner();
 if (inject !== null) {
-  submit({ id: state.lastId + 1, session: '', chat: '', text: inject, cwd: '', newSession: false, via: 'inject', agent: injectAgent || '' });
+  submit({ id: state.lastId + 1, nonce: randomBytes(16).toString('hex'), session: '', chat: '', text: inject, cwd: '', newSession: false, via: 'inject', agent: injectAgent || '' });
 } else {
   pollSavedVariables();
   if (once) {
-    if (running.size === 0) { console.log('nothing pending'); process.exit(0); }
+    if (running.size === 0 && pendingProfiles.size === 0) { console.log('nothing pending'); process.exit(rejectedInput ? 1 : 0); }
   } else {
     setInterval(pollSavedVariables, cfg.pollMs || 750);
     discoverModels();

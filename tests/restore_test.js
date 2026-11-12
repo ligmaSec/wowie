@@ -44,17 +44,20 @@ test('slot file round-trips replies, denied rules, cwd, agents and a restore bun
     ] }],
   };
   const lua = P.luaTable('WoWAI_SlotData',
-    [{ chat: 'c9', id: 3, status: 'done', text: 'ok\ttab', denied: ['WebSearch', 'Bash(cargo:*)'], agent: 'grok' }],
+    [{ chat: 'c9', id: 3, nonce: 'owner-000003', status: 'done', text: 'ok\ttab', denied: ['WebSearch', 'Bash(cargo:*)'], agent: 'grok' }],
     { cwd: 'C:\\proj', restore, now: 1700000000123, agent: 'claude', agents: ['claude', 'codex', 'grok'] });
   const d = readSlot(lua, 'WoWAI_SlotData');
   assert.equal(d.now, 1700000000);
   assert.equal(d.cwd, 'C:\\proj');
   assert.equal(d.agent, 'claude');
   assert.deepEqual(d.agents, ['claude', 'codex', 'grok']);
+  assert.equal(d.requestProtocol, 1);
+  assert.equal(d.contextProtocol, 2);
   assert.equal(d.replies.length, 1);
   assert.deepEqual(d.replies[0].denied, ['WebSearch', 'Bash(cargo:*)']);
   assert.equal(d.replies[0].text, 'ok\ttab');
   assert.equal(d.replies[0].agent, 'grok');
+  assert.equal(d.replies[0].nonce, 'owner-000003');
   assert.equal(d.restore.token, 'tok1');
   assert.equal(d.restore.chats.length, 1);
   assert.equal(d.restore.chats[0].messages[0].text, 'hi "there"\nnew line');

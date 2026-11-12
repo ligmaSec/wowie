@@ -22,37 +22,38 @@ test('parseFlags reads new-session, hello, forget, context, agent and allow list
   assert.deepEqual(P.parseFlags('n;allow=WebSearch, Bash(git:*),'), { ...none, newSession: true, allow: ['WebSearch', 'Bash(git:*)'] });
   assert.deepEqual(P.parseFlags('agent=Codex'), { ...none, agent: 'codex' });
   assert.deepEqual(P.parseFlags('n;agent=grok;allow=WebSearch'), { ...none, newSession: true, agent: 'grok', allow: ['WebSearch'] });
+  assert.deepEqual(P.parseFlags('nonce=turn-123_ABC'), { ...none, nonce: 'turn-123_ABC' });
 });
 
 test('jobsFromStrip parses the current record format and keeps separators inside text', () => {
-  const rec = ['sess', 'chat1', '12', 'realms', 'allow=WebSearch', 'My chat', 'hello\x1Fworld'].join('\x1F');
+  const rec = ['sess', 'chat1', '12', 'realms', 'nonce=turn-000012;allow=WebSearch', 'My chat', 'hello\x1Fworld'].join('\x1F');
   const jobs = P.jobsFromStrip(12, rec);
   assert.equal(jobs.length, 1);
-  assert.deepEqual(jobs[0], { session: 'sess', chat: 'chat1', id: 12, cwd: 'realms', newSession: false, hello: false, forget: false, context: false, allow: ['WebSearch'], agent: '', name: 'My chat', text: 'hello\x1Fworld', via: 'pixel' });
+  assert.deepEqual(jobs[0], { session: 'sess', chat: 'chat1', id: 12, nonce: 'turn-000012', cwd: 'realms', newSession: false, hello: false, forget: false, context: false, allow: ['WebSearch'], agent: '', name: 'My chat', text: 'hello\x1Fworld', via: 'pixel' });
   // A chat that picked its own agent says so in the flags.
-  const codex = P.jobsFromStrip(13, ['sess', 'chat1', '13', '', 'agent=codex', 'My chat', 'hi'].join('\x1F'))[0];
+  const codex = P.jobsFromStrip(13, ['sess', 'chat1', '13', '', 'nonce=turn-000013;agent=codex', 'My chat', 'hi'].join('\x1F'))[0];
   assert.equal(codex.agent, 'codex');
   assert.equal(codex.text, 'hi');
 });
 
 test('jobsFromStrip reads the game context field only when the flags say so', () => {
   const ctx = 'Game: World of Warcraft: Forever\nCharacter: Testchar, level 23 Hunter';
-  const withCtx = ['sess', 'chat1', '13', '', 'c', 'My chat', ctx, 'is this\x1Fgood'].join('\x1F');
+  const withCtx = ['sess', 'chat1', '13', '', 'nonce=turn-000013;c', 'My chat', ctx, 'is this\x1Fgood'].join('\x1F');
   const jobs = P.jobsFromStrip(13, withCtx);
   assert.equal(jobs[0].context, true);
   assert.equal(jobs[0].ctx, ctx);
   assert.equal(jobs[0].text, 'is this\x1Fgood');
   // An empty context clears it; a hello carries one too.
-  const hello = P.jobsFromStrip(14, ['sess', 'chat1', '14', '', 'h;c', 'My chat', '', ''].join('\x1F'))[0];
+  const hello = P.jobsFromStrip(14, ['sess', 'chat1', '14', '', 'nonce=hello-000014;h;c', 'My chat', '', ''].join('\x1F'))[0];
   assert.equal(hello.hello, true);
   assert.equal(hello.ctx, '');
   assert.equal(hello.text, '');
   // Without the flag, a seventh field is just text with a separator in it.
-  const plain = P.jobsFromStrip(15, ['sess', 'chat1', '15', '', '', 'My chat', 'a', 'b'].join('\x1F'))[0];
+  const plain = P.jobsFromStrip(15, ['sess', 'chat1', '15', '', 'nonce=turn-000015', 'My chat', 'a', 'b'].join('\x1F'))[0];
   assert.equal(plain.ctx, undefined);
   assert.equal(plain.text, 'a\x1Fb');
   // A "c" flag on a record too short to hold the field is not trusted.
-  const short = P.jobsFromStrip(16, ['sess', 'chat1', '16', '', 'c', 'My chat', 'only text'].join('\x1F'))[0];
+  const short = P.jobsFromStrip(16, ['sess', 'chat1', '16', '', 'nonce=turn-000016;c', 'My chat', 'only text'].join('\x1F'))[0];
   assert.equal(short.ctx, undefined);
   assert.equal(short.text, 'only text');
 });
@@ -93,7 +94,7 @@ test('splitSummary takes the last TL;DR block for the game chat and keeps the wh
   assert.equal(P.splitSummary('a TL;DR: inline\nmore').summary, '');
   assert.equal(P.splitSummary('first TL;DR: x\n\nbody\n\nTL;DR: last one').summary, 'last one');
   // The slot file carries the summary only when there is one.
-  const lua = P.luaTable('WoWAI_SlotData', [{ chat: 'c', id: 1, status: 'done', text: 'body\nTL;DR: short', summary: 'short' }, { chat: 'c', id: 2, status: 'done', text: 'plain' }]);
+  const lua = P.luaTable('WoWAI_SlotData', [{ chat: 'c', id: 1, nonce: 'turn-000001', status: 'done', text: 'body\nTL;DR: short', summary: 'short' }, { chat: 'c', id: 2, nonce: 'turn-000002', status: 'done', text: 'plain' }]);
   assert.ok(lua.includes('summary = "short"'));
   assert.equal((lua.match(/summary = /g) || []).length, 1);
 });
@@ -108,7 +109,7 @@ test('the shipped primer exists, mentions the essentials, and stays small enough
 });
 
 test('jobsFromStrip handles several records per frame and older formats', () => {
-  const a = ['s', 'c1', '3', '', '', 'A', 'first'].join('\x1F');
+  const a = ['s', 'c1', '3', '', 'nonce=turn-000003', 'A', 'first'].join('\x1F');
   const b = ['s', 'c2', '4', 'C:\\x', 'n', 'second'].join('\x1F'); // no-name format
   const c = ['s', 'C:\\y', '', 'third'].join('\x1F'); // pre-chat format
   const jobs = P.jobsFromStrip(9, [a, b, c].join('\x1E'));
@@ -119,8 +120,8 @@ test('jobsFromStrip handles several records per frame and older formats', () => 
 
 test('parseOutbox decodes the SavedVariables fallback', () => {
   const hex = s => Buffer.from(s, 'utf8').toString('hex');
-  const src = `WoWAIDB = {\n["outbox"] = {\n["id"] = 7,\n["session"] = "abc123",\n["chat"] = "c1",\n["text"] = "${hex('héllo')}",\n["cwd"] = "${hex('realms')}",\n["newSession"] = true,\n},\n["settings"] = {},\n}`;
-  assert.deepEqual(P.parseOutbox(src), { id: 7, session: 'abc123', chat: 'c1', text: 'héllo', cwd: 'realms', newSession: true, via: 'reload' });
+  const src = `WoWAIDB = {\n["outbox"] = {\n["id"] = 7,\n["session"] = "abc123",\n["chat"] = "c1",\n["nonce"] = "turn-000007",\n["text"] = "${hex('héllo')}",\n["cwd"] = "${hex('realms')}",\n["newSession"] = true,\n},\n["settings"] = {},\n}`;
+  assert.deepEqual(P.parseOutbox(src), { id: 7, session: 'abc123', chat: 'c1', nonce: 'turn-000007', text: 'héllo', cwd: 'realms', newSession: true, via: 'reload' });
   const withAllow = src.replace('["newSession"]', `["allow"] = "${hex('WebSearch\x1fBash(git:*)')}",\n["newSession"]`);
   assert.deepEqual(P.parseOutbox(withAllow).allow, ['WebSearch', 'Bash(git:*)']);
   const withCtx = src.replace('["newSession"]', `["ctx"] = "${hex('Character: Testchar')}",\n["newSession"]`);
@@ -158,20 +159,41 @@ test('describeToolUse gives one short line per tool call', () => {
   assert.equal(P.describeToolUse({ name: 'Mystery' }), 'Mystery');
 });
 
-test('handled ids are tracked per session token and capped', () => {
-  const state = { lastId: 0, handled: {}, sessions: {} };
-  const job = { session: 's1', id: 5 };
-  assert.equal(P.alreadyHandled(state, job), false);
-  P.markHandled(state, job, 1000);
+test('request receipts use session and nonce, never rolled-back counters or numeric history', () => {
+  const state = { lastId: 146, handled: { s1: { 146: 1 } }, sessions: {} };
+  const hello = P.jobsFromStrip(146, ['s1', 'chat', '146', '', 'h;nonce=hello-000146', 'Chat', ''].join('\x1f'))[0];
+  P.markHandled(state, hello, 1000);
+  const job = { session: 's1', id: 146, nonce: 'question-000146' };
+  assert.equal(P.alreadyHandled(state, job), false, 'an old hello and numeric receipt must not discard a new question');
+  P.markHandled(state, job, 2000);
   assert.equal(P.alreadyHandled(state, job), true);
-  assert.equal(P.alreadyHandled(state, { session: 's2', id: 5 }), false);
-  assert.equal(state.lastId, 5);
-  assert.equal(state.seen.s1, 1000);
-  for (let i = 1; i <= 1200; i++) P.markHandled(state, { session: 's1', id: i });
-  assert.ok(Object.keys(state.handled.s1).length <= 1000);
-  // Sessionless (inject / very old addon) jobs fall back to the high-water mark.
-  assert.equal(P.alreadyHandled(state, { session: '', id: 3 }), true);
-  assert.equal(P.alreadyHandled(state, { session: '', id: 5000 }), false);
+  assert.equal(P.alreadyHandled(state, { ...job, id: 1 }), true, 'a nonce retry is not a new turn');
+  assert.equal(P.alreadyHandled(state, { ...job, session: 's2' }), false);
+  assert.equal(P.alreadyHandled(state, { ...job, nonce: 'another-000146' }), false);
+  assert.equal(state.lastId, 146);
+  assert.equal(state.seen.s1, 2000);
+  assert.equal(state.handled.s1[146], 1, 'numeric receipts remain history only');
+  for (let i = 1; i <= 1200; i++) P.markHandled(state, { session: 's1', id: i, nonce: `request-${i}` });
+  assert.ok(Object.keys(state.handledNonces.s1).length <= 1000);
+  assert.equal(P.alreadyHandled(state, { session: '', id: 3, nonce: 'inject-000003' }), false);
+  P.markHandled(state, { session: '', id: 3, nonce: 'inject-000003' });
+  assert.equal(P.alreadyHandled(state, { session: '', id: 3, nonce: 'inject-000003' }), true);
+});
+
+test('nonce-less and invalid requests cannot acquire receipts, including numeric receipt lookalikes', () => {
+  const state = { lastId: 12345678, handled: { s: { 12345678: 1 } } };
+  for (const nonce of [undefined, '', 'short', 'bad nonce', 'valid-123\n', 'x'.repeat(65)]) {
+    assert.equal(P.alreadyHandled(state, { session: 's', id: 12345678, nonce }), false);
+    assert.throws(() => P.markHandled(state, { session: 's', id: 12345678, nonce }), /nonce/);
+  }
+  const job = { session: 's', id: 12345678, nonce: '12345678' };
+  assert.equal(P.alreadyHandled(state, job), false);
+  P.markHandled(state, job);
+  assert.equal(P.alreadyHandled(state, job), true);
+  const special = { ...job, nonce: '__proto__' };
+  assert.equal(P.alreadyHandled(state, special), false);
+  P.markHandled(state, special);
+  assert.equal(P.alreadyHandled(JSON.parse(JSON.stringify(state)), special), true);
 });
 
 test('pruneStale forgets session tokens not seen for a month', () => {

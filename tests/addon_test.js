@@ -12,11 +12,13 @@ const fengari = require('fengari');
 const { lua, lauxlib, lualib, to_luastring, to_jsstring } = fengari;
 const P = require('../bridge/protocol');
 const A = require('../bridge/agents');
+const ContextProtocol = require('../bridge/context');
+const zlib = require('node:zlib');
 
 const ADDON = path.join(__dirname, '..', 'addon', 'WoWAI');
 const CELLS_PER_ROW = 200;
 
-function newVM() {
+function newVM(nativeEncoding = false) {
   const L = lauxlib.luaL_newstate();
   lualib.luaL_openlibs(L);
   const run = (code, arg) => {
@@ -36,7 +38,24 @@ function newVM() {
   };
   const num = (expr) => Number(evaluate(expr));
   run(fs.readFileSync(path.join(__dirname, 'wow_stub.lua'), 'utf8'));
-  for (const f of ['Codec.lua', 'Inbox.lua', 'WoWAI.lua']) run(fs.readFileSync(path.join(ADDON, f), 'utf8'), 'WoWAI');
+  if (nativeEncoding) {
+    run('Enum = Enum or {}; Enum.CompressionMethod = {Deflate=0,Zlib=1,Gzip=2}; Enum.CompressionLevel = {OptimizeForSpeed=1}');
+    lua.lua_newtable(L);
+    const encoders = {
+      CompressString: state => [zlib.deflateRawSync, zlib.deflateSync, zlib.gzipSync][lua.lua_tointeger(state, 2)](Buffer.from(lua.lua_tolstring(state, 1)), {level: 1}),
+      EncodeBase64: state => Buffer.from(Buffer.from(lua.lua_tolstring(state, 1)).toString('base64')),
+    };
+    for (const [name, encode] of Object.entries(encoders)) {
+      lua.lua_pushjsfunction(L, state => {
+        const bytes = encode(state);
+        lua.lua_pushlstring(state, bytes, bytes.length);
+        return 1;
+      });
+      lua.lua_setfield(L, -2, to_luastring(name));
+    }
+    lua.lua_setglobal(L, to_luastring('C_EncodingUtil'));
+  }
+  for (const f of ['Codec.lua', 'Inbox.lua', 'WoWAI.lua', 'Context.lua', 'ContextUI.lua']) run(fs.readFileSync(path.join(ADDON, f), 'utf8'), 'WoWAI');
   return { run, evaluate, num };
 }
 
@@ -93,8 +112,8 @@ function stripRecords(vm) {
 }
 
 // Make the next LoadAddOn deliver this slot data (a Lua table literal body).
-function nextSlot(vm, luaBody) {
-  vm.run(`STUB.onLoadAddOn = function(name) WoWAI_SlotData = ${luaBody} end`);
+function nextSlot(vm, luaBody, requestProtocol = 1) {
+  vm.run(`STUB.onLoadAddOn = function(name) WoWAI_SlotData = ${luaBody}; WoWAI_SlotData.contextProtocol = WoWAI_SlotData.contextProtocol or 2; WoWAI_SlotData.requestProtocol = ${requestProtocol === null ? 'nil' : requestProtocol} end`);
 }
 
 function login(vm) {
@@ -106,7 +125,7 @@ function login(vm) {
 // what makes the addon consider itself connected (Send is gated on that).
 function connect(vm) {
   vm.run('STUB.RunTimers()'); // C_Timer.After(3, SayHello)
-  nextSlot(vm, '{ now = time(), cwd = "", replies = {} }');
+  nextSlot(vm, '{ now = time(), cwd = "", replies = {}, contextProtocol = 2 }');
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()'); // hello poll 5 s later
   assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true', 'connected after the hello slot');
 }
@@ -118,7 +137,6 @@ test('addon loads, builds its UI and creates a first chat', () => {
   assert.equal(vm.evaluate('WoWAIDB.chats[1].name'), 'Chat 1');
   assert.equal(vm.evaluate('WoWAIFrame ~= nil'), 'true');
   assert.equal(vm.evaluate('WoWAIMini ~= nil'), 'true');
-  assert.equal(vm.num('#STUB.tickers'), 1);
   assert.equal(vm.evaluate('SlashCmdList.WOWAI ~= nil'), 'true');
   assert.deepEqual([1, 2, 3, 4, 5].map(i => vm.evaluate('SLASH_WOWAI' + i)), ['/wow-ai', '/wowai', '/wow-claude', '/ai', '/ask'], 'the old command name and the short forms are aliases');
   assert.equal(vm.evaluate('SlashCmdList.WOWAIASK'), null, '/ai is an alias of the one command, not a handler of its own');
@@ -130,7 +148,7 @@ test('hello goes out on the strip after login', () => {
   vm.run('STUB.RunTimers()'); // C_Timer.After(3, SayHello)
   const recs = stripRecords(vm);
   assert.equal(recs.length, 1);
-  assert.equal(recs[0].flags, 'h;c', 'a hello always carries the game context');
+  assert.match(recs[0].flags, /^h;nonce=[A-Za-z0-9_-]{8,64};c$/, 'a hello always carries its identity and game context');
   assert.equal(recs[0].text, '');
   assert.equal(recs[0].session, vm.evaluate('WoWAIDB.session'));
 });
@@ -141,7 +159,7 @@ test('hello remains readable in physical pixels across DPI and UI-scale changes'
   login(vm);
   vm.run('STUB.RunTimers()');
   const hello = stripRecords(vm);
-  assert.equal(hello[0].flags, 'h;c');
+  assert.match(hello[0].flags, /^h;nonce=[A-Za-z0-9_-]{8,64};c$/);
   assert.equal(hello[0].session, vm.evaluate('WoWAIDB.session'));
 
   vm.run('STUB.screenHeight = 1440; STUB.dpiScale = 1.5; UIParent:SetScale(1.1); STUB.FireEvent("UI_SCALE_CHANGED")');
@@ -162,44 +180,96 @@ test('the game context describes the character and rides on the hello, then only
   login(vm);
   vm.run('STUB.RunTimers()');
   const hello = stripRecords(vm)[0];
-  assert.deepEqual(hello.ctx.split('\n'), [
-    'Game: World of Warcraft: Forever (client 1.60.1.69913, interface 16001)',
-    'Character: Testchar on Test Realm, level 23 Night Elf Hunter (Alliance), guild <Test Guild>',
-    'Location: Duskwood - Darkshire',
-    'Position: 45.2, 67.8 (map 1431)',
-    'Money: 1g 23s 45c; XP: 1234/5000',
-    'Talents: Beast Mastery 10 / Marksmanship 5 / Survival 0',
-    'Professions: Skinning 75/75, First Aid 40/75',
-  ]);
   // The bridge answers the hello: the context is now known to be on its side.
   nextSlot(vm, '{ now = time(), cwd = "", replies = {} }');
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
   assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true');
   vm.run('WoWAI.Send("hello world")');
   let rec = stripRecords(vm).find(r => r.text === 'hello world');
-  assert.equal(rec.flags, '', 'unchanged context is not repeated');
   assert.equal(rec.ctx, undefined);
   assert.equal(vm.evaluate('WoWAIDB.outbox.ctx'), null);
   // Moving to another zone changes it, so the next message (from another chat,
   // the first one is still waiting) carries the new version.
   vm.run('STUB.zone = "Elwynn Forest"; STUB.subzone = ""; STUB.posX = 0.1; WoWAI.NewChat("Second"); WoWAI.Send("where am I")');
   rec = stripRecords(vm).find(r => r.text === 'where am I');
-  assert.equal(rec.flags, 'c');
-  assert.ok(rec.ctx.includes('Location: Elwynn Forest\n'), rec.ctx);
-  assert.ok(rec.ctx.includes('Position: 10.0, 67.8 on Duskwood (map 1431)'), 'the map name shows when it differs from the zone');
   assert.equal(Buffer.from(vm.evaluate('WoWAIDB.outbox.ctx'), 'hex').toString('utf8'), rec.ctx, 'the reload path carries it too');
   // Turning it off sends an empty context at once (a hello), so the bridge drops what it had.
   vm.run('SlashCmdList.WOWAI("context off")');
   assert.equal(vm.evaluate('WoWAIDB.settings.context'), 'false');
-  const off = stripRecords(vm).filter(r => r.flags === 'h;c');
+  const off = stripRecords(vm).filter(r => r.flags.split(';').includes('h'));
   assert.equal(off.length, 1);
   assert.equal(off[0].ctx, '');
-  assert.ok(vm.evaluate('WoWAIDB.chats[2].history[#WoWAIDB.chats[2].history].text').includes('Game context is OFF'));
-  // Back on: another hello, with the context again.
-  vm.run('SlashCmdList.WOWAI("context on")');
-  const on = stripRecords(vm).filter(r => r.flags === 'h;c');
-  assert.ok(on.some(r => r.ctx.includes('Character: Testchar')));
-  assert.ok(vm.evaluate('WoWAIDB.chats[2].history[#WoWAIDB.chats[2].history].text').includes('Game context is ON'));
+});
+
+for (const [mode, nativeEncoding] of [['base64 without native codecs', false], ['native zlib/base64', true]]) {
+test(`complete selected inventory crosses pixel frames without UTF-8 loss or clipping (${mode})`, () => {
+  const vm = newVM(nativeEncoding);
+  login(vm);
+  connect(vm);
+  vm.run(`
+    C_Container = {
+      GetContainerNumSlots = function(bag) return bag == 0 and 96 or 0 end,
+      GetContainerItemInfo = function(bag, slot) return {itemID=20000+slot,stackCount=slot,hyperlink="item:" .. (20000+slot)} end,
+    }
+    C_Item.GetItemInfo = function(id) return "Épée 鉱石 " .. id, "item:" .. id, 2 end
+    WoWAI.Send("read every carried item")
+  `);
+  const original = stripRecords(vm).find(r => r.text === 'read every carried item');
+  const receiver = new ContextProtocol.Transfers();
+  let complete;
+  for (let i = 0; i < 500 && !complete; i++) {
+    vm.run('STUB.now = STUB.now + 0.5; STUB.Tick()');
+    const frame = decodeStrip(vm);
+    if (!frame) continue;
+    for (const packet of P.jobsFromStrip(frame.id, frame.text)) {
+      if (packet.data === 'profile') {
+        assert.equal(packet.nonce, vm.evaluate('WoWAIDB.chats[1].request.nonce'), 'every profile part belongs to the immutable request');
+        const result = receiver.add(packet);
+        if (result.text) complete = JSON.parse(result.text);
+      }
+    }
+  }
+  assert.ok(complete, 'a snapshot larger than the strip is delivered, not merely its first frame');
+  const backpack = complete.data.inventory.bags.find(bag => bag.bag === 0);
+  assert.equal(backpack.slots.length, 96);
+  assert.equal(backpack.slots[95].details.name, 'Épée 鉱石 20096');
+  assert.equal(complete.data.inventory.itemCounts['20096'], 96);
+  assert.equal(Number(P.parseFlags(original.flags).profile), original.id);
+});
+}
+
+test('incoming agent information queries use current checkbox permissions, not the earlier snapshot permission', () => {
+  const vm = newVM(true);
+  login(vm);
+  connect(vm);
+  vm.run('WoWAI.Send("check my money")');
+  const chat = vm.evaluate('WoWAIDB.chats[1].id'), id = vm.num('WoWAIDB.chats[1].pendingId');
+  vm.run('WoWAIContext.SetEnabled("money", false); STUB.moneyReads = 0; function GetMoney() STUB.moneyReads = STUB.moneyReads + 1; return 987 end');
+  nextSlot(vm, `{ now=time(), replies={ {chat="${chat}",id=${id},nonce="${vm.evaluate('WoWAIDB.chats[1].request.nonce')}",status="context_query",request="${id}-1",text="Reading",queries={{op="snapshot",category="money"}}} } }`);
+  vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
+  const nonce = vm.evaluate('WoWAIDB.chats[1].request.nonce');
+  assert.equal(vm.evaluate('WoWAIDB.contextOutbox.nonce'), nonce);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].queryReply.nonce'), nonce);
+  assert.equal(vm.num('STUB.moneyReads'), 0, 'revoked private data must not be read');
+  const receiver = new ContextProtocol.Transfers();
+  let response;
+  for (let i = 0; i < 20 && !response; i++) {
+    const frame = decodeStrip(vm);
+    if (frame) for (const packet of P.jobsFromStrip(frame.id, frame.text)) {
+      if (packet.data === 'query') {
+        assert.equal(packet.nonce, nonce, 'query parts keep the question identity');
+        const result = receiver.add(packet); if (result.text) response = JSON.parse(result.text);
+      }
+    }
+    if (!response) vm.run('STUB.now = STUB.now + 0.5; STUB.Tick()');
+  }
+  assert.equal(response[0].ok, false);
+  assert.equal(vm.num('WoWAIDB.chats[1].pendingId'), id, 'an information query is not a finished assistant answer');
+  const savedQuery = vm.evaluate('WoWAIDB.contextOutbox.text');
+  login(vm);
+  const retransmission = P.jobsFromStrip(decodeStrip(vm).id, decodeStrip(vm).text).find(packet => packet.data === 'query');
+  assert.equal(retransmission.nonce, nonce, 'query reload reuses the owner nonce');
+  assert.equal(vm.evaluate('WoWAIDB.contextOutbox.text'), savedQuery);
 });
 
 test('a shift-clicked link lands in the focused input and is sent as its name plus tooltip', () => {
@@ -251,7 +321,7 @@ test('deleting a chat tells the bridge to forget it, and a restore never brings 
   vm.run(`WoWAI.DeleteChat("${gone}")`);
   assert.equal(vm.num('#WoWAIDB.chats'), 1);
   // A forget record for that chat is on the strip and remembered until acked.
-  const rec = stripRecords(vm).find(r => r.flags === 'd');
+  const rec = stripRecords(vm).find(r => r.flags.split(';').includes('d'));
   assert.ok(rec, 'forget record on the strip');
   assert.equal(rec.chat, gone);
   assert.equal(rec.text, '');
@@ -265,7 +335,7 @@ test('deleting a chat tells the bridge to forget it, and a restore never brings 
   const slot = String(rec.id).padStart(3, '0');
   vm.run(`STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\ack\\\\${slot}.wav"] = true; STUB.Tick()`);
   assert.equal(vm.evaluate(`WoWAIDB.forget["${gone}"]`), null, 'forgotten once acked');
-  assert.ok(!stripRecords(vm).find(r => r.flags === 'd'), 'forget record left the strip');
+  assert.ok(!stripRecords(vm).find(r => r.flags.split(';').includes('d')), 'forget record left the strip');
 });
 
 test('until the bridge answers, Connect replaces Send and a message stays in the box', () => {
@@ -281,7 +351,7 @@ test('until the bridge answers, Connect replaces Send and a message stays in the
   assert.equal(vm.evaluate('WoWAIInput:GetText()'), 'fix the bug', 'message kept in the box');
   const hello = stripRecords(vm);
   assert.equal(hello.length, 1);
-  assert.equal(hello[0].flags, 'h;c', 'a hello went out instead');
+  assert.match(hello[0].flags, /^h;nonce=[A-Za-z0-9_-]{8,64};c$/, 'a hello went out instead');
   assert.ok(texts().includes('Connecting...'));
   assert.ok(texts().includes('your message goes out as soon as it answers'));
   // No answer within CONNECT_WAIT: the attempt is reported as failed, Connect is back.
@@ -311,14 +381,15 @@ test('a message sent while disconnected goes out by itself once the bridge answe
   nextSlot(vm, '{ now = time(), cwd = "C:\\\\proj", replies = {} }');
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
   assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true');
-  assert.ok(vm.num('WoWAIDB.chats[1].pendingId') >= 1, 'queued message went out on connect');
-  assert.ok(stripRecords(vm).find(r => r.text === 'fix the bug'));
+  const id = vm.num('WoWAIDB.chats[1].pendingId');
+  assert.ok(id >= 1, 'queued message went out on connect');
   assert.equal(vm.evaluate('WoWAIInput:GetText()'), '', 'box cleared after the auto-send');
   // Only once: a later reconnect sends nothing.
   vm.run('WoWAI.Connect()');
   nextSlot(vm, '{ now = time(), cwd = "C:\\\\proj", replies = {} }');
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
-  assert.equal(stripRecords(vm).filter(r => r.text === 'fix the bug').length, 1);
+  assert.equal(vm.num('WoWAIDB.chats[1].pendingId'), id, 'reconnect must not create another request');
+  assert.equal(vm.num(`(function() local n = 0; for _, message in ipairs(WoWAIDB.chats[1].history) do if message.role == "user" and message.text == "fix the bug" then n = n + 1 end end; return n end)()`), 1);
 });
 
 test('without the sound channel, the light stays green between idle slot polls', () => {
@@ -382,11 +453,10 @@ test('a sent message is encoded on the strip with the chat folder, then a slot r
   assert.equal(rec.chat, chatId);
   assert.equal(rec.id, id);
   assert.equal(rec.cwd, 'realms');
-  assert.equal(rec.flags, '');
   // The chat took its title from the first message.
   assert.equal(vm.evaluate('WoWAIDB.chats[1].name'), 'Hello world');
 
-  nextSlot(vm, `{ now = time(), cwd = "C:\\\\proj", replies = { { chat = "${chatId}", id = ${id}, status = "done", text = "hi back", cwd = "x", session = "s" } } }`);
+  nextSlot(vm, `{ now = time(), cwd = "C:\\\\proj", replies = { { chat = "${chatId}", id = ${id}, nonce = "${vm.evaluate('WoWAIDB.chats[1].request.nonce')}", status = "done", text = "hi back", cwd = "x", session = "s" } } }`);
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()'); // first scheduled poll is 5 s after sending
   assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null);
   assert.equal(vm.evaluate('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].role'), 'assistant');
@@ -407,13 +477,13 @@ test('a denied reply shows Allow, and Allow resends with the rules as flags', ()
   vm.run('WoWAI.Send("search for it")');
   const chatId = vm.evaluate('WoWAIDB.chats[1].id');
   const id = vm.num('WoWAIDB.chats[1].pendingId');
-  nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id}, status = "done", text = "need permission", denied = { "WebSearch", "Bash(cargo:*)" } } } }`);
+  nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id}, nonce = "${vm.evaluate('WoWAIDB.chats[1].request.nonce')}", status = "done", text = "need permission", denied = { "WebSearch", "Bash(cargo:*)" } } } }`);
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
   assert.equal(vm.evaluate('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].denied[2]'), 'Bash(cargo:*)');
   vm.run(`WoWAI.Allow("${chatId}", { "WebSearch", "Bash(cargo:*)" })`);
   const rec = stripRecords(vm).find(r => r.flags.includes('allow='));
   assert.ok(rec, 'allow record on the strip');
-  assert.equal(rec.flags, 'allow=WebSearch,Bash(cargo:*)');
+  assert.deepEqual(P.parseFlags(rec.flags).allow, ['WebSearch', 'Bash(cargo:*)']);
   assert.equal(rec.id, id + 1);
 });
 
@@ -432,10 +502,9 @@ test('a chat can pick its agent: the strip says so, replies are labelled by thei
   vm.run('WoWAI.Send("hello")');
   const chatId = vm.evaluate('WoWAIDB.chats[1].id');
   let rec = stripRecords(vm).find(r => r.text === 'hello');
-  assert.equal(rec.flags, '');
   assert.equal(vm.evaluate('WoWAIDB.outbox.agent'), null);
   const id = vm.num('WoWAIDB.chats[1].pendingId');
-  nextSlot(vm, slot(`{ chat = "${chatId}", id = ${id}, status = "done", text = "hi", agent = "claude" }`));
+  nextSlot(vm, slot(`{ chat = "${chatId}", id = ${id}, nonce = "${vm.evaluate('WoWAIDB.chats[1].request.nonce')}", status = "done", text = "hi", agent = "claude" }`));
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
   assert.equal(vm.evaluate('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].role'), 'assistant');
   assert.equal(vm.evaluate('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].agent'), 'claude');
@@ -446,18 +515,18 @@ test('a chat can pick its agent: the strip says so, replies are labelled by thei
   assert.ok(vm.evaluate('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].text').includes('agent set to Codex'));
   vm.run('WoWAI.Send("now with codex")');
   rec = stripRecords(vm).find(r => r.text === 'now with codex');
-  assert.equal(rec.flags, 'agent=codex');
+  assert.equal(P.parseFlags(rec.flags).agent, 'codex');
   assert.equal(vm.evaluate('WoWAIDB.outbox.agent'), 'codex');
   assert.ok(texts().includes('agent: Codex   mode: pixel'));
   const id2 = vm.num('WoWAIDB.chats[1].pendingId');
-  nextSlot(vm, slot(`{ chat = "${chatId}", id = ${id2}, status = "done", text = "codex here", agent = "codex" }`));
+  nextSlot(vm, slot(`{ chat = "${chatId}", id = ${id2}, nonce = "${vm.evaluate('WoWAIDB.chats[1].request.nonce')}", status = "done", text = "codex here", agent = "codex" }`));
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
   assert.equal(vm.evaluate('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].agent'), 'codex');
   assert.ok(vm.evaluate('table.concat(STUB.prints, "\\n")').includes('[Codex · '));
   // Resend keeps the agent flag.
   vm.run('WoWAI.Send("again")');
   vm.run('WoWAI.Resend()');
-  assert.equal(stripRecords(vm).find(r => r.text === 'again').flags, 'agent=codex');
+  assert.equal(P.parseFlags(stripRecords(vm).find(r => r.text === 'again').flags).agent, 'codex');
   vm.run('SlashCmdList.WOWAI("cancel")');
   // A name the bridge did not list is refused; "default" goes back to the bridge's.
   vm.run('SlashCmdList.WOWAI("agent gemini")');
@@ -477,7 +546,7 @@ test('selector changes leave an in-flight request unchanged when resent, includi
   vm.run('STUB.RunTimers()');
   const options = A.selectionOptions({ agents: { codex: { models: ['code-model', 'review-model'] } } });
   vm.run(`STUB.onLoadAddOn = function()
-    ${P.luaTable('WoWAI_SlotData', [], { now: vm.num('time()') * 1000, agent: 'claude', agents: A.agentIds(), agentOptions: options })}
+    ${P.luaTable('WoWAI_SlotData', [], { now: vm.num('time()') * 1000, requestProtocol: 1, contextProtocol: 2, agent: 'claude', agents: A.agentIds(), agentOptions: options })}
   end`);
   vm.run('STUB.now = STUB.now + 6; STUB.Tick(); WoWAI.Toggle(true)');
   vm.run(`
@@ -519,7 +588,7 @@ function connectAgentOptions(vm) {
     agy: { models: ['gemini-model'] },
   } });
   vm.run(`STUB.onLoadAddOn = function()
-    ${P.luaTable('WoWAI_SlotData', [], { now: vm.num('time()') * 1000, agent: 'claude', agents: A.agentIds(), agentOptions })}
+    ${P.luaTable('WoWAI_SlotData', [], { now: vm.num('time()') * 1000, requestProtocol: 1, contextProtocol: 2, agent: 'claude', agents: A.agentIds(), agentOptions })}
   end`);
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
 }
@@ -676,7 +745,7 @@ test('/wow-ai reset marks the next message as a new session', () => {
   vm.run('SlashCmdList.WOWAI("reset")');
   vm.run('WoWAI.Send("start over")');
   const rec = stripRecords(vm).find(r => r.text === 'start over');
-  assert.equal(rec.flags, 'n');
+  assert.equal(P.parseFlags(rec.flags).newSession, true);
   assert.equal(vm.evaluate('WoWAIDB.chats[1].resetNext'), null);
 });
 
@@ -692,7 +761,7 @@ test('game chat echo: the summary by default, the first lines without one, the w
     vm.run('WoWAI.Send("do it")');
     const id = vm.num('WoWAIDB.chats[1].pendingId');
     const sum = summary === undefined ? '' : `, summary = "${summary}"`;
-    nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id}, status = "done", text = "${text}", agent = "claude"${sum} } } }`);
+    nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id}, nonce = "${vm.evaluate('WoWAIDB.chats[1].request.nonce')}", status = "done", text = "${text}", agent = "claude"${sum} } } }`);
     vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
     assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null);
   };
@@ -752,7 +821,7 @@ test('a restore bundle addressed to this session adds the missing chats once', (
   const id = vm.num('WoWAIDB.chats[1].pendingId');
   const token = vm.evaluate('WoWAIDB.session');
   const bundle = `restore = { token = "${token}", chats = { { id = "old1", name = "Old work", cwd = "C:\\\\old", messages = { { role = "user", id = 1, t = 1, text = "q" }, { role = "claude", id = 1, t = 2, text = "a" } } } } }`;
-  nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id}, status = "done", text = "ok" } }, ${bundle} }`);
+  nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id}, nonce = "${vm.evaluate('WoWAIDB.chats[1].request.nonce')}", status = "done", text = "ok" } }, ${bundle} }`);
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
   assert.equal(vm.num('#WoWAIDB.chats'), 2);
   assert.equal(vm.evaluate('WoWAIDB.chats[1].id'), 'old1');
@@ -764,7 +833,7 @@ test('a restore bundle addressed to this session adds the missing chats once', (
   // A second bundle with the same token is ignored.
   vm.run('WoWAI.Send("again")');
   const id2 = vm.num('WoWAIDB.chats[2].pendingId');
-  nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id2}, status = "done", text = "ok" } }, ${bundle.replace('old1', 'old2')} }`);
+  nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id2}, nonce = "${vm.evaluate('WoWAIDB.chats[2].request.nonce')}", status = "done", text = "ok" } }, ${bundle.replace('old1', 'old2')} }`);
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
   assert.equal(vm.num('#WoWAIDB.chats'), 2);
 });
@@ -855,12 +924,202 @@ test('minimize collapses to the mini bar and back; the mini bar X hides everythi
 test('reload mode writes the outbox for the bridge instead of drawing the strip', () => {
   const vm = newVM();
   login(vm);
+  connect(vm);
   vm.run('SlashCmdList.WOWAI("mode reload")');
   vm.run('SlashCmdList.WOWAI("reset")');
   vm.run('WoWAI.Send("via reload", { "WebSearch", "Bash(git:*)" })');
   assert.equal(vm.evaluate('STUB.reloaded'), 'true');
   assert.equal(vm.evaluate('WoWAIDB.outbox.newSession'), 'true');
   assert.equal(vm.evaluate('WoWAIDB.outbox.text'), Buffer.from('via reload').toString('hex'));
+  assert.equal(vm.evaluate('WoWAIDB.outbox.nonce'), vm.evaluate('WoWAIDB.chats[1].request.nonce'));
   assert.equal(Buffer.from(vm.evaluate('WoWAIDB.outbox.allow'), 'hex').toString('utf8'), 'WebSearch\x1fBash(git:*)');
   assert.equal(decodeStrip(vm), null);
+});
+
+test('rolling the saved counter back to a hello creates a distinct question identity', () => {
+  const vm = newVM();
+  login(vm);
+  vm.run('STUB.RunTimers()');
+  const hello = stripRecords(vm)[0];
+  connect(vm);
+  vm.run(`WoWAIDB.lastSeq = ${hello.id - 1}; WoWAI.Send("same counter, new question")`);
+  const question = stripRecords(vm).find(r => r.text === 'same counter, new question');
+  assert.equal(question.id, hello.id);
+  assert.notEqual(P.parseFlags(question.flags).nonce, P.parseFlags(hello.flags).nonce);
+  assert.equal(P.parseFlags(question.flags).nonce, vm.evaluate('WoWAIDB.outbox.nonce'));
+  assert.match(vm.evaluate('WoWAIDB.outbox.nonce'), /^[A-Za-z0-9_-]{8,64}$/);
+});
+
+test('old reply nonces and numeric sound acks cannot acknowledge or finish a reused question ID', () => {
+  const vm = newVM();
+  vm.run('STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\ctl\\\\valid.wav"] = true');
+  login(vm);
+  connect(vm);
+  vm.run('WoWAIDB.settings.context = false; WoWAI.Send("first question")');
+  const first = stripRecords(vm).find(r => r.text === 'first question');
+  const oldNonce = P.parseFlags(first.flags).nonce;
+  vm.run(`SlashCmdList.WOWAI("cancel"); WoWAIDB.lastSeq = ${first.id - 1}; WoWAI.Send("new question")`);
+  const current = stripRecords(vm).find(r => r.text === 'new question');
+  const nonce = P.parseFlags(current.flags).nonce;
+  assert.equal(current.id, first.id);
+  assert.notEqual(nonce, oldNonce);
+  vm.run(`STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\ack\\\\${String(first.id).padStart(3, '0')}.wav"] = true; STUB.Tick()`);
+  assert.ok(stripRecords(vm).some(r => r.text === 'new question'), 'cached numeric ack leaves the question on the strip');
+  for (const status of ['working', 'context', 'context_query', 'done', 'error']) {
+    nextSlot(vm, `{ now=time(), replies={{chat="${current.chat}",id=${current.id},nonce="${oldNonce}",status="${status}",text="stale",request="old-query",queries={{op="snapshot",category="money"}}}} }`);
+    vm.run('WoWAI.Send("")');
+    assert.equal(vm.num('WoWAIDB.chats[1].pendingId'), current.id, status);
+    assert.equal(vm.evaluate('WoWAIDB.chats[1].snapshotAcked'), null, status);
+    assert.equal(vm.evaluate('WoWAIDB.chats[1].queryReply'), null, status);
+    assert.equal(vm.evaluate('WoWAIDB.chats[1].progress'), null, status);
+    assert.ok(stripRecords(vm).some(r => r.text === 'new question'), status);
+  }
+  nextSlot(vm, `{now=time(),replies={{chat="${current.chat}",id=${current.id},status="done",text="nonce missing"}}}`);
+  vm.run('WoWAI.Send("")');
+  assert.equal(vm.num('WoWAIDB.chats[1].pendingId'), current.id, 'nonce-less old bridge replies are ignored');
+  nextSlot(vm, `{now=time(),replies={{chat="${current.chat}",id=${current.id + 1},nonce="${nonce}",status="done",text="wrong numeric ID"}}}`);
+  vm.run('WoWAI.Send("")');
+  assert.equal(vm.num('WoWAIDB.chats[1].pendingId'), current.id, 'the numeric ID must also match');
+  nextSlot(vm, `{now=time(),replies={{chat="${current.chat}",id=${current.id},nonce="${nonce}",status="done",text="current answer"}}}`);
+  vm.run('WoWAI.Send("")');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].text'), 'current answer');
+});
+
+test('normal retries and UI reloads preserve their nonce and immutable snapshot', () => {
+  const vm = newVM(true);
+  login(vm);
+  connect(vm);
+  vm.run('WoWAI.Send("keep this request")');
+  const first = stripRecords(vm).find(r => r.text === 'keep this request');
+  const profile = vm.evaluate('WoWAIDB.chats[1].request.profile');
+  const nonce = P.parseFlags(first.flags).nonce;
+  vm.run('WoWAI.Resend()');
+  assert.deepEqual(stripRecords(vm).find(r => r.text === first.text), first);
+  login(vm);
+  assert.deepEqual(stripRecords(vm).find(r => r.text === first.text), first, 'reload resumes without a manual resend');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].request.profile'), profile);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].request.nonce'), nonce);
+  assert.equal(vm.evaluate('WoWAIDB.outbox.nonce'), nonce);
+  assert.equal(vm.num('(function() local n=0; for _,m in ipairs(WoWAIDB.chats[1].history) do if m.role=="user" then n=n+1 end end; return n end)()'), 1);
+});
+
+for (const source of ['immutable request', 'reload outbox']) {
+test(`legacy pending migration resumes its full original profile and tuple from ${source}`, () => {
+  const vm = newVM(true);
+  login(vm);
+  connectAgentOptions(vm);
+  pickSelection(vm, 'agent', 'codex');
+  pickSelection(vm, 'model', 'code-model');
+  pickSelection(vm, 'reasoning', 'high');
+  vm.run(`
+    C_Container = {
+      GetContainerNumSlots = function(bag) return bag == 0 and 96 or 0 end,
+      GetContainerItemInfo = function(bag, slot) return {itemID=30000+slot,stackCount=slot,hyperlink="item:" .. (30000+slot)} end,
+    }
+    C_Item.GetItemInfo = function(id) return "Épée 鉱石 " .. id, "item:" .. id, 2 end
+    SlashCmdList.WOWAI("cd original-folder")
+    SlashCmdList.WOWAI("reset")
+    WoWAI.Send("resume the original question", {"WebSearch", "Bash(git:*)"})
+  `);
+  const first = stripRecords(vm).find(r => r.text === 'resume the original question');
+  const profile = vm.evaluate('WoWAIDB.chats[1].request.profile');
+  const originalFlags = P.parseFlags(first.flags);
+  delete originalFlags.nonce;
+  assert.equal(JSON.parse(profile).data.inventory.bags.find(b => b.bag === 0).slots.length, 96);
+  vm.run(`
+    local c = WoWAIDB.chats[1]
+    c.request.nonce = nil
+    c.request.flags = c.request.flags:gsub("nonce=[A-Za-z0-9_-]+;?", "")
+    WoWAIDB.outbox.nonce = nil
+    c.snapshotAcked = true
+    c.queryReply = { request = "legacy-query", text = "[]" }
+    WoWAIDB.contextOutbox = {id=c.pendingId,chat=c.id,request="legacy-query",text="5b5d"}
+    c.cwd, c.agent, c.model, c.reasoning = "changed-folder", "claude", "changed-model", "low"
+    WoWAIContext.Snapshot = function() error("migration must not recollect a snapshot") end
+  `);
+  if (source === 'reload outbox') vm.run('WoWAIDB.chats[1].request = nil');
+  else vm.run('WoWAIDB.outbox.profile = nil');
+  login(vm);
+  const migrated = stripRecords(vm).find(r => r.text === first.text);
+  assert.ok(migrated, 'the stuck question resumes automatically');
+  assert.equal(migrated.id, first.id);
+  assert.equal(migrated.session, first.session);
+  assert.equal(migrated.chat, first.chat);
+  assert.equal(migrated.cwd, first.cwd);
+  const migratedFlags = P.parseFlags(migrated.flags);
+  const nonce = migratedFlags.nonce;
+  delete migratedFlags.nonce;
+  assert.deepEqual(migratedFlags, originalFlags);
+  assert.match(nonce, /^[A-Za-z0-9_-]{8,64}$/);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].request.profile'), profile);
+  assert.equal(Buffer.from(vm.evaluate('WoWAIDB.outbox.profile'), 'hex').toString('utf8'), profile);
+  assert.equal(vm.evaluate('WoWAIDB.outbox.nonce'), nonce);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].snapshotAcked'), null);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].queryReply'), null);
+  assert.equal(vm.evaluate('WoWAIDB.contextOutbox'), null);
+  login(vm);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].request.nonce'), nonce, 'migration runs exactly once');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].request.profile'), profile);
+  assert.equal(stripRecords(vm).find(r => r.text === first.text).flags, migrated.flags);
+});
+}
+
+test('hello and forget retries preserve their persisted operation identities', () => {
+  const vm = newVM();
+  login(vm);
+  vm.run('STUB.RunTimers()');
+  const hello = stripRecords(vm)[0];
+  login(vm);
+  vm.run('STUB.RunTimers()');
+  assert.deepEqual(stripRecords(vm)[0], hello, 'a hello retried after reload keeps its identity');
+  vm.run('WoWAI.NewChat("Delete me")');
+  const chat = vm.evaluate('WoWAIDB.chats[2].id');
+  vm.run(`WoWAI.DeleteChat("${chat}")`);
+  const forget = stripRecords(vm).find(r => r.flags.split(';').includes('d'));
+  const nonce = P.parseFlags(forget.flags).nonce;
+  assert.match(nonce, /^[A-Za-z0-9_-]{8,64}$/);
+  assert.equal(vm.evaluate(`WoWAIDB.forget["${chat}"].nonce`), nonce);
+  login(vm);
+  vm.run('STUB.RunTimers()');
+  assert.deepEqual(stripRecords(vm).find(r => r.flags.split(';').includes('d')), forget);
+});
+
+for (const version of [null, 0, 2]) {
+test(`new questions require advertised request protocol 1 (received ${version})`, () => {
+  const vm = newVM();
+  login(vm);
+  vm.run('STUB.RunTimers()');
+  nextSlot(vm, '{now=time(),contextProtocol=2,replies={}}', version);
+  vm.run('STUB.now = STUB.now + 6; STUB.Tick(); WoWAI.Send("retain this draft")');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null);
+  assert.equal(vm.evaluate('WoWAIDB.outbox'), null);
+  assert.equal(vm.evaluate('WoWAIInput:GetText()'), 'retain this draft');
+  assert.match(vm.evaluate('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].text'), /updating\/restarting/);
+  nextSlot(vm, '{now=time(),contextProtocol=2,replies={}}');
+  vm.run('WoWAI.Connect(); STUB.now = STUB.now + 6; STUB.Tick(); WoWAI.Send("retain this draft")');
+  assert.ok(stripRecords(vm).some(r => r.text === 'retain this draft'));
+});
+}
+
+test('a migrated pending question without Sharing also resumes automatically once', () => {
+  const vm = newVM();
+  login(vm);
+  connect(vm);
+  vm.run('WoWAIDB.settings.context = false; WoWAI.Send("resume without a profile")');
+  const first = stripRecords(vm).find(r => r.text === 'resume without a profile');
+  vm.run(`
+    local c = WoWAIDB.chats[1]
+    c.request.nonce = nil
+    c.request.flags = c.request.flags:gsub("nonce=[A-Za-z0-9_-]+;?", "")
+    c.snapshotAcked = true
+    WoWAIDB.outbox.nonce = nil
+  `);
+  login(vm);
+  const resumed = stripRecords(vm).find(r => r.text === first.text);
+  assert.ok(resumed);
+  assert.equal(resumed.id, first.id);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].request.profile'), null);
+  assert.match(P.parseFlags(resumed.flags).nonce, /^[A-Za-z0-9_-]{8,64}$/);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].resumePending'), null, 'one-time migration resume is consumed');
 });

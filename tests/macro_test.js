@@ -122,7 +122,7 @@ function newVM() {
   };
   run(fs.readFileSync(path.join(__dirname, 'wow_stub.lua'), 'utf8'));
   run(MACRO_STUB);
-  for (const f of ['Codec.lua', 'Inbox.lua', 'WoWAI.lua']) run(fs.readFileSync(path.join(ADDON, f), 'utf8'), 'WoWAI');
+  for (const f of ['Codec.lua', 'Inbox.lua', 'WoWAI.lua', 'Context.lua', 'ContextUI.lua']) run(fs.readFileSync(path.join(ADDON, f), 'utf8'), 'WoWAI');
   run('STUB.FireEvent("ADDON_LOADED", "WoWAI"); STUB.FireEvent("PLAYER_LOGIN")');
   return { run, evaluate };
 }
@@ -132,7 +132,8 @@ function deliver(vm, macrosLua) {
   vm.run(`
     local c = WoWAIDB.chats[1]
     c.pendingId = 5
-    WoWAI_Inbox = { replies = { { chat = c.id, id = 5, status = "done", text = "Here you go.", macros = ${macrosLua} } } }
+    c.request = { nonce = "macro-reply-5" }
+    WoWAI_Inbox = { requestProtocol = 1, replies = { { chat = c.id, id = 5, nonce = c.request.nonce, status = "done", text = "Here you go.", macros = ${macrosLua} } } }
     STUB.FireEvent("PLAYER_LOGIN")
     WoWAI.Toggle(true)
     WoWAI.Render()`);
