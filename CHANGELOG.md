@@ -24,6 +24,10 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ### Fixed
 
+- Fixed idle bridge liveness: periodic heartbeats now refresh Inbox and every reply-slot clock, including without sound files. The addon requires recent observed presence progress, falls back to bounded clock probes when sounds stall or cached filenames are exhausted, and never treats old ACKs/replayed replies as fresh health. Retried accepted hellos re-ack and refresh metadata without starting another agent turn. The existing 200-slot UI-session limit still requires `/reload`, not a bridge restart.
+
+- Fixed selectable replies painting below their message cards: sizing now uses native wrapped glyph measurements, including paragraph spacing and long links, rather than estimating height from font point size and line count. Resizing remeasures cards without rewriting unchanged selectable text.
+
 - Expanded the discussion viewport with compact header selectors and a shorter composer. Message text is now directly selectable in place and read-only, with selection preserved across unchanged redraws. A single footer action row prevents send/connect/cancel/recovery overlap; the latest-message button no longer covers text, and window dragging is limited to the header.
 
 - Saved-counter rollback could silently discard a new question as an older hello with the same numeric ID. Requests now carry immutable nonces across packets, reload outboxes, replies and persisted receipts; retransmissions remain idempotent, and stale replies or cached numeric-only ACK sounds cannot complete a different question. Pending pre-nonce requests migrate once with their original profiles and selections intact. Both bridge and addon require request protocol 1; unsupported old packets cannot erase the pending question during upgrade.

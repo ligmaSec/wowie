@@ -130,6 +130,8 @@ Every chat that hasn't picked its own folder now works in `realms`, and the work
 
 In game, `/wow-ai` opens the wow-ai workspace. Its header shows a labeled connection state; **Connect** appears beside the composer until the bridge answers. Start the bridge and click Connect. Messages written before connection stay in the box. **Connection...** holds reconnect, check/retry and reload recovery actions instead of crowding the main toolbar.
 
+Periodic bridge restarts are not required to stay connected. Heartbeats refresh the reply-slot clock even while idle; if cached sound flags stop advancing, wow-ai uses bounded clock checks instead (`/wow-ai diag` shows which). Reconnect retries refresh metadata without running an AI. The separate **200-slot per UI session limit** can still require `/reload`; restarting the bridge does not free those slots.
+
 The **Conversations** sidebar is searchable and scrollable. Click **New chat**, choose a conversation, or open its visible **...** menu (right-click also works) for rename, working folder, agent, copy, clear transcript, fresh agent session and delete actions. Destructive menu actions ask for confirmation. Each chat retains its own project, agent choices, transcript and multiline draft.
 
 The compact **Agent**, **Model** and **Reasoning** selectors in the discussion header configure the **next message** in this chat. Pickers are searchable, include inherited values, and still offer a custom model ID. Model choices include configured IDs, Claude aliases, and live Codex/Antigravity catalogs; unsupported reasoning controls are disabled. Changing agent clears its model/effort overrides. Already-pending requests and resends keep their original settings.
@@ -250,6 +252,7 @@ The keys you are most likely to touch. Every key, flag and environment variable 
 ## Troubleshooting
 
 - **Connect says "No answer from the bridge" / light stays red** — is the bridge running? Is the game window on screen and not minimized? Exclusive fullscreen blocks capture. `bridge.log` shows `strip #N` when a message is decoded and `strip seen but rejected: ...` when one is misread.
+- **Connection goes stale after idle time** — update both bridge and addon, restart the bridge once to load the update, then `/reload`. Advancing sound presence is optional: the slot-clock fallback stays usable while the bridge is idle. If slots are exhausted, `/reload` is the remedy; repeated bridge restarts are not.
 - **Linux: `bridge.log` keeps saying `waiting for Wow window`** — the game isn't running or its window has another name: set `capture.processName` to the exe name, or `capture.windowName` to part of the window title. On Wayland, the game must use Wine/Proton's X11 backend (Xwayland); Wine's native Wayland windows cannot be captured.
 - **Linux: `npm run probe` shows a black or stale picture** — the compositor is letting the game present on its own. Try `"keepComposited": true` under `capture`, then windowed mode, then `nvidia-settings -a AllowFlipping=0` on NVIDIA; `/wow-ai mode reload` works without any capture.
 - **No herb/ore pins after `/wow-ai map ore`** — `/wow-ai map` says whether the `WoWAI_Nodes` data addon is installed; pins show on zone maps only, and with `filter skill` only what your skill can gather.

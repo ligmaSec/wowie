@@ -102,14 +102,6 @@ end
 function Methods.GetFont(self) return self.font or "Fonts\\FRIZQT__.TTF", self.fontSize or 14, self.fontFlags or "" end
 function Methods.SetSpacing(self, spacing) self.spacing = spacing end
 function Methods.GetSpacing(self) return self.spacing or 0 end
-function Methods.GetNumLines(self)
-	local columns = math.max(1, math.floor(self:GetWidth() / ((self.fontSize or 14) * 0.55)))
-	local lines = 0
-	for line in (self:GetText() .. "\n"):gmatch("(.-)\n") do
-		lines = lines + math.max(1, math.ceil(#line:gsub("[\128-\191]", "") / columns))
-	end
-	return math.max(1, lines)
-end
 function Methods.HighlightText(self, first, last)
 	self.highlightStart, self.highlightEnd = first or 0, last or #self:GetText()
 end

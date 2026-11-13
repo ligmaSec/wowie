@@ -78,7 +78,7 @@ These sizes are baked into the files `install-slots.js` creates, and the addon h
 | `slots` | `200` | Reply-slot addons `WoWAI_S001` … `WoWAI_S200`. Each slot can be loaded once per UI session; `/reload` frees them all. |
 | `actMax` | `60` | Heartbeat files per message (`act/NNN/01..60.wav`). One flips per agent action. |
 | `presenceMax` | `2000` | Presence files (`presence/0001..2000.wav`). One flips per `presenceIntervalMs`. |
-| `presenceIntervalMs` | `30000` | How often the bridge flips a presence file so the in-game light stays green. |
+| `presenceIntervalMs` | `30000` | Periodic heartbeat interval: refresh Inbox/all reply-slot timestamps and, when available, advance a presence WAV. Idle fallback does not depend on WAV availability. |
 | `tocInterface` | `"16001"` | `## Interface:` version written into every slot addon's `.toc`. Bump it when the client's TOC version changes. |
 
 ## Command line

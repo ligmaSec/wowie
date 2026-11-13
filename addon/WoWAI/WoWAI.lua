@@ -37,7 +37,7 @@ local POLL_SCHEDULE = { 5, 10, 16, 24, 34, 46, 60, 80, 100, 130, 160, 200, 240, 
 local POLL_TAIL = 60
 local TICK_SECONDS = 2
 local CONNECT_WAIT = 15 -- seconds the Connect button waits for the bridge before giving up
-local IDLE_POLL_SECONDS = 600 -- without the sound channel, spend one slot this often while idle to check the bridge
+local IDLE_POLL_SECONDS = 600 -- without recent presence progress, spend one idle slot this often
 local RS, US = "\30", "\31" -- record / unit separators in the strip payload
 local DATA_CHUNK_BASE64 = Codec.MAX_PAYLOAD - 200 -- leave room for the record and multipart flags
 local CONTEXT_POLL_SECONDS = 15
@@ -739,12 +739,14 @@ local function PollActivity(chat)
 	return moved
 end
 
--- Bridge presence. Evidence the bridge is alive comes from several places:
--- presence beats, acks, slot data (which carries the bridge's clock), replies.
+-- Bridge liveness comes from advancing one-shot presence or a snapshot's clock,
+-- not cached numeric acknowledgements or repeated reply records.
 local function NotedBridge(at)
 	at = at or GetTime()
-	if not run.bridgeSeen or at > run.bridgeSeen then run.bridgeSeen = at end
-	run.pixelFailed = nil
+	if not run.bridgeSeen or at > run.bridgeSeen then
+		run.bridgeSeen = at
+		run.pixelFailed = nil
+	end
 end
 
 local function PresencePath(k)
@@ -767,28 +769,49 @@ local function PollPresence()
 	local p = run.presence
 	local moved = false
 	for _ = 1, 3 do
-		local k = (p.last % PRESENCE_MAX) + 1
+		local k = p.last + 1
+		if k > PRESENCE_MAX then break end
 		if not SoundValid(PresencePath(k)) then break end
 		p.last = k
 		p.beats = (p.beats or 0) + 1
+		p.observedAt = GetTime()
 		NotedBridge()
 		moved = true
 	end
 	return moved
 end
 
--- Whether the 30-second presence beats can reach us at all. When they can't
--- (self-test failed, or signal checks turned off), the only evidence of the
--- bridge is a slot read: the idle poll below and the replies themselves.
+-- The self-test only proves the sound API works. Presence needs an advancing,
+-- recent filename, and exhausted cached filenames cannot provide another beat.
 local function PresenceWorks()
-	return signalAvailable and db ~= nil and db.settings.signal
+	local p = run.presence
+	return signalAvailable and db ~= nil and db.settings.signal and p
+		and p.last < PRESENCE_MAX and p.observedAt ~= nil and GetTime() - p.observedAt < 90
+end
+
+local function PresenceStatus()
+	local p = run.presence
+	if PresenceWorks() then
+		return "Liveness: sound presence (last beat " .. FmtDur(GetTime() - p.observedAt) .. " ago)"
+	end
+	local reason
+	if not db or not db.settings.signal then
+		reason = "signal checks off"
+	elseif not signalAvailable then
+		reason = "sound unavailable: " .. tostring(signalStats.error or signalStats.selftest)
+	elseif p and p.last >= PRESENCE_MAX then
+		reason = "cached presence filenames exhausted"
+	elseif p and p.observedAt then
+		reason = "presence stalled; last beat " .. FmtDur(GetTime() - p.observedAt) .. " ago"
+	else
+		reason = "no advancing presence observed"
+	end
+	return "Liveness: slot-clock fallback (" .. reason .. "); idle checks every " .. FmtDur(IDLE_POLL_SECONDS)
 end
 
 -- Returns state ("ok" | "stale" | "down" | "unknown"), a color and a description.
--- With presence beats the bridge is heard from every 30 s, so 90 s of silence is
--- suspicious. Without them the addon only hears from it every IDLE_POLL_SECONDS,
--- so the windows have to be wider or the light could never stay green between
--- messages and every reply would be followed by a Reconnect.
+-- Recent presence progress is cheap to check. Otherwise, idle slot reads provide
+-- liveness every IDLE_POLL_SECONDS, so the windows allow for that interval.
 function WoWAI.BridgeState()
 	local seen = run.bridgeSeen
 	if not seen then
@@ -818,9 +841,7 @@ local STATE_ICON = {
 function WoWAI.UpdateDot()
 	local state, _, _, _, tip = WoWAI.BridgeState()
 	if run.pixelFailed then state = "down" end
-	if not signalAvailable and signalStats.selftest then
-		tip = tip .. "\n(sound-file channel unavailable: " .. signalStats.selftest .. "; using slot checks only)"
-	end
+	tip = tip .. "\n" .. PresenceStatus()
 	for _, dot in ipairs({ ui.dot, ui.miniDot }) do
 		if dot then
 			dot:SetTexture(STATE_ICON[state] or STATE_ICON.unknown)
@@ -990,7 +1011,6 @@ local function MarkAcked(id, nonce)
 		NoteAcked(rec)
 		RefreshStrip()
 	end
-	NotedBridge()
 end
 
 local function ReplyToContext(c, r)
@@ -1113,6 +1133,7 @@ local function ApplyBridgeData(data)
 end
 
 local function TryLoadSlot(why)
+	run.lastSlotPoll = GetTime()
 	local name = FreeSlot()
 	if not name then
 		run.slotsExhausted = true
@@ -1149,17 +1170,11 @@ local function Tick()
 	if not db then return end
 	local now = GetTime()
 	local presenceMoved = PollPresence()
-	-- Without presence beats, the only evidence is a slot read; spend one every
-	-- IDLE_POLL_SECONDS while idle so the light still reflects reality (and stays
-	-- green while the bridge is up: BridgeState allows for this interval).
-	if not PresenceWorks() and db.settings.mode == "pixel" and not AnyPending()
-		and now - (run.lastIdlePoll or -1e9) >= IDLE_POLL_SECONDS then
-		run.lastIdlePoll = now
-		TryLoadSlot("idle")
+	if db.settings.mode ~= "pixel" then
+		WoWAI.UpdateDot()
+		WoWAI.CheckConnection()
+		return
 	end
-	WoWAI.UpdateDot()
-	WoWAI.CheckConnection()
-	if db.settings.mode ~= "pixel" then return end
 	local changed = false
 	if run.helloPollAt and now >= run.helloPollAt then
 		run.helloPollAt = nil
@@ -1174,12 +1189,19 @@ local function Tick()
 		run.restoring = nil
 		WoWAI.Render()
 	end
+	-- Only maintain established liveness, and never duplicate a hello/reply probe.
+	-- Failed or stale slot reads delay the next probe, but do not refresh bridgeSeen.
+	if not PresenceWorks() and not AnyPending() and not run.helloPollAt and run.bridgeSeen
+		and now - math.max(run.bridgeSeen, run.lastSlotPoll or run.bridgeSeen) >= IDLE_POLL_SECONDS then
+		TryLoadSlot("idle")
+	end
+	WoWAI.UpdateDot()
+	WoWAI.CheckConnection()
 	for id, rec in pairs(run.outbound) do
 		-- Numeric sound files cannot authenticate a question after counter rollback.
 		if not rec.acked and (rec.hello or rec.forget) and CheckSignal("ack", id) then
 			NoteAcked(rec)
 			changed = true
-			NotedBridge()
 		end
 		-- A hello only needs the bridge to have been seen; it never escalates.
 		-- A forget is the same, but the bridge must have been seen a moment after
@@ -1248,7 +1270,6 @@ Finish = function(chat, role, text, denied, agent, summary, macros)
 	chat.request = nil
 	chat.progress = nil
 	if run.act then run.act[chat.id] = nil end
-	NotedBridge()
 	local visible = ui.frame and ui.frame:IsShown() and db.activeChat == chat.id
 	if not visible then
 		chat.unread = (chat.unread or 0) + 1
@@ -2247,6 +2268,7 @@ function WoWAI.Render()
 				b.record, b.chatId = record, c.id
 			end
 			local bodyWidth = width - 20
+			local layoutChanged = b.bodyWidth ~= bodyWidth or b.text ~= text
 			if b.bodyWidth ~= bodyWidth then b.body:SetWidth(bodyWidth); b.bodyWidth = bodyWidth end
 			b.body.messageText = text
 			-- A no-op redraw must preserve the native selection and caret.
@@ -2256,10 +2278,18 @@ function WoWAI.Render()
 			else
 				b.body:SetTextColor(0.93, 0.93, 0.93)
 			end
-			local _, lineHeight = b.body:GetFont()
-			local lines = math.max(1, b.body:GetNumLines())
-			local h = lines * lineHeight + (lines - 1) * b.body:GetSpacing() + 4
-			b.body:SetHeight(h)
+			if layoutChanged then
+				-- Point size times EditBox line count is not the painted extent.
+				-- Measure wrapped glyphs with identical font, width and spacing.
+				local measure = ui.messageMeasure
+				measure:SetFont(b.body:GetFont())
+				measure:SetSpacing(b.body:GetSpacing())
+				measure:SetWidth(bodyWidth)
+				measure:SetText(text:find("|", 1, true) and text:gsub("|", "||") or text)
+				b.bodyHeight = math.max(18, math.ceil(measure:GetStringHeight()) + 4)
+				b.body:SetHeight(b.bodyHeight)
+			end
+			local h = b.bodyHeight
 			local extra = 0
 			if denied then
 				local label = "Allow " .. table.concat(denied, ", ") .. " & retry"
@@ -3142,6 +3172,10 @@ local function BuildUI()
 	content:SetSize(500, 1)
 	scroll:SetScrollChild(content)
 	ui.content, ui.bubbles, ui.chatScrollPositions = content, {}, {}
+	ui.messageMeasure = UI.Label(content, "", 14)
+	ui.messageMeasure:SetWordWrap(true)
+	ui.messageMeasure:SetNonSpaceWrap(true)
+	ui.messageMeasure:Hide()
 	scroll:HookScript("OnSizeChanged", function() if f:IsShown() then WoWAI.Render() end end)
 	local latest = UI.Button(f, "Latest ↓", 102, function()
 		scroll:SetVerticalScroll(scroll:GetVerticalScrollRange())
@@ -3591,6 +3625,7 @@ SlashCmdList["WOWAI"] = function(msg)
 			"sound checks: " .. signalStats.checks .. ", valid hits: " .. signalStats.hits .. (signalStats.lastHit and (", last hit " .. FmtDur(GetTime() - signalStats.lastHit) .. " ago") or ""),
 			"slot polls this session: " .. (run.polls or 0) .. ", free slots: " .. free .. "/" .. SLOT_COUNT,
 			"presence: head at " .. tostring(run.presence and run.presence.last or "?") .. ", beats seen: " .. tostring(run.presence and run.presence.beats or 0),
+			PresenceStatus(),
 			select(5, WoWAI.BridgeState()),
 			"mode: " .. s.mode .. ", session token: " .. tostring(db.session),
 		}

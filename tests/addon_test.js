@@ -130,6 +130,10 @@ function connect(vm) {
   assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true', 'connected after the hello slot');
 }
 
+function loadedSlots(vm) {
+  return vm.num('(function() local n = 0; for name in pairs(STUB.loaded) do if name:match("^WoWAI_S%d%d%d$") then n = n + 1 end end; return n end)()');
+}
+
 test('addon loads, builds its UI and creates a first chat', () => {
   const vm = newVM();
   login(vm);
@@ -387,30 +391,232 @@ test('a message sent while disconnected goes out by itself once the bridge answe
   assert.equal(vm.num(`(function() local n = 0; for _, message in ipairs(WoWAIDB.chats[1].history) do if message.role == "user" and message.text == "fix the bug" then n = n + 1 end end; return n end)()`), 1);
 });
 
-test('without the sound channel, the light stays green between idle slot polls', () => {
-  // The stub has no ctl/valid.wav, so the login self-test disables the sound
-  // channel: the addon is in "slot checks only" mode, like a client whose
-  // PlaySoundFile reports every file as playable.
+test('without the sound channel, idle clocks maintain liveness and real loss becomes stale/down', () => {
+  // No ctl/valid.wav: the real self-test disables the sound channel.
+  const vm = newVM();
+  login(vm);
+  vm.run('STUB.Tick()');
+  assert.equal(loadedSlots(vm), 0, 'startup waits for Connect/hello rather than spending an idle slot');
+  connect(vm);
+  assert.equal(loadedSlots(vm), 1, 'hello and idle maintenance do not duplicate the first poll');
+  vm.run('STUB.now = STUB.now + 200; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true', 'still connected between clock checks');
+  assert.equal(loadedSlots(vm), 1);
+  vm.run('STUB.now = STUB.now + 410; STUB.Tick()');
+  assert.equal(loadedSlots(vm), 2, 'one idle poll after ten minutes');
+  assert.equal(vm.evaluate('WoWAI.BridgeState()'), 'ok');
+
+  vm.run('STUB.onLoadAddOn = function() WoWAI_SlotData = nil end');
+  vm.run('STUB.now = STUB.now + 800; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAI.BridgeState()'), 'stale');
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'false');
+  vm.run('STUB.now = STUB.now + 700; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAI.BridgeState()'), 'down');
+  nextSlot(vm, '{ now = time(), replies = {} }');
+  vm.run('STUB.now = STUB.now + 600; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true', 'a fresh clock recovers without restarting the bridge');
+});
+
+test('a successful sound self-test without advancing presence uses bounded idle clock checks', () => {
+  const vm = newVM();
+  vm.run(`
+    STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\ctl\\\\valid.wav"] = true
+    for k = 1, 7 do STUB.sounds[string.format("Interface\\\\AddOns\\\\WoWAI\\\\presence\\\\%04d.wav", k)] = true end
+  `);
+  login(vm);
+  vm.run('STUB.Tick()');
+  assert.equal(loadedSlots(vm), 0, 'an existing cached prefix cannot establish a connection');
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'false');
+  connect(vm);
+  vm.run('STUB.now = STUB.now + 200; STUB.Tick(); SlashCmdList.WOWAI("diag")');
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true', 'self-test success alone must not impose the 90-second cutoff');
+  const diagnostic = vm.evaluate('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].text');
+  assert.match(diagnostic, /self-test: passed/);
+  assert.match(diagnostic, /slot-clock fallback.*no advancing presence observed/);
+  assert.equal(loadedSlots(vm), 1);
+  vm.run('STUB.now = STUB.now + 399; STUB.Tick()');
+  assert.equal(loadedSlots(vm), 1, 'no idle probe before ten minutes from the hello evidence');
+  vm.run('STUB.now = STUB.now + 1; STUB.Tick()');
+  assert.equal(loadedSlots(vm), 2);
+  for (let i = 0; i < 3; i++) {
+    vm.run('STUB.now = STUB.now + 600; STUB.Tick()');
+    assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true', 'fresh periodic clocks keep the Send path available');
+  }
+  assert.equal(loadedSlots(vm), 5, 'fallback spends only one slot per ten-minute interval');
+});
+
+test('healthy advancing presence keeps Send available without spending idle slots', () => {
+  const vm = newVM();
+  vm.run('STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\ctl\\\\valid.wav"] = true');
+  login(vm);
+  connect(vm);
+  for (let k = 1; k <= 25; k++) {
+    vm.run(`STUB.sounds[string.format("Interface\\\\AddOns\\\\WoWAI\\\\presence\\\\%04d.wav", ${k})] = true; STUB.now = STUB.now + 30; STUB.Tick()`);
+    assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true');
+  }
+  assert.equal(loadedSlots(vm), 1, 'more than ten minutes of beats do not consume the finite reply pool');
+  vm.run('SlashCmdList.WOWAI("diag")');
+  assert.match(vm.evaluate('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].text'), /Liveness: sound presence/);
+});
+
+test('stalled presence falls back to clocks and advancing presence can recover cheap checks', () => {
+  const vm = newVM();
+  vm.run('STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\ctl\\\\valid.wav"] = true');
+  login(vm);
+  connect(vm);
+  vm.run('STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\presence\\\\0001.wav"] = true; STUB.now = STUB.now + 30; STUB.Tick()');
+  vm.run('STUB.now = STUB.now + 91; STUB.Tick(); SlashCmdList.WOWAI("diag")');
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true', 'a stalled cheap channel switches to the bounded clock window');
+  assert.match(vm.evaluate('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].text'), /slot-clock fallback.*presence stalled/);
+  vm.run('STUB.now = STUB.now + 508; STUB.Tick()');
+  assert.equal(loadedSlots(vm), 1, 'the most recent actual beat postpones idle maintenance');
+  vm.run('STUB.now = STUB.now + 1; STUB.Tick()');
+  assert.equal(loadedSlots(vm), 2, 'the stalled channel gets one fresh clock probe');
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true');
+  for (let k = 2; k <= 23; k++) {
+    vm.run(`STUB.sounds[string.format("Interface\\\\AddOns\\\\WoWAI\\\\presence\\\\%04d.wav", ${k})] = true; STUB.now = STUB.now + 30; STUB.Tick()`);
+    assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true');
+  }
+  assert.equal(loadedSlots(vm), 2, 'recovered cheap presence stops burning idle slots');
+  vm.run('SlashCmdList.WOWAI("diag")');
+  assert.match(vm.evaluate('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].text'), /Liveness: sound presence/);
+});
+
+for (const clock of ['stale', 'missing']) {
+test(`${clock} slot clocks cannot keep a stalled sound connection alive`, () => {
+  const vm = newVM();
+  vm.run('STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\ctl\\\\valid.wav"] = true');
+  login(vm);
+  connect(vm);
+  vm.run('STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\presence\\\\0001.wav"] = true; STUB.now = STUB.now + 30; STUB.Tick(); STUB.oldClock = time()');
+  nextSlot(vm, clock === 'stale' ? '{ now = STUB.oldClock, replies = {} }' : '{ replies = {} }');
+  vm.run('STUB.now = STUB.now + 600; STUB.Tick()');
+  assert.equal(loadedSlots(vm), 2);
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true', 'the bounded grace period allows the next maintenance probe');
+  vm.run('STUB.now = STUB.now + 121; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAI.BridgeState()'), 'stale');
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'false');
+  vm.run('STUB.now = STUB.now + 600; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAI.BridgeState()'), 'down', 'repeated cached snapshots do not refresh observed liveness');
+  nextSlot(vm, '{ now = time(), replies = {} }');
+  vm.run('STUB.now = STUB.now + 600; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true');
+});
+}
+
+for (const head of [1999, 2000]) {
+test(`cached presence pool at ${head} never wraps into fabricated heartbeat progress`, () => {
+  const vm = newVM();
+  vm.run(`
+    STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\ctl\\\\valid.wav"] = true
+    for k = 1, ${head} do STUB.sounds[string.format("Interface\\\\AddOns\\\\WoWAI\\\\presence\\\\%04d.wav", k)] = true end
+  `);
+  login(vm);
+  connect(vm);
+  if (head === 1999) {
+    vm.run('STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\presence\\\\2000.wav"] = true; STUB.now = STUB.now + 30; STUB.Tick()');
+  }
+  vm.run('STUB.oldClock = time(); SlashCmdList.WOWAI("diag")');
+  assert.match(vm.evaluate('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].text'), /slot-clock fallback.*cached presence filenames exhausted/);
+  nextSlot(vm, '{ now = STUB.oldClock, replies = {} }');
+  vm.run('STUB.now = STUB.now + 600; STUB.Tick()');
+  assert.equal(loadedSlots(vm), 2, 'exhausted sounds use the normal clock fallback');
+  vm.run('STUB.now = STUB.now + 121; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAI.BridgeState()'), 'stale');
+  vm.run('STUB.now = STUB.now + 600; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAI.BridgeState()'), 'down', 'cached index one is never accepted as a new beat');
+  nextSlot(vm, '{ now = time(), replies = {} }');
+  vm.run('STUB.now = STUB.now + 600; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true', 'clock fallback still recovers after the sound pool is exhausted');
+});
+}
+
+test('Connect retries a stale-clock hello idempotently without sending or altering the draft', () => {
+  const vm = newVM();
+  login(vm);
+  const draft = '  keep this draft\n  unchanged  ';
+  vm.run(`WoWAIInput:SetText(${P.luaStr(draft)}); WoWAI.Connect()`);
+  const hello = stripRecords(vm)[0];
+  nextSlot(vm, '{ now = time() - 1800, replies = {} }');
+  vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'false');
+  assert.equal(loadedSlots(vm), 1, 'a stale hello snapshot does not immediately trigger another idle slot');
+  vm.run('STUB.Tick(); WoWAI.Connect()');
+  assert.equal(loadedSlots(vm), 1);
+  assert.deepEqual(stripRecords(vm)[0], hello, 'retry keeps the exact hello nonce and data');
+  nextSlot(vm, '{ now = time(), replies = {} }');
+  vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
+  assert.equal(loadedSlots(vm), 2, 'the retry receives only its normal hello poll');
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true');
+  assert.equal(vm.evaluate('WoWAIInput:GetText()'), draft);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].draft'), draft);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null, 'maintenance and plain Connect never create a question');
+  assert.equal(vm.num('(function() local n = 0; for _, m in ipairs(WoWAIDB.chats[1].history) do if m.role == "user" then n = n + 1 end end; return n end)()'), 0);
+});
+
+test('cached numeric hello acknowledgements cannot reconnect a bridge that is down', () => {
+  const vm = newVM();
+  vm.run('STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\ctl\\\\valid.wav"] = true');
+  login(vm);
+  vm.run('STUB.RunTimers()');
+  const firstHello = stripRecords(vm)[0];
+  connect(vm);
+  vm.run('STUB.oldClock = time()');
+  nextSlot(vm, '{ now = STUB.oldClock, replies = {} }');
+  vm.run('STUB.now = STUB.now + 1400; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAI.BridgeState()'), 'down');
+  const draft = 'do not send this draft';
+  vm.run(`
+    WoWAIInput:SetText(${P.luaStr(draft)})
+    WoWAIDB.lastSeq = ${firstHello.id - 1}
+    WoWAI.Connect()
+    STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\ack\\\\${String(firstHello.id).padStart(3, '0')}.wav"] = true
+    STUB.Tick()
+  `);
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'false', 'a cached ACK is not evidence the new hello was observed');
+  vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAI.BridgeState()'), 'down', 'the old slot clock cannot authenticate the cached ACK either');
+  assert.equal(vm.evaluate('WoWAIInput:GetText()'), draft);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null);
+  nextSlot(vm, '{ now = time(), replies = {} }');
+  vm.run('WoWAI.Connect(); STUB.now = STUB.now + 6; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true', 'a fresh hello clock still reconnects');
+  assert.equal(vm.evaluate('WoWAIInput:GetText()'), draft);
+});
+
+for (const clock of ['stale', 'missing']) {
+test(`cached nonce-correlated replies with ${clock} clocks do not refresh connection health`, () => {
   const vm = newVM();
   login(vm);
   connect(vm);
-  assert.equal(vm.evaluate('WoWAI.BridgeState()'), 'ok');
-  // 90 s of silence used to mean "stale"; with no beats to hear that is normal.
-  vm.run('STUB.now = STUB.now + 200; STUB.Tick()');
-  assert.equal(vm.evaluate('WoWAI.BridgeState()'), 'ok', 'still green after 200 s');
-  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true');
-  // 10 minutes in, the idle poll spends a slot; the bridge's clock in it keeps the light green.
-  vm.run('STUB.loadCount = 0; STUB.onLoadAddOn = function(name) STUB.loadCount = STUB.loadCount + 1; WoWAI_SlotData = { now = time(), cwd = "", replies = {} } end');
-  vm.run('STUB.now = STUB.now + 410; STUB.Tick()');
-  assert.equal(vm.num('STUB.loadCount'), 1, 'one idle poll');
-  assert.equal(vm.evaluate('WoWAI.BridgeState()'), 'ok', 'green again after the idle poll');
-  // A bridge that really is gone still shows: no slot answers, and the light drops.
-  vm.run('STUB.onLoadAddOn = function(name) WoWAI_SlotData = nil end');
+  vm.run('WoWAI.Send("keep the original pending request")');
+  const id = vm.num('WoWAIDB.chats[1].pendingId');
+  const nonce = vm.evaluate('WoWAIDB.chats[1].request.nonce');
+  const profile = vm.evaluate('WoWAIDB.chats[1].request.profile');
+  const chat = vm.evaluate('WoWAIDB.activeChat');
+  const working = `{chat="${chat}",id=${id},nonce="${nonce}",status="working",text="unchanged progress"}`;
+  nextSlot(vm, `{ now = time(), replies = {${working}} }`);
+  vm.run('WoWAI.Send(""); STUB.Tick(); STUB.oldClock = time()');
+  const oldClock = clock === 'stale' ? 'now = STUB.oldClock,' : '';
+  nextSlot(vm, `{ ${oldClock} replies = {${working}} }`);
   vm.run('STUB.now = STUB.now + 800; STUB.Tick()');
-  assert.equal(vm.evaluate('WoWAI.BridgeState()'), 'stale');
-  vm.run('STUB.now = STUB.now + 700; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAI.BridgeState()'), 'stale', 're-reading a working record is not new bridge activity');
+  vm.run('STUB.now = STUB.now + 600; STUB.Tick()');
   assert.equal(vm.evaluate('WoWAI.BridgeState()'), 'down');
+  assert.equal(vm.num('WoWAIDB.chats[1].pendingId'), id);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].request.nonce'), nonce);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].request.profile'), profile);
+
+  nextSlot(vm, `{ now = time(), replies = {${working}} }`);
+  vm.run('STUB.now = STUB.now + 60; STUB.Tick(); STUB.oldClock = time()');
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true', 'a fresh snapshot recovers the existing request');
+  nextSlot(vm, `{ ${oldClock} replies = {{chat="${chat}",id=${id},nonce="${nonce}",status="done",text="stored answer"}} }`);
+  vm.run('STUB.now = STUB.now + 800; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null, 'the stored final answer is still delivered once');
+  assert.equal(vm.evaluate('WoWAI.BridgeState()'), 'stale', 'delivery of a stored final record cannot manufacture a fresh clock');
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'false');
 });
+}
 
 test('the Folder... menu item (right-click a chat) opens a prompt that sets the chat folder like /wow-ai cd', () => {
   const vm = newVM();
@@ -1288,4 +1494,54 @@ test('recycled discussion bodies clear selections before binding another message
   assert.equal(vm.evaluate('WoWAIMessageText1:HasFocus()'), 'false');
   assert.equal(vm.evaluate('WoWAIMessageText1.highlightStart'), null);
   assert.equal(vm.evaluate('WoWAIMessageText1.highlightEnd'), null);
+});
+
+test('wrapped replies contain their painted text and actions after width changes', () => {
+  const vm = newVM();
+  vm.run(`
+    -- A glyph line's painted advance is not the font's nominal point size.
+    function PaintedHeight(text, width, size, spacing)
+      local columns = math.max(1, math.floor(width / (size * 0.52)))
+      local lines = 0
+      for line in (text .. "\\n"):gmatch("(.-)\\n") do
+        local characters = #line:gsub("[\\128-\\191]", "")
+        lines = lines + math.max(1, math.ceil(characters / columns))
+      end
+      return lines * size * 1.6 + math.max(0, lines - 1) * spacing
+    end
+    local label = WoWAI.UI.Label
+    WoWAI.UI.Label = function(...)
+      local region = label(...)
+      region.GetStringHeight = function(self)
+        local _, size = self:GetFont()
+        return PaintedHeight(self:GetText():gsub("||", "|"), self:GetWidth(), size, self:GetSpacing())
+      end
+      return region
+    end
+  `);
+  login(vm);
+  const text = 'A long wrapped reply with blank paragraphs.\n\n'
+    + 'Mining and crafting advice '.repeat(18)
+    + '\n\n[Reference](https://example.invalid/' + 'long-path-'.repeat(28) + ')\n\n'
+    + 'Literal | text and Épée 鉱石.\n\nFinal paragraph must stay inside the card.';
+  vm.run(`
+    STUB.replyWidth = 640
+    WoWAIScroll.GetWidth = function() return STUB.replyWidth end
+    table.insert(WoWAIDB.chats[1].history, {role="user",text="question"})
+    table.insert(WoWAIDB.chats[1].history, {role="assistant",text=${P.luaStr(text)},denied={"WebSearch"}})
+    WoWAI.Toggle(true)
+  `);
+  const extent = () => vm.num('(function() local b=WoWAIMessageText2; local _,size=b:GetFont(); return PaintedHeight(b:GetText(),b:GetWidth(),size,b:GetSpacing()) end)()');
+  assert.ok(vm.num('WoWAIMessageText2:GetHeight()') >= extent(), 'the entire painted reply fits its selectable region');
+  assert.ok(vm.num('WoWAIMessageText2:GetParent():GetHeight()') >= extent() + 30, 'permission controls have room below the painted text');
+  assert.equal(vm.evaluate('WoWAIMessageText2:GetText()'), text, 'measurement escapes cannot alter selectable text');
+  vm.run('table.insert(WoWAIDB.chats[1].history, {role="user",text="next message"})');
+  for (const width of [280, 700, 420]) {
+    vm.run(`STUB.replyWidth=${width}; WoWAI.Render()`);
+    const painted = extent();
+    assert.ok(vm.num('WoWAIMessageText2:GetHeight()') >= painted, `wrapped text fits at width ${width}`);
+    assert.ok(vm.num('WoWAIMessageText2:GetParent():GetHeight()') >= painted, `card encloses the reply at width ${width}`);
+    assert.ok(vm.num('-WoWAIMessageText3:GetParent().y') >= vm.num('-WoWAIMessageText2:GetParent().y') + painted, 'the following message starts after the full reply');
+    assert.equal(vm.evaluate('WoWAIMessageText2:GetText()'), text);
+  }
 });

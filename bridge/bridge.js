@@ -362,8 +362,8 @@ function beat(job) {
 
 // Presence: every 30 s flip the next presence/NNNN.wav valid so the game can tell
 // the bridge is alive without spending a slot. The counter persists across
-// restarts so a filename is never reused while the game is still running; the
-// files just ahead of the counter are kept empty so the game can't run ahead.
+// restarts; clients stop at the end of their cached one-shot filenames and use
+// periodic slot clocks instead of wrapping through cached playable sounds.
 const PRESENCE_MAX = cfg.presenceMax || 2000;
 function presenceFile(k) {
   return path.join(cfg.addonDir, 'WoWAI', 'presence', String(k).padStart(4, '0') + '.wav');
@@ -378,6 +378,13 @@ function presenceBeat() {
     try { atomicWrite(presenceFile(n), Buffer.alloc(0)); } catch {}
   }
   saveState();
+}
+
+// Slot clocks must advance even when the optional presence sounds are absent.
+// Explicit context notifications already publish before calling presenceBeat().
+function heartbeat() {
+  publishNow(false);
+  presenceBeat();
 }
 
 // ---------------------------------------------------------------------------
@@ -527,7 +534,14 @@ function submit(job) {
     }
     return;
   }
-  if (alreadyHandled(job)) return;
+  if (alreadyHandled(job)) {
+    if (job.hello && !job.data && !job.forget) {
+      signal('ack', job.id, true);
+      mapShareUntil = Date.now() + MAP_SHARE_MS;
+      publishNow();
+    }
+    return;
+  }
   if (job.data) { receiveContextData(job); return; }
   const key = chatKey(job);
   const cur = running.get(key);
@@ -965,8 +979,8 @@ if (inject !== null) {
   } else {
     setInterval(pollSavedVariables, cfg.pollMs || 750);
     discoverModels();
-    presenceBeat();
-    setInterval(presenceBeat, cfg.presenceIntervalMs || 30000);
+    heartbeat();
+    setInterval(heartbeat, cfg.presenceIntervalMs || 30000);
     if (cap.enabled) startCapture();
   }
 }
