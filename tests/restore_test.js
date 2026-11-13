@@ -18,6 +18,7 @@ function value(node) {
     const arr = [];
     for (const f of node.fields) {
       if (f.type === 'TableKeyString') out[f.key.name] = value(f.value);
+      else if (f.type === 'TableKey') out[value(f.key)] = value(f.value);
       else arr.push(value(f.value));
     }
     return arr.length ? arr : out;
@@ -45,7 +46,7 @@ test('slot file round-trips replies, denied rules, cwd, agents and a restore bun
   };
   const lua = P.luaTable('WoWAI_SlotData',
     [{ chat: 'c9', id: 3, nonce: 'owner-000003', status: 'done', text: 'ok\ttab', denied: ['WebSearch', 'Bash(cargo:*)'], agent: 'grok' }],
-    { cwd: 'C:\\proj', restore, now: 1700000000123, agent: 'claude', agents: ['claude', 'codex', 'grok'] });
+    { cwd: 'C:\\proj', restore, now: 1700000000123, agent: 'claude', agents: ['claude', 'codex', 'grok'], connectionAck: { session: 'sess"\\\n', nonce: 'hello-000003', at: 1699999999 } });
   const d = readSlot(lua, 'WoWAI_SlotData');
   assert.equal(d.now, 1700000000);
   assert.equal(d.cwd, 'C:\\proj');
@@ -53,6 +54,8 @@ test('slot file round-trips replies, denied rules, cwd, agents and a restore bun
   assert.deepEqual(d.agents, ['claude', 'codex', 'grok']);
   assert.equal(d.requestProtocol, 1);
   assert.equal(d.contextProtocol, 2);
+  assert.equal(d.connectionProtocol, 1);
+  assert.deepEqual(d.connectionAck, { session: 'sess"\\\n', nonce: 'hello-000003', at: 1699999999 });
   assert.equal(d.replies.length, 1);
   assert.deepEqual(d.replies[0].denied, ['WebSearch', 'Bash(cargo:*)']);
   assert.equal(d.replies[0].text, 'ok\ttab');
@@ -72,5 +75,7 @@ test('slot file without a restore has no restore field and tolerates empty recor
   assert.equal(d.agent, '');
   assert.deepEqual(d.agents, {}); // an empty Lua table
   assert.equal(d.restore, undefined);
+  assert.equal(d.connectionProtocol, 1);
+  assert.equal(d.connectionAck, undefined, 'a clock snapshot cannot mint a hello acknowledgement');
   assert.deepEqual(d.replies, {});
 });

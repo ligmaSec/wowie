@@ -194,6 +194,8 @@ const contextTransfers = new C.Transfers();
 const contextProfiles = new Map();
 const pendingProfiles = new Map();
 const pendingQueries = new Map();
+// Only a received hello can acknowledge an addon probe; never restore this from disk.
+let connectionAck = null;
 let lastPublish = 0;
 let rejectedInput = false;
 let publishTimer = null;
@@ -291,7 +293,7 @@ function takeMapCommands(job, text) {
 // Slot file / Inbox.lua body: see protocol.luaTable.
 function slotFile(globalName, records, urgent = true) {
   const map = Date.now() < mapShareUntil && (urgent || mapLuaSize() <= MAP_PROGRESS_MAX) ? state.map : null;
-  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, agent: DEFAULT_AGENT, agents: A.agentIds(), agentOptions, contextEnabled: cfg.gameContext !== false, map });
+  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, agent: DEFAULT_AGENT, agents: A.agentIds(), agentOptions, contextEnabled: cfg.gameContext !== false, map, connectionAck });
 }
 
 function addonInstalled() {
@@ -536,6 +538,7 @@ function submit(job) {
   }
   if (alreadyHandled(job)) {
     if (job.hello && !job.data && !job.forget) {
+      connectionAck = { session: job.session, nonce: job.nonce, at: Math.floor(Date.now() / 1000) };
       signal('ack', job.id, true);
       mapShareUntil = Date.now() + MAP_SHARE_MS;
       publishNow();
@@ -559,8 +562,8 @@ function submit(job) {
     return;
   }
   if (job.hello) {
-    // The addon announcing itself: ack, offer a restore if its data is fresh,
-    // and refresh the slots so it can read our clock. No agent run.
+    // Acknowledge this actual probe, offer a restore, and refresh the slots. No agent run.
+    connectionAck = { session: job.session, nonce: job.nonce, at: Math.floor(Date.now() / 1000) };
     markHandled(job);
     saveState();
     signal('ack', job.id, true);

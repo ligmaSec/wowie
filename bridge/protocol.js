@@ -372,9 +372,13 @@ function luaTable(globalName, records, opts = {}) {
     `\tagents = { ${agents.map(luaStr).join(', ')} },`,
     '\tcontextProtocol = 2,',
     '\trequestProtocol = 1,',
+    '\tconnectionProtocol = 1,',
     `\tcontextEnabled = ${opts.contextEnabled === false ? 'false' : 'true'},`,
-    '\treplies = {',
   ];
+  if (opts.connectionAck) lines.push(`\tconnectionAck = ${luaValue(opts.connectionAck)},`);
+  lines.push(
+    '\treplies = {',
+  );
   for (const r of records) {
     lines.push('\t\t{');
     lines.push(`\t\t\tchat = ${luaStr(r.chat || '')},`);

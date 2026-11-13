@@ -74,6 +74,8 @@ The bridge doesn't know which slot the game will load next, so every publish wri
 ```lua
 WoWAI_SlotData = {
   ts = "...", now = <bridge epoch seconds>, cwd = "<the bridge's default folder>",
+  connectionProtocol = 1,
+  connectionAck = { session = "<addon session>", nonce = "<received hello nonce>", at = <actual hello receipt epoch seconds> }, -- absent before a hello
   agent = "claude", agents = { "claude", "codex", "grok", "agy", "hermes" },   -- the default agent, and the ones the bridge knows
   replies = { { chat = "...", id = 12, status = "working"|"done"|"error", text = "...", cwd = "...", session = "<agent session id>", agent = "codex", denied = { "WebSearch" }, macros = { { name = "Charge", body = "#showtooltip\n/cast Charge", icon = nil, char = false, risky = false } } }, … },
   map = { epoch = "...", version = 3, layers = { … } },  -- the agent's map layers (docs/MAP.md): for a while after they change and after every hello
@@ -81,7 +83,7 @@ WoWAI_SlotData = {
 }
 ```
 
-The addon loads a fresh slot on a schedule after each send (5, 10, 16, 24, 34, 46, 60, 80, 100, 130, 160, 200, 240, 300 s, then every 60 s) or immediately when the readiness signal fires. A slot poll matches replies by `(chat, id)` against each chat's pending message. `now` lets the addon know when the bridge last wrote anything (the two clocks are the same machine).
+The addon loads a fresh slot on a schedule after each send (5, 10, 16, 24, 34, 46, 60, 80, 100, 130, 160, 200, 240, 300 s, then every 60 s) or when notification hints fire. Replies match `(chat, id, nonce)` against the pending request. `now` records when metadata was published; it is not connection authentication. Connection checks require `connectionProtocol = 1` and a fresh acknowledgement matching the current probe's addon session and nonce. Its `at` must be no older than probe start and no later than `now`; the snapshot clock must be within the 15-second check window (at most two seconds future skew). A newly received duplicate hello re-acks idempotently. The ACK is process-local and heartbeat publication never updates its receipt time or restores it from historic receipts.
 
 The same content is written to `WoWAI/Inbox.lua`, which the game reads on `/reload` — the fallback path and the only path in `mode reload`.
 
@@ -92,12 +94,12 @@ The same content is written to `WoWAI/Inbox.lua`, which the game reads on `/relo
 | Files | Raised when |
 |---|---|
 | `sig/NNN.wav` | reply NNN is ready → load a slot now instead of waiting for the schedule |
-| `ack/NNN.wav` | the bridge received message NNN → take it off the strip |
+| `ack/NNN.wav` | delivery hint for control maintenance; cached numeric flags never authenticate a hello or user request |
 | `act/NNN/kk.wav` | the agent's k-th action on message NNN → live "14 actions, last 6 s ago" without spending a slot |
-| `presence/kkkk.wav` | every 30 s while the bridge runs → advancing one-shot liveness; the same periodic heartbeat refreshes Inbox and all reply-slot clocks, even without a presence directory |
+| `presence/kkkk.wav` | one-shot data-ready/activity hint; the periodic heartbeat also refreshes Inbox/all slot clocks, never the connection acknowledgement's receipt time |
 | `ctl/empty.wav`, `ctl/valid.wav` | never change; at login the addon checks that empty reads as unplayable and valid as playable, and disables the whole mechanism if not |
 
-`NNN = ((id − 1) mod 200) + 1`. A raised file stays playable for the rest of the client process even if the bridge empties it again. Presence is healthy only after a newly advancing filename was observed within 90 seconds; passing the sound self-test alone does not establish delivery. The client never wraps through cached presence filenames. Unobserved, stalled, disabled or exhausted presence falls back to a bounded idle slot check every 10 minutes, without duplicate startup/hello checks. Periodic bridge heartbeats keep those files' `now` values fresh even without model activity or WAV files. Only advancing presence or an actual slot timestamp refreshes liveness: stale/missing clocks, cached numeric ACKs and replayed reply bodies cannot do so. With active presence, the status windows are 90 seconds and 5 minutes; with clock fallback they are 12 and 22 minutes, reflecting the coarser probing interval. `/wow-ai diag` and the status tooltip identify the active liveness source and fallback reason. Repeated accepted hellos re-ack and republish current metadata rather than disappearing at dedup.
+`NNN = ((id − 1) mod 200) + 1`. A raised file stays playable for the rest of the client process even if emptied, so cached WAVs cannot prove current process availability or an end-to-end round trip. The client never wraps through already-consumed presence filenames. Sound and slot timestamps are maintenance/notification hints only. A matching newly received hello acknowledgement verifies the current connection attempt for 90 seconds from its actual receipt time, not when a snapshot was read. Repeated clocks, ACKs and job reply bodies do not renew that verification. After expiry the UI says idle/unverified, not live or dead; Send performs a new check automatically. Explicit Reconnect supersedes the old confirmation with a fresh nonce, remains visible, and times out after 15 seconds without releasing a queued message. In-flight retransmissions preserve the probe nonce. Bounded ten-minute idle metadata maintenance remains, but no 12/22-minute green grace period exists. The addon cannot instantly detect remote process exit without another observation; the badge states past verification age instead of implying a persistent socket.
 
 ## Bridge
 

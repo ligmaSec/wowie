@@ -36,7 +36,8 @@ local STRIP_SECONDS = 40 -- max per message; it leaves the strip as soon as the 
 local POLL_SCHEDULE = { 5, 10, 16, 24, 34, 46, 60, 80, 100, 130, 160, 200, 240, 300 }
 local POLL_TAIL = 60
 local TICK_SECONDS = 2
-local CONNECT_WAIT = 15 -- seconds the Connect button waits for the bridge before giving up
+local CONNECT_WAIT = 15 -- seconds to wait for a fresh nonce acknowledgement
+local VERIFIED_SECONDS = 90 -- confirmation age, never renewed by clocks or sound hints
 local IDLE_POLL_SECONDS = 600 -- without recent presence progress, spend one idle slot this often
 local RS, US = "\30", "\31" -- record / unit separators in the strip payload
 local DATA_CHUNK_BASE64 = Codec.MAX_PAYLOAD - 200 -- leave room for the record and multipart flags
@@ -739,13 +740,12 @@ local function PollActivity(chat)
 	return moved
 end
 
--- Bridge liveness comes from advancing one-shot presence or a snapshot's clock,
--- not cached numeric acknowledgements or repeated reply records.
+-- Snapshot clocks and advancing sounds are maintenance hints, not proof that
+-- this addon's current outbound challenge reached the bridge.
 local function NotedBridge(at)
 	at = at or GetTime()
 	if not run.bridgeSeen or at > run.bridgeSeen then
 		run.bridgeSeen = at
-		run.pixelFailed = nil
 	end
 end
 
@@ -792,7 +792,7 @@ end
 local function PresenceStatus()
 	local p = run.presence
 	if PresenceWorks() then
-		return "Liveness: sound presence (last beat " .. FmtDur(GetTime() - p.observedAt) .. " ago)"
+		return "Notifications: sound presence (last hint " .. FmtDur(GetTime() - p.observedAt) .. " ago)"
 	end
 	local reason
 	if not db or not db.settings.signal then
@@ -806,28 +806,30 @@ local function PresenceStatus()
 	else
 		reason = "no advancing presence observed"
 	end
-	return "Liveness: slot-clock fallback (" .. reason .. "); idle checks every " .. FmtDur(IDLE_POLL_SECONDS)
+	return "Notifications: slot-clock maintenance (" .. reason .. "); idle checks every " .. FmtDur(IDLE_POLL_SECONDS)
 end
 
--- Returns state ("ok" | "stale" | "down" | "unknown"), a color and a description.
--- Recent presence progress is cheap to check. Otherwise, idle slot reads provide
--- liveness every IDLE_POLL_SECONDS, so the windows allow for that interval.
+-- Verification describes a completed round trip, not a persistent socket.
+local function VerificationAge()
+	return run.verifiedAt and math.max(0, GetTime() - run.verifiedAt) or nil
+end
+
+local function ConnectionLabel()
+	if run.connectingAt then return "Checking bridge..." end
+	if run.connectFailed then return "Bridge not responding" end
+	local age = VerificationAge()
+	if age and age < VERIFIED_SECONDS then return "Verified " .. FmtDur(age) .. " ago" end
+	return "Idle / not verified"
+end
+
 function WoWAI.BridgeState()
-	local seen = run.bridgeSeen
-	if not seen then
-		return "unknown", 0.6, 0.6, 0.6, "Bridge: not seen yet this session"
+	if run.connectingAt then return "unknown", 0.6, 0.6, 0.6, "Bridge: checking a fresh challenge" end
+	if run.connectFailed then return "down", 0.9, 0.25, 0.25, "Bridge: not responding to the latest check" end
+	local age = VerificationAge()
+	if age and age < VERIFIED_SECONDS then
+		return "ok", 0.2, 0.9, 0.3, "Bridge: verified " .. FmtDur(age) .. " ago"
 	end
-	local age = GetTime() - seen
-	local okFor, staleFor = 90, 300
-	if not PresenceWorks() then
-		okFor, staleFor = IDLE_POLL_SECONDS + 120, IDLE_POLL_SECONDS * 2 + 120
-	end
-	if age < okFor then
-		return "ok", 0.2, 0.9, 0.3, "Bridge: connected (seen " .. FmtDur(age) .. " ago)"
-	elseif age < staleFor then
-		return "stale", 0.95, 0.8, 0.2, "Bridge: last seen " .. FmtDur(age) .. " ago"
-	end
-	return "down", 0.9, 0.25, 0.25, "Bridge: not seen for " .. FmtDur(age) .. " - is the bridge running?"
+	return "unknown", 0.6, 0.6, 0.6, "Bridge: idle / not verified" .. (age and ("; last check " .. FmtDur(age) .. " ago") or "")
 end
 
 -- Same icons the friends list uses for online / away / busy / offline.
@@ -840,7 +842,7 @@ local STATE_ICON = {
 
 function WoWAI.UpdateDot()
 	local state, _, _, _, tip = WoWAI.BridgeState()
-	if run.pixelFailed then state = "down" end
+	if run.pixelFailed and not run.connectingAt then state = "down" end
 	tip = tip .. "\n" .. PresenceStatus()
 	for _, dot in ipairs({ ui.dot, ui.miniDot }) do
 		if dot then
@@ -849,40 +851,45 @@ function WoWAI.UpdateDot()
 		end
 	end
 	if ui.connection then
-		local labels = { ok = "Connected", stale = "Connection stale", down = "Disconnected", unknown = "Not connected" }
-		ui.connection:SetText(db and db.settings.mode == "reload" and "Reload transport" or (run.connectingAt and "Connecting..." or (labels[state] or "Not connected")))
+		ui.connection:SetText(db and db.settings.mode == "reload" and "Reload transport" or ConnectionLabel())
 		ui.connection:SetTextColor(unpack(UI.colors[state == "ok" and "success" or (state == "stale" and "warning" or "muted")]))
 	end
 end
 
--- Connected = the bridge has been seen recently. In pixel mode, sending needs this;
--- until then the Connect button takes the Send button's place. The reload
--- transport has no idea whether the bridge is there, so it never gates.
+-- Reload transport still uses its explicit reload cycle. Pixel sends require a
+-- recent acknowledgement of this session's current challenge.
 function WoWAI.IsConnected()
 	if not db or db.settings.mode ~= "pixel" then return true end
-	return WoWAI.BridgeState() == "ok" and not run.pixelFailed
+	local age = VerificationAge()
+	return age ~= nil and age < VERIFIED_SECONDS and not run.pixelFailed
 end
 
--- Connect button: say hello to the bridge (it acks, refreshes the slots and
--- offers a restore), ignoring SayHello's throttle so a click always does something.
+-- An explicit new check supersedes old confirmation immediately. Repeated
+-- clicks/callers during a pending check retransmit the same operation.
 function WoWAI.Connect()
 	if db.settings.mode ~= "pixel" then
 		SafeReload()
 		return
 	end
+	if run.connectingAt then
+		WoWAI.SayHello()
+		return
+	end
+	for id, rec in pairs(run.outbound) do if rec.hello then run.outbound[id] = nil end end
+	db.hello = nil
+	run.probe, run.verifiedAt = nil, nil
 	run.lastHelloAt = nil
 	run.pixelFailed = nil
 	run.connectFailed = nil
-	run.connectingAt = GetTime()
+	run.connectingAt = nil -- SayHello records both clocks before publishing
 	WoWAI.SayHello()
 end
 
 -- One word for the connection state, so Tick can tell when it changed.
 local function ConnectionKey()
-	if WoWAI.IsConnected() then return "ok" end
 	if run.connectingAt then return "connecting" end
 	if run.connectFailed then return "failed" end
-	return WoWAI.BridgeState()
+	return WoWAI.IsConnected() and "ok" or "unverified"
 end
 
 -- Called every tick: time out a Connect attempt, and redraw when the state flips
@@ -903,6 +910,10 @@ function WoWAI.CheckConnection()
 		elseif GetTime() - run.connectingAt > CONNECT_WAIT then
 			run.connectingAt, run.connectFailed = nil, true
 			run.sendOnConnect = nil -- the text is still in the box
+			db.hello = nil
+			run.helloPollAt = nil
+			for id, rec in pairs(run.outbound) do if rec.hello then run.outbound[id] = nil end end
+			RefreshStrip()
 		end
 	elseif run.connectFailed and WoWAI.IsConnected() then
 		run.connectFailed = nil
@@ -914,23 +925,15 @@ function WoWAI.CheckConnection()
 	end
 end
 
--- Swap Send and Connect depending on the state; part of UpdateStatus.
+-- Both actions remain available; only the direct check waits for its probe.
 function WoWAI.UpdateConnect()
-	if not ui.connect or not ui.send then return end
-	local connected = WoWAI.IsConnected()
-	ui.send:SetShown(connected)
-	ui.connect:SetShown(not connected)
+	if not ui.reconnect or not ui.send then return end
+	ui.send:Show()
+	ui.reconnect:Show()
+	ui.reconnect:SetEnabled(not run.connectingAt)
 	local c = ActiveChat()
 	ui.send:SetText(c and c.pendingId and "Check reply" or "Send")
 	if ui.cancel then ui.cancel:SetShown((c and c.pendingId ~= nil) or run.sendOnConnect ~= nil) end
-	if connected then return end
-	if run.connectingAt then
-		ui.connect:SetText("Connecting...")
-		ui.connect:Disable()
-	else
-		ui.connect:SetText(WoWAI.BridgeState() == "stale" and "Reconnect" or "Connect")
-		ui.connect:Enable()
-	end
 end
 
 -- Prove the sound-file trick actually distinguishes empty from valid files on this
@@ -1119,6 +1122,23 @@ end
 -- Slot loads and the reload inbox carry the same bridge snapshot.
 local function ApplyBridgeData(data)
 	if type(data) ~= "table" then return false end
+	local probe, ack = run.probe, data.connectionAck
+	local clock = data.now
+	if run.connectingAt and probe and GetTime() - probe.startedAt <= CONNECT_WAIT
+		and data.connectionProtocol == 1 and type(ack) == "table"
+		and ack.session == probe.session and ack.session == db.session and ack.nonce == probe.nonce
+		and type(clock) == "number" and clock >= time() - CONNECT_WAIT and clock <= time() + 2
+		and type(ack.at) == "number" and ack.at >= probe.startedEpoch and ack.at <= clock then
+		-- Capture this acknowledgement's actual age once. Republishing metadata
+		-- or a later retry must not renew a completed verification.
+		if not probe.acknowledgedAt then
+			probe.acknowledgedAt = ack.at
+			run.verifiedAt = GetTime() - math.max(0, time() - ack.at)
+			run.pixelFailed = nil
+			local rec = run.outbound[probe.id]
+			if rec and rec.hello and rec.nonce == probe.nonce then NoteAcked(rec) end
+		end
+	end
 	if type(data.cwd) == "string" and data.cwd ~= "" then run.bridgeCwd = data.cwd end
 	if type(data.agent) == "string" and data.agent ~= "" then run.bridgeAgent = data.agent end
 	if type(data.agents) == "table" and #data.agents > 0 then run.bridgeAgents = data.agents end
@@ -1179,6 +1199,9 @@ local function Tick()
 	if run.helloPollAt and now >= run.helloPollAt then
 		run.helloPollAt = nil
 		TryLoadSlot("hello")
+		if run.connectingAt and not WoWAI.IsConnected() and now - run.connectingAt <= CONNECT_WAIT then
+			WoWAI.SayHello()
+		end
 		-- Whatever that slot held, the wait is over.
 		if run.restoring then
 			run.restoring = nil
@@ -1197,16 +1220,15 @@ local function Tick()
 	end
 	WoWAI.UpdateDot()
 	WoWAI.CheckConnection()
+	WoWAI.UpdateMini()
 	for id, rec in pairs(run.outbound) do
-		-- Numeric sound files cannot authenticate a question after counter rollback.
-		if not rec.acked and (rec.hello or rec.forget) and CheckSignal("ack", id) then
+		-- Numeric sound files are only delivery hints for forget operations.
+		if not rec.acked and rec.forget and CheckSignal("ack", id) then
 			NoteAcked(rec)
 			changed = true
 		end
-		-- A hello only needs the bridge to have been seen; it never escalates.
-		-- A forget is the same, but the bridge must have been seen a moment after
-		-- the record went up, so it had a chance to read it.
-		if (rec.hello or rec.forget) and not rec.acked and run.bridgeSeen and run.bridgeSeen >= rec.sentAt + (rec.forget and 2 or 0) then
+		-- Forget maintenance can use clock hints; hello requires its nonce ack.
+		if rec.forget and not rec.acked and run.bridgeSeen and run.bridgeSeen >= rec.sentAt + 2 then
 			NoteAcked(rec)
 			changed = true
 		end
@@ -1343,10 +1365,14 @@ function WoWAI.GameContext()
 end
 
 function WoWAI.SetContextEnabled(enabled)
+	local checking = run.connectingAt ~= nil or WoWAI.IsConnected()
 	db.settings.context = enabled == true
 	run.contextSent, run.lastHelloAt = nil, nil
 	db.hello = nil -- changing Sharing creates a new hello, not a retry of its old context
-	if WoWAI.IsConnected() then WoWAI.SayHello() end
+	if checking and db.settings.mode == "pixel" then
+		run.connectingAt = nil
+		WoWAI.Connect()
+	end
 	WoWAI.UpdateSharingSummary()
 	WoWAI.Render()
 end
@@ -1436,6 +1462,7 @@ function WoWAI.Send(text, allow)
 	if c.pendingId then
 		-- Typing while waiting: keep the draft, and check for the reply.
 		if text ~= "" then c.draft = text end
+		if not WoWAI.IsConnected() and not run.connectingAt then WoWAI.Connect() end
 		if db.settings.mode == "pixel" and not (run.slotsExhausted or run.slotsMissing) then
 			TryLoadSlot("manual")
 		else
@@ -1445,9 +1472,7 @@ function WoWAI.Send(text, allow)
 	end
 	if text == "" then return end
 	if not WoWAI.IsConnected() then
-		-- Not connected: the message stays in the box and we try to connect;
-		-- CheckConnection sends it the moment the light turns green. If the bridge
-		-- never answers, the text is still in the box for a later try.
+		-- Keep the draft and intent until a fresh nonce round trip succeeds.
 		if ui.input then ui.input:SetText(text) end
 		run.sendOnConnect = { chat = c.id, text = text, allow = allow }
 		if not run.connectingAt then WoWAI.Connect() end
@@ -1576,15 +1601,13 @@ local function ForgetOnBridge(c)
 	SendForget(c.id)
 end
 
--- Hello: a record with no text that just announces our session token. The bridge
--- acks it, offers a restore if our saved data is fresh, and refreshes the slots,
--- so the status light and any lost chats come back before the first message.
--- The game context always rides on it (empty when turned off), so the bridge's
--- copy is brought in line at every login and Connect.
+-- A hello is the connection challenge and also synchronizes selected context.
+-- A saved, unacknowledged hello may be retried after reload, but cached metadata
+-- cannot authenticate it: this UI attempt records a fresh start timestamp.
 function WoWAI.SayHello()
 	if db.settings.mode ~= "pixel" then return end
 	local now = GetTime()
-	if run.lastHelloAt and now - run.lastHelloAt < 60 then return end
+	if run.lastHelloAt and now - run.lastHelloAt < 5 then return end
 	run.lastHelloAt = now
 	if not db.hello then
 		db.lastSeq = db.lastSeq + 1
@@ -1593,6 +1616,11 @@ function WoWAI.SayHello()
 		db.hello = { id = db.lastSeq, nonce = nonce, chat = c and c.id or "", cwd = c and c.cwd or "",
 			flags = "h;nonce=" .. nonce, name = c and c.name or "", text = "",
 			ctx = db.settings.context and WoWAI.GameContext() or "", hello = true }
+	end
+	if not run.connectingAt then
+		run.connectingAt, run.connectFailed, run.verifiedAt = now, nil, nil
+		run.probe = { id = db.hello.id, session = db.session, nonce = db.hello.nonce,
+			startedEpoch = time(), startedAt = now }
 	end
 	local rec = {}
 	for k, v in pairs(db.hello) do rec[k] = v end
@@ -2144,20 +2172,18 @@ function WoWAI.UpdateStatus()
 		end
 	elseif not WoWAI.IsConnected() then
 		if run.connectingAt and run.sendOnConnect then
-			s = "Connecting to the bridge... your message goes out as soon as it answers"
+			s = "Checking bridge... your message goes out after verification"
 		elseif run.connectingAt then
-			s = "Connecting to the bridge..."
+			s = "Checking bridge..."
 		elseif run.connectFailed then
-			s = "No answer from the bridge. Is it running (npm start)? Connect tries again"
-		elseif WoWAI.BridgeState() == "stale" then
-			s = "Bridge not seen for a while - click Reconnect"
+			s = "Bridge not responding · Reconnect checks again; your draft is saved"
 		else
-			s = "Not connected - start the bridge, then click Connect"
+			s = "Idle / not verified · Send checks automatically, or use Reconnect"
 		end
 	elseif c and c.draft and c.draft ~= "" then
 		s = "Draft saved · Enter to send"
 	elseif run.restoring then
-		s = "Connecting to the bridge..."
+		s = "Checking bridge..."
 	else
 		s = "Ready"
 	end
@@ -2453,8 +2479,7 @@ function WoWAI.UpdateMini()
 	elseif unread > 0 then
 		t = "|cff55ff55" .. unread .. (unread == 1 and " new reply" or " new replies") .. "|r"
 	else
-		local state = WoWAI.BridgeState()
-		t = db.settings.mode == "reload" and "Reload transport · ready" or (state == "ok" and "Connected · ready" or "Not connected")
+		t = db.settings.mode == "reload" and "Reload transport · ready" or ConnectionLabel()
 	end
 	ui.miniBadge:SetText(t)
 end
@@ -3009,7 +3034,7 @@ local function BuildUI()
 	local dotHolder, dot = MakeDot(f)
 	dotHolder:SetPoint("LEFT", identity, "RIGHT", 18, 0)
 	ui.dot = dot
-	ui.connection = UI.Label(f, "Disconnected", 12, "muted")
+	ui.connection = UI.Label(f, "Idle / not verified", 12, "muted")
 	ui.connection:SetPoint("LEFT", dotHolder, "RIGHT", 5, 0)
 	local close = UI.Button(f, "X", 30, function() WoWAI.Toggle(false) end, "quiet", "WoWAIClose")
 	close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -10, -10)
@@ -3253,19 +3278,22 @@ local function BuildUI()
 	send:SetHeight(28)
 	send:SetPoint("RIGHT", actionsRow, "RIGHT", 0, 0)
 	ui.send = send
-	local connect = UI.Button(actionsRow, "Connect", 106, WoWAI.Connect, "primary", "WoWAIConnect")
-	connect:SetHeight(28)
-	connect:SetPoint("RIGHT", actionsRow, "RIGHT", 0, 0)
-	UI.Tooltip(connect, "Connect to local bridge", "Start the bridge on this PC with npm start or wow-ai. Connecting alone never sends a question.")
-	ui.connect = connect
 	local cancel = UI.Button(actionsRow, "Cancel wait", 106, function() SlashCmdList.WOWAI("cancel") end, "secondary", "WoWAICancelWait")
 	cancel:SetHeight(28)
 	cancel:SetPoint("RIGHT", send, "LEFT", -8, 0)
 	UI.Tooltip(cancel, "Stop waiting for this reply", "This forgets the pending reply locally. It does not stop the external agent or undo actions already taken.")
 	ui.cancel = cancel
-	local recovery = UI.Button(actionsRow, "Connection ...", 108, function() ui.recoveryMenu:SetShown(not ui.recoveryMenu:IsShown()) end, "quiet", "WoWAIRecovery")
+	local reconnect = UI.Button(actionsRow, "Reconnect", 76, WoWAI.Connect, "secondary", "WoWAIReconnect")
+	reconnect:SetHeight(28)
+	reconnect:SetPoint("LEFT", actionsRow, "LEFT", 0, 0)
+	reconnect.label:SetPoint("LEFT", reconnect, "LEFT", 3, 0)
+	reconnect.label:SetPoint("RIGHT", reconnect, "RIGHT", -3, 0)
+	UI.Tooltip(reconnect, "Verify local bridge", "Send a fresh connection challenge. This does not send a question by itself.")
+	ui.reconnect = reconnect
+	local recovery = UI.Button(actionsRow, "...", 28, function() ui.recoveryMenu:SetShown(not ui.recoveryMenu:IsShown()) end, "quiet", "WoWAIRecovery")
 	recovery:SetHeight(28)
-	recovery:SetPoint("LEFT", actionsRow, "LEFT", 0, 0)
+	recovery:SetPoint("LEFT", reconnect, "RIGHT", 4, 0)
+	UI.Tooltip(recovery, "Connection recovery", "Check replies, retry delivery, reload or show diagnostics.")
 	local statusArea = CreateFrame("Frame", "WoWAIStatus", actionsRow)
 	statusArea:SetPoint("LEFT", recovery, "RIGHT", 8, 0)
 	statusArea:SetPoint("RIGHT", cancel, "LEFT", -8, 0)
@@ -3362,8 +3390,8 @@ function WoWAI.Toggle(show)
 	if show then
 		WoWAI.Render()
 		-- No auto-focus: the game keeps the keyboard until you click the box.
-		-- No automatic hello either: if the bridge hasn't been seen, the panel
-		-- shows Connect in place of Send and waits for a click.
+		-- Opening the panel alone does not send anything; Send checks the bridge
+		-- automatically, and the direct Reconnect action is always available.
 	end
 	WoWAI.UpdateMini()
 end

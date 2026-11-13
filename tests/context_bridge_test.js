@@ -28,6 +28,11 @@ function addonVM(fullAddon = false) {
   for (const name of fullAddon ? ['Codec.lua', 'Inbox.lua', 'WoWAI.lua', 'Context.lua', 'ContextUI.lua'] : ['Context.lua']) {
     run(fs.readFileSync(path.join(ROOT, 'addon/WoWAI', name), 'utf8'), 'WoWAI');
   }
+  if (fullAddon) run(`local encode = WoWAI_Codec.Encode
+    WoWAI_Codec.Encode = function(id, text)
+      TEST_STRIP = {id = id, text = text}
+      return encode(id, text)
+    end`);
   return { run, get };
 }
 
@@ -206,7 +211,8 @@ function bridgeSandbox(t, initialState, options = {}) {
   const strip = (text, id = 146) => {
     fs.writeFileSync(captureFile + '.tmp', JSON.stringify({ id, text, attempt: ++captureAttempt })); fs.renameSync(captureFile + '.tmp', captureFile);
   };
-  return { dir, addons, inbox, slots, write, outbox, start, release, callCount, messages, advance, strip };
+  const clearStrip = () => { if (fs.existsSync(captureFile)) fs.unlinkSync(captureFile); };
+  return { dir, addons, inbox, slots, write, outbox, start, release, callCount, messages, advance, strip, clearStrip };
 }
 
 function waitClock(fixture, vm, now) {
@@ -224,49 +230,84 @@ function deliverSlot(vm, file, seconds) {
   vm.run(`STUB.onLoadAddOn = function(name)\n${fs.readFileSync(file, 'utf8')}\nend; STUB.now = STUB.now + ${seconds}; STUB.Tick()`);
 }
 
-test('periodic slot clocks keep an idle real client connected without any agent work', async t => {
+function clientPacket(vm) {
+  return { id: Number(vm.get('TEST_STRIP.id')), text: vm.get('TEST_STRIP.text') };
+}
+
+function sendClientPacket(fixture, vm) {
+  const packet = clientPacket(vm);
+  fixture.strip(packet.text, packet.id);
+  return packet;
+}
+
+function waitAck(fixture, vm, nonce, at = 0) {
+  return Promise.all([fixture.inbox, ...fixture.slots].map((file, i) => {
+    const name = i === 0 ? 'WoWAI_Inbox' : 'WoWAI_SlotData';
+    return waitInbox(file, vm, () =>
+      vm.get(`${name}.connectionProtocol`) === '1' &&
+      vm.get(`${name}.connectionAck and ${name}.connectionAck.nonce`) === nonce &&
+      Number(vm.get(`${name}.connectionAck.at`)) >= at, name);
+  }));
+}
+
+test('periodic slot clocks and presence never renew a real hello verification', async t => {
   for (const presence of [true, false]) await t.test(presence ? 'with presence files' : 'without a presence directory', async t => {
-    const fixture = bridgeSandbox(t, { lastId: 0, sessions: {}, handled: {} }, { clock: true, presence, slots: 3, presenceIntervalMs: 25 });
+    const fixture = bridgeSandbox(t, { lastId: 0, sessions: {}, handled: {} }, { clock: true, capture: true, presence, slots: 3, presenceIntervalMs: 25 });
     const vm = addonVM(true), initial = fixture.advance(0);
     fixture.start([]);
     await waitClock(fixture, vm, initial);
     loginClient(vm, initial);
     deliverSlot(vm, fixture.slots[0], 6);
+    assert.equal(vm.get('WoWAI.IsConnected()'), 'false', 'a live bridge clock alone does not verify an unsent hello');
+    const nonce = vm.get('WoWAIDB.hello.nonce');
+    sendClientPacket(fixture, vm);
+    await waitAck(fixture, vm, nonce, initial);
+    assert.equal(vm.get('WoWAI_Inbox.connectionAck.session'), vm.get('WoWAIDB.session'));
+    deliverSlot(vm, fixture.slots[1], 6);
     assert.equal(vm.get('WoWAI.IsConnected()'), 'true');
     const history = vm.get('#WoWAIDB.chats[1].history');
-    for (let step = 0; step < 4; step++) {
-      const now = fixture.advance(610);
+    const ackAt = vm.get('WoWAI_Inbox.connectionAck.at');
+    for (const seconds of [91, 610, 610]) {
+      const now = fixture.advance(seconds);
       await waitClock(fixture, vm, now);
-      deliverSlot(vm, fixture.slots[step % fixture.slots.length], 610);
-      assert.equal(vm.get('WoWAI.BridgeState()'), 'ok', 'fresh periodic files must maintain consumer-visible liveness over forty idle minutes');
-      assert.equal(vm.get('WoWAI.IsConnected()'), 'true');
+      for (const file of fixture.slots) {
+        vm.run(fs.readFileSync(file, 'utf8'));
+        assert.equal(vm.get('WoWAI_SlotData.connectionAck.at'), ackAt, 'heartbeat retains the actual receive time');
+        assert.equal(vm.get('WoWAI_SlotData.connectionAck.nonce'), nonce);
+      }
+      deliverSlot(vm, fixture.slots[0], seconds);
+      assert.equal(vm.get('WoWAI.IsConnected()'), 'false', 'advancing clocks cannot keep an expired handshake green');
       assert.equal(vm.get('#WoWAIDB.chats[1].history'), history, 'maintenance must not create conversation turns');
       assert.equal(vm.get('#WoWAI_Inbox.replies'), '0');
-      assert.equal(fixture.callCount(), 0, 'clock maintenance must never invoke an agent');
+      assert.equal(fixture.callCount(), 0);
     }
     assert.equal(fs.existsSync(path.join(fixture.addons, 'WoWAI/presence')), presence);
-    assert.equal(fs.existsSync(path.join(fixture.dir, 'transcripts.json')), false);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(fixture.dir, 'transcripts.json'), 'utf8')).chats, {});
   });
 });
 
-test('an idle heartbeat retains the latest completed reply for a client that reads it later', async t => {
-  const fixture = bridgeSandbox(t, { lastId: 0, sessions: {}, handled: {} }, { clock: true, slots: 3, presenceIntervalMs: 25 });
+test('an idle heartbeat retains the latest completed reply independently of expired verification', async t => {
+  const fixture = bridgeSandbox(t, { lastId: 0, sessions: {}, handled: {} }, { clock: true, capture: true, slots: 3, presenceIntervalMs: 25 });
   const vm = addonVM(true), initial = fixture.advance(0);
   fixture.start([]);
   await waitClock(fixture, vm, initial);
   loginClient(vm, initial);
+  vm.run('WoWAIDB.settings.context = false');
+  const helloNonce = vm.get('WoWAIDB.hello.nonce');
+  sendClientPacket(fixture, vm);
+  await waitAck(fixture, vm, helloNonce, initial);
   deliverSlot(vm, fixture.slots[0], 6);
   vm.run('WoWAI.Send("The same player question")');
-  const chat = vm.get('WoWAIDB.chats[1].id'), nonce = vm.get('WoWAIDB.chats[1].request.nonce'), id = Number(vm.get('WoWAIDB.chats[1].pendingId'));
+  const chat = vm.get('WoWAIDB.chats[1].id'), nonce = vm.get('WoWAIDB.chats[1].request.nonce');
   const done = waitInbox(fixture.inbox, vm, status => status === 'done');
-  fixture.write(fixture.outbox(nonce, chat, id));
+  sendClientPacket(fixture, vm);
   fixture.release(1);
   await done;
   const originalReply = {
     text: vm.get('WoWAI_Inbox.replies[1].text'),
     summary: vm.get('WoWAI_Inbox.replies[1].summary'),
   };
-  const messages = fixture.messages(chat);
+  const messages = fixture.messages(chat), ackAt = vm.get('WoWAI_Inbox.connectionAck.at');
   const now = fixture.advance(3600);
   await waitClock(fixture, vm, now);
   for (const file of fixture.slots) {
@@ -274,11 +315,12 @@ test('an idle heartbeat retains the latest completed reply for a client that rea
     assert.equal(vm.get('WoWAI_SlotData.replies[1].nonce'), nonce);
     assert.equal(vm.get('WoWAI_SlotData.replies[1].text'), originalReply.text);
     assert.equal(vm.get('WoWAI_SlotData.replies[1].summary'), originalReply.summary);
+    assert.equal(vm.get('WoWAI_SlotData.connectionAck.at'), ackAt);
   }
   deliverSlot(vm, fixture.slots[1], 3600);
-  assert.equal(vm.get('WoWAIDB.chats[1].pendingId'), null, 'the real reply consumer can still complete the original nonce after a long idle');
+  assert.equal(vm.get('WoWAIDB.chats[1].pendingId'), null, 'the real reply consumer completes the original nonce after a long idle');
   assert.equal(vm.get('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].text'), originalReply.text);
-  assert.equal(vm.get('WoWAI.IsConnected()'), 'true');
+  assert.equal(vm.get('WoWAI.IsConnected()'), 'false', 'delivering an exact pending reply is not a new hello acknowledgement');
   await waitClock(fixture, vm, fixture.advance(610));
   deliverSlot(vm, fixture.slots[2], 610);
   assert.equal(vm.get('#WoWAIDB.chats[1].history'), '2', 'repeated heartbeat copies must not duplicate a delivered assistant turn');
@@ -286,37 +328,144 @@ test('an idle heartbeat retains the latest completed reply for a client that rea
   assert.deepEqual(fixture.messages(chat), messages);
 });
 
-test('the same immutable hello retries a lost return path from refreshed metadata without agent or transcript turns', async t => {
-  // Leave the periodic timer far in the future: only the duplicate hello can refresh these clocks.
+test('a duplicate in-flight hello acknowledges its actual retry without mutating receipts, context or transcripts', async t => {
   const fixture = bridgeSandbox(t, { lastId: 0, sessions: {}, handled: {} }, { clock: true, capture: true, slots: 3, presenceIntervalMs: 3600000 });
   const vm = addonVM(true), initial = fixture.advance(0);
-  const running = fixture.start([]);
+  fixture.start([]);
   await waitClock(fixture, vm, initial);
   loginClient(vm, initial);
-  const packet = () => ['WoWAIDB.session', 'WoWAIDB.hello.chat', 'WoWAIDB.hello.id', 'WoWAIDB.hello.cwd', 'WoWAIDB.hello.flags .. ";c"', 'WoWAIDB.hello.name', 'WoWAIDB.hello.ctx', 'WoWAIDB.hello.text'].map(expr => vm.get(expr)).join('\x1f');
-  const hello = packet(), id = Number(vm.get('WoWAIDB.hello.id'));
-  const ack = path.join(fixture.addons, 'WoWAI/ack', P.pad3(P.slotNumber(id, fixture.slots.length)) + '.wav');
-  fs.mkdirSync(path.dirname(ack));
-  fixture.strip(hello, id);
-  await waitFor(() => running.output().includes('hello from session') && fs.existsSync(ack) && fs.readFileSync(ack).equals(P.SILENT_WAV));
-  // The bridge accepted the hello, but its first clock/ACK never reached the client.
-  assert.equal(vm.get('WoWAI.IsConnected()'), 'false');
+  const nonce = vm.get('WoWAIDB.hello.nonce'), hello = sendClientPacket(fixture, vm);
+  await waitAck(fixture, vm, nonce, initial);
+  assert.equal(vm.get('WoWAI.IsConnected()'), 'false', 'the first return publication has not reached the client');
   const transcripts = fs.readFileSync(path.join(fixture.dir, 'transcripts.json'), 'utf8');
   const state = fs.readFileSync(path.join(fixture.dir, 'state.json'), 'utf8');
-  vm.run('STUB.onLoadAddOn = function() WoWAI_SlotData = nil end; STUB.now = STUB.now + 1600; STUB.Tick()');
-  assert.equal(vm.get('WoWAI.IsConnected()'), 'false');
-  vm.run('WoWAI.Connect()');
-  assert.equal(packet(), hello, 'Connect retries the immutable existing request instead of minting another nonce or context');
-  fs.writeFileSync(ack, '');
-  const refreshed = waitClock(fixture, vm, fixture.advance(1600));
-  fixture.strip(packet(), id);
-  await refreshed;
-  await waitFor(() => fs.readFileSync(ack).equals(P.SILENT_WAV));
+  vm.run('STUB.onLoadAddOn = function() WoWAI_SlotData = nil end; STUB.now = STUB.now + 6; STUB.Tick(); WoWAI.Connect()');
+  assert.deepEqual(clientPacket(vm), hello, 'repeated Connect during one in-flight attempt preserves the nonce and immutable context');
+  const now = fixture.advance(6);
+  fixture.strip(hello.text, hello.id);
+  await waitAck(fixture, vm, nonce, now);
   deliverSlot(vm, fixture.slots[1], 6);
-  assert.equal(vm.get('WoWAI.IsConnected()'), 'true', 'a same-nonce hello must recover the actual client without restarting Node');
+  assert.equal(vm.get('WoWAI.IsConnected()'), 'true', 'a received same-nonce retry recovers the client without restarting Node');
   assert.equal(fixture.callCount(), 0);
   assert.equal(fs.readFileSync(path.join(fixture.dir, 'transcripts.json'), 'utf8'), transcripts);
-  assert.equal(fs.readFileSync(path.join(fixture.dir, 'state.json'), 'utf8'), state, 'a duplicate hello cannot mutate request receipts, context or settings');
+  assert.equal(fs.readFileSync(path.join(fixture.dir, 'state.json'), 'utf8'), state);
+});
+
+test('stopping and restarting a bridge requires a fresh probe before a queued question is sent exactly once', async t => {
+  const fixture = bridgeSandbox(t, { lastId: 0, sessions: {}, handled: {} }, { clock: true, capture: true, slots: 3, presenceIntervalMs: 25 });
+  const vm = addonVM(true), initial = fixture.advance(0);
+  const first = fixture.start([]);
+  await waitClock(fixture, vm, initial);
+  loginClient(vm, initial);
+  vm.run('WoWAIDB.settings.context = false; WoWAI.Toggle(true)');
+  const firstNonce = vm.get('WoWAIDB.hello.nonce');
+  sendClientPacket(fixture, vm);
+  await waitAck(fixture, vm, firstNonce, initial);
+  deliverSlot(vm, fixture.slots[0], 6);
+  assert.equal(vm.get('WoWAI.IsConnected()'), 'true');
+  first.child.kill(); await first.exited;
+  fixture.clearStrip();
+
+  vm.run('WoWAI.Connect(); WoWAI.Send("Queued while stopped", {"WebSearch"})');
+  const stoppedNonce = vm.get('WoWAIDB.hello.nonce');
+  assert.notEqual(stoppedNonce, firstNonce, 'an explicit Reconnect supersedes the previous verification');
+  deliverSlot(vm, fixture.slots[1], 1);
+  assert.equal(vm.get('WoWAI.IsConnected()'), 'false', 'a recently published old ack cannot complete a new probe');
+  assert.equal(vm.get('WoWAIDB.chats[1].pendingId'), null);
+  assert.equal(fixture.callCount(), 0);
+  deliverSlot(vm, fixture.slots[2], 16);
+  assert.equal(vm.get('WoWAI.IsConnected()'), 'false');
+  assert.equal(vm.get('WoWAIReconnect:IsEnabled()'), 'true', 'timeout leaves the direct Reconnect action usable');
+  assert.equal(vm.get('WoWAIInput:GetText()'), 'Queued while stopped');
+  assert.equal(vm.get('WoWAIDB.chats[1].pendingId'), null, 'timeout preserves the draft without fabricating a turn');
+
+  const restartedAt = fixture.advance(18);
+  const restarted = fixture.start([]);
+  await waitClock(fixture, vm, restartedAt);
+  for (const file of [fixture.inbox, ...fixture.slots]) {
+    vm.run(fs.readFileSync(file, 'utf8'));
+    const name = file === fixture.inbox ? 'WoWAI_Inbox' : 'WoWAI_SlotData';
+    assert.equal(vm.get(`${name}.connectionAck`), null, 'historic receipts do not restore a process-local acknowledgement');
+  }
+  vm.run('WoWAI.Connect(); WoWAI.Send("Queued while stopped", {"WebSearch"})');
+  const freshNonce = vm.get('WoWAIDB.hello.nonce');
+  assert.notEqual(freshNonce, stoppedNonce, 'a new logical attempt gets a new nonce');
+  deliverSlot(vm, fixture.slots[0], 6);
+  assert.equal(vm.get('WoWAI.IsConnected()'), 'false', 'fresh clocks after restart still cannot verify an unsent probe');
+  assert.equal(vm.get('WoWAIDB.chats[1].pendingId'), null);
+  const receivedAt = fixture.advance(6);
+  const hello = sendClientPacket(fixture, vm);
+  await waitAck(fixture, vm, freshNonce, receivedAt);
+  deliverSlot(vm, fixture.slots[1], 6);
+  assert.equal(vm.get('WoWAI.IsConnected()'), 'true');
+  assert.equal(vm.get('WoWAIInput:GetText()'), '', 'only the matching round trip releases the queued draft');
+  assert.equal(vm.get('#WoWAIDB.chats[1].history'), '1');
+  const chat = vm.get('WoWAIDB.chats[1].id'), question = clientPacket(vm);
+  const job = P.jobsFromStrip(question.id, question.text).find(job => !job.hello && !job.data && !job.forget);
+  assert.ok(job, 'the real addon publishes the queued question through its pixel serializer');
+  assert.equal(job.text, 'Queued while stopped');
+  assert.deepEqual(job.allow, ['WebSearch'], 'queued permissions survive verification');
+  const working = waitInbox(fixture.inbox, vm, status => status === 'working');
+  fixture.strip(question.text, question.id);
+  await working;
+  await waitFor(() => fixture.callCount() === 1);
+  const done = waitInbox(fixture.inbox, vm, status => status === 'done');
+  fixture.release(1);
+  await done;
+  deliverSlot(vm, fixture.slots[2], 6);
+  const messages = fixture.messages(chat);
+  assert.equal(messages.filter(message => message.role === 'user').length, 1);
+  assert.equal(messages.filter(message => message.role === 'assistant').length, 1);
+  assert.equal(vm.get('WoWAIDB.chats[1].pendingId'), null);
+  const retryAt = fixture.advance(7);
+  fixture.strip(hello.text, hello.id);
+  await waitAck(fixture, vm, freshNonce, retryAt);
+  deliverSlot(vm, fixture.slots[0], 1);
+  fixture.strip(question.text, question.id);
+  await waitFor(() => (restarted.output().match(/strip #/g) || []).length >= 4);
+  assert.equal(fixture.callCount(), 1, 'replayed metadata, hello and question never create another model turn');
+  assert.deepEqual(fixture.messages(chat), messages);
+  assert.equal(vm.get('#WoWAIDB.chats[1].history'), '2');
+  const state = JSON.parse(fs.readFileSync(path.join(fixture.dir, 'state.json'), 'utf8'));
+  assert.equal(state.connectionAck, undefined, 'connection acknowledgements are never persisted');
+});
+
+test('a restarted bridge acknowledges a received historic hello retry, but never invents one from receipts', async t => {
+  const session = 'token', nonce = 'historic-hello-001';
+  const hello = ['token', 'chat', '146', '', `h;c;nonce=${nonce}`, 'Chat', 'Character: Original', ''].join('\x1f');
+  const state = { lastId: 146, sessions: {}, handledNonces: { [session]: { [nonce]: 1 } }, context: { text: 'Character: Original' } };
+  const fixture = bridgeSandbox(t, state, { clock: true, capture: true, slots: 2, presenceIntervalMs: 25 });
+  const vm = addonVM(), initial = fixture.advance(0);
+  fixture.start([]);
+  await waitClock(fixture, vm, initial);
+  assert.equal(vm.get('WoWAI_Inbox.connectionAck'), null);
+  const before = fs.readFileSync(path.join(fixture.dir, 'state.json'), 'utf8');
+  const receivedAt = fixture.advance(10);
+  fixture.strip(hello, 146);
+  await waitAck(fixture, vm, nonce, receivedAt);
+  assert.equal(vm.get('WoWAI_Inbox.connectionAck.session'), session);
+  assert.equal(vm.get('WoWAI_Inbox.connectionAck.at'), String(receivedAt));
+  assert.equal(fs.readFileSync(path.join(fixture.dir, 'state.json'), 'utf8'), before, 'a received duplicate does not rewrite persistent receipts or context');
+  assert.equal(fs.existsSync(path.join(fixture.dir, 'transcripts.json')), false);
+  assert.equal(fixture.callCount(), 0);
+});
+
+test('malformed hello input cannot mint an acknowledgement or prevent a later valid probe', async t => {
+  const fixture = bridgeSandbox(t, { lastId: 0, sessions: {}, handled: {} }, { clock: true, capture: true, presenceIntervalMs: 25 });
+  const vm = addonVM(), initial = fixture.advance(0), running = fixture.start([]);
+  await waitClock(fixture, vm, initial);
+  fixture.strip(['token', 'chat', '1', '', 'h;nonce=bad', 'Chat', ''].join('\x1f'), 1);
+  await waitFor(() => running.output().includes('rejected: Request protocol 1'));
+  await waitClock(fixture, vm, fixture.advance(2));
+  assert.equal(vm.get('WoWAI_Inbox.connectionProtocol'), '1');
+  assert.equal(vm.get('WoWAI_Inbox.connectionAck'), null);
+  assert.equal(fixture.callCount(), 0);
+  const receivedAt = fixture.advance(1), nonce = 'valid-hello-001';
+  fixture.strip(['token', 'chat', '1', '', `h;nonce=${nonce}`, 'Chat', ''].join('\x1f'), 1);
+  await waitAck(fixture, vm, nonce, receivedAt);
+  assert.equal(vm.get('WoWAI_Inbox.connectionAck.session'), 'token');
+  assert.equal(fixture.callCount(), 0);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(fixture.dir, 'transcripts.json'), 'utf8')).chats, {});
 });
 
 test('an old hello id runs a new nonce, queued reused ids stay distinct, and retries never duplicate turns', async t => {
