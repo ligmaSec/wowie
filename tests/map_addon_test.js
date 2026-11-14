@@ -57,6 +57,7 @@ function WorldMapFrame:GetCanvas() return canvas end
 function WorldMapFrame:GetMapID() return STUB.shownMap or 1432 end
 function WorldMapFrame:GetCanvasScale() return 1 end
 function WorldMapFrame:OnMapChanged() end
+function OpenWorldMap(mapID) STUB.shownMap = mapID; WorldMapFrame:Show(); WorldMapFrame:OnMapChanged() end
 local T = getmetatable(canvas).__index
 MINING, HERBALISM = "Mining", "Herbalism"
 `;
@@ -379,4 +380,432 @@ test('/wow-ai map hide, show, nav and stop', () => {
   assert.equal(vm.evaluate('WoWAIMapDB.nav'), null);
   assert.equal(vm.evaluate('C_Map.GetUserWaypoint()'), null);
   vm.run('SlashCmdList.WOWAIMAP("")'); // status never errors
+});
+
+function click(vm, control) {
+  vm.run(`local button = ${control}; assert(button:IsEnabled(), "control is disabled"); button:GetScript("OnClick")(button)`);
+}
+
+function savedMap(vm) {
+  vm.run(`local function Dump(v)
+    if type(v) == "table" then
+      local rows = {}
+      for key, value in pairs(v) do rows[#rows + 1] = "[" .. Dump(key) .. "]=" .. Dump(value) end
+      return "{" .. table.concat(rows, ",") .. "}"
+    elseif type(v) == "string" then return string.format("%q", v)
+    else return tostring(v) end
+  end
+  SAVED = Dump(WoWAIMapDB)`);
+  return `WoWAIMapDB = ${vm.evaluate('SAVED')}`;
+}
+
+test('navigation snapshots are cached and changes notify the workspace with the world map closed', () => {
+  const vm = newVM();
+  vm.run(`WorldMapFrame:Hide()
+    local update = WoWAI.UpdateNavigation
+    WoWAI.UpdateNavigation = function()
+      STUB.navigationUpdates = (STUB.navigationUpdates or 0) + 1
+      if update then update() end
+    end
+    WoWAIMap.Sync(${LAYER})
+    FIRST = WoWAIMap.GetNavigationState()
+    FIRST_REVISION = FIRST.revision
+    FIRST_UPDATES = STUB.navigationUpdates
+    WoWAIMap.UpdateNavigator(); WoWAIMap.UpdateNavigator()`);
+  assert.equal(vm.evaluate('FIRST == WoWAIMap.GetNavigationState()'), 'true');
+  assert.equal(vm.evaluate('FIRST.layers == WoWAIMapDB.map.layers'), 'true');
+  assert.equal(vm.evaluate('FIRST.active.point == WoWAIMapDB.map.layers[1].points[1]'), 'true');
+  assert.equal(vm.evaluate('STUB.navigationUpdates == FIRST_UPDATES'), 'true');
+  vm.run('WoWAIMap.ShowNavigation()');
+  assert.equal(vm.evaluate('STUB.focus'), null, 'opening the browser must not take keyboard focus');
+  click(vm, 'WoWAINavigationNext');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active.index'), '2');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.6);
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().revision > FIRST_REVISION'), 'true');
+  assert.equal(vm.evaluate('STUB.navigationUpdates > FIRST_UPDATES'), 'true');
+  assert.equal(vm.evaluate('WorldMapFrame:IsShown()'), 'false');
+  click(vm, 'WoWAINavigationPrevious');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.5);
+});
+
+test('virtual destination buttons resolve rebound rows after scroll, filter and map replacement', () => {
+  const vm = newVM();
+  vm.run(`local points = {}
+    for i = 1, 1500 do points[i] = { 1432, 10 + i % 80, 90, string.format("Destination %04d", i), "poi" } end
+    WoWAIMap.Sync({ epoch = "large", version = 1, layers = {
+      { name = "internal-collection", title = "Saved places", points = points } } })
+    WoWAIMap.ShowNavigation()
+    FIRST_ROW = WoWAINavigationPanel.rows[1]
+    WoWAINavigationScroll:SetVerticalScroll(999 * 72)`);
+  assert.equal(vm.evaluate('WoWAIMapDB.nav'), null, 'browsing does not activate an unordered collection');
+  assert.ok(vm.num('#WoWAINavigationPanel.rows') < 20, 'only viewport-sized rows are allocated');
+  assert.equal(vm.evaluate('WoWAINavigationPanel.rows[1] == FIRST_ROW'), 'true');
+  click(vm, 'WoWAINavigationRow1Navigate');
+  assert.equal(vm.evaluate('WoWAIMapDB.nav.index'), '1000');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.5);
+  vm.run('WoWAINavigationSearch:SetText("Destination 1499")');
+  assert.equal(vm.num('WoWAINavigationScroll:GetVerticalScroll()'), 0);
+  click(vm, 'WoWAINavigationRow1Navigate');
+  assert.equal(vm.evaluate('WoWAIMapDB.nav.index'), '1499');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.69);
+  vm.run(`WoWAIMap.Sync({ epoch = "large", version = 2, layers = {
+    { name = "replacement", title = "Replacement collection", points = {
+      { 1432, 22, 33, "Unrelated", "poi" }, { 1432, 77, 66, "Destination 1499", "poi" } } } } })`);
+  click(vm, 'WoWAINavigationRow1Navigate');
+  assert.equal(vm.evaluate('WoWAIMapDB.nav.layer'), 'replacement');
+  assert.equal(vm.evaluate('WoWAIMapDB.nav.index'), '2');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.77);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.y'), 0.66);
+  vm.run('WoWAINavigationSearch:SetText("no such place")');
+  assert.equal(vm.num('#WoWAINavigationPanel.filtered'), 0);
+  assert.equal(vm.evaluate('WoWAINavigationPanel.rows[1].entry'), null);
+  assert.equal(vm.evaluate('WoWAINavigationPanel.rows[1]:IsShown()'), 'false');
+  assert.equal(vm.evaluate('WoWAIMapDB.nav.index'), '2', 'filtering cannot change the destination');
+});
+
+test('route point buttons start at the selected stop and native controls preserve player ownership', () => {
+  const vm = newVM();
+  vm.run(`C_Map.SetUserWaypoint(UiMapPoint.CreateFromCoordinates(1432, 0.12, 0.23))
+    C_SuperTrack.SetSuperTrackedUserWaypoint(true)
+    WoWAIMap.Sync(${LAYER}); WoWAIMap.ShowNavigation()`);
+  click(vm, 'WoWAINavigationRow3Navigate');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().status'), 'native');
+  assert.equal(vm.evaluate('WoWAIMapDB.nav.index'), '3');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.55);
+  click(vm, 'WoWAINavigationNext');
+  assert.equal(vm.evaluate('WoWAIMapDB.nav.index'), '1', 'looping routes wrap');
+  click(vm, 'WoWAINavigationPrevious');
+  assert.equal(vm.evaluate('WoWAIMapDB.nav.index'), '3');
+  click(vm, 'WoWAINavigationVisibility');
+  assert.equal(vm.evaluate('WoWAIMapDB.hidden.mining'), 'true');
+  assert.equal(vm.evaluate('WoWAIMapDB.nav.index'), '3', 'visibility does not stop navigation');
+  click(vm, 'WoWAINavigationMap');
+  assert.equal(vm.evaluate('WoWAIMapDB.hidden.mining'), null);
+  assert.equal(vm.num('STUB.shownMap'), 1432);
+  click(vm, 'WoWAINavigationRow1Visibility');
+  assert.equal(vm.evaluate('WoWAIMapDB.hidden.mining'), 'true');
+  click(vm, 'WoWAINavigationRow1Map');
+  assert.equal(vm.evaluate('WoWAIMapDB.hidden.mining'), null);
+  click(vm, 'WoWAINavigationStop');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().status'), 'idle');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.12);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.y'), 0.23);
+  assert.equal(vm.evaluate('C_SuperTrack.IsSuperTrackingUserWaypoint()'), 'true');
+});
+
+test('router UI controls defer during combat, finish chosen unordered points, and respect replacement owners', () => {
+  const vm = newVM();
+  installRouter(vm);
+  vm.run(`WoWAIMap.Sync(${LAYER}); WoWAIMap.ShowNavigation()
+    STUB.combat = true
+    function InCombatLockdown() return STUB.combat == true end`);
+  click(vm, 'WoWAINavigationRow2Navigate');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().status'), 'pending');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active.index'), '2');
+  assert.equal(vm.evaluate('STUB.route'), null);
+  assert.equal(vm.evaluate('C_Map.GetUserWaypoint()'), null);
+  vm.run('STUB.combat = false; STUB.FireEvent("PLAYER_REGEN_ENABLED")');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().status'), 'route');
+  assert.equal(vm.num('STUB.route.x'), 0.6);
+  click(vm, 'WoWAINavigationPrevious');
+  assert.equal(vm.num('STUB.route.x'), 0.5);
+  click(vm, 'WoWAINavigationNext');
+  assert.equal(vm.num('STUB.route.x'), 0.6);
+  vm.run('STUB.route = { owner = "OtherAddon" }; STUB.routeEnded.WoWAI = "replaced"; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active'), null);
+  assert.equal(vm.evaluate('WoWAINavigationStop:IsEnabled()'), 'false');
+  vm.run('WoWAIMap.Stop()');
+  assert.equal(vm.evaluate('STUB.route.owner'), 'OtherAddon', 'stop only cancels our route');
+  vm.run(`STUB.route = nil
+    WoWAIMap.Sync({ epoch = "collection", version = 1, layers = {
+      { name = "places", title = "Places", loop = true, points = {
+        { 1432, 20, 30, "First place", "poi" }, { 1432, 70, 80, "Second place", "poi" } } } } })`);
+  click(vm, 'WoWAINavigationRow1Navigate');
+  assert.equal(vm.num('STUB.route.x'), 0.2);
+  vm.run('STUB.route = nil; STUB.routeEnded.WoWAI = "arrived"; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active'), null);
+  assert.equal(vm.evaluate('STUB.route'), null, 'arrival must not turn an unordered collection into a route');
+});
+
+test('a deferred route yields when another owner starts tracking during combat', () => {
+  const vm = newVM();
+  installRouter(vm);
+  vm.run(`WoWAIMap.Sync(${LAYER}); WoWAIMap.ShowNavigation()
+    STUB.combat = true; function InCombatLockdown() return STUB.combat == true end`);
+  click(vm, 'WoWAINavigationRow1Navigate');
+  vm.run('STUB.route = { owner = "OtherAddon" }; STUB.combat = false; STUB.FireEvent("PLAYER_REGEN_ENABLED")');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active'), null);
+  assert.equal(vm.evaluate('STUB.route.owner'), 'OtherAddon');
+});
+
+test('active targets normalize on shrink and disappear on empty layers without canceling invalid choices', () => {
+  const vm = newVM();
+  vm.run(`WoWAIMap.Sync(${LAYER}); WoWAIMap.Navigate("mining", 3); WoWAIMap.ShowNavigation()
+    local m = ${LAYER}; m.version = 2; table.remove(m.layers[1].points, 3); WoWAIMap.Sync(m)`);
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active.index'), '2');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active.total'), '2');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.6);
+  assert.equal(vm.evaluate('WoWAIMap.Navigate("missing", 1)'), 'false');
+  assert.equal(vm.evaluate('WoWAIMap.Navigate("mining", 99)'), 'false');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active.index'), '2');
+  vm.run(`WoWAIMap.Sync({ epoch = "e1", version = 3, layers = {
+    { name = "empty", title = "Empty", points = {} },
+    { name = "mining", title = "Copper loop", ordered = true, points = {} } } })`);
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active'), null);
+  assert.equal(vm.evaluate('WoWAIMapDB.nav'), null);
+  assert.equal(vm.evaluate('C_Map.GetUserWaypoint()'), null);
+  assert.equal(vm.evaluate('WoWAIMap.Navigate("empty")'), 'false');
+  assert.equal(vm.num('#WoWAINavigationPanel.filtered'), 0);
+  assert.equal(vm.evaluate('WoWAINavigationPanel.empty:IsShown()'), 'true');
+});
+
+test('offline saved destinations remain directly usable and stopped state survives loading', () => {
+  const vm = newVM(`WoWAIMapDB = { map = ${LAYER}, hidden = { mining = true } }`);
+  vm.run('WoWAIMap.ShowNavigation(); STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active'), null, 'opening saved data cannot auto-restart stopped tracking');
+  assert.equal(vm.evaluate('WoWAIMapDB.hidden.mining'), 'true');
+  click(vm, 'WoWAINavigationRow2Navigate');
+  assert.equal(vm.evaluate('WoWAIMapDB.nav.index'), '2');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.6);
+  click(vm, 'WoWAINavigationStop');
+  vm.run('STUB.Tick(); WoWAIMap.Sync(WoWAIMapDB.map)');
+  assert.equal(vm.evaluate('WoWAIMapDB.nav'), null);
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active'), null);
+});
+
+test('empty and unavailable navigation expose honest state and allow retry without disturbing player tracking', () => {
+  const vm = newVM();
+  vm.run('WoWAIMap.ShowNavigation()');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().status'), 'idle');
+  assert.equal(vm.num('#WoWAINavigationPanel.rows'), 0);
+  assert.equal(vm.evaluate('WoWAINavigationStop:IsEnabled()'), 'false');
+  assert.equal(vm.evaluate('WoWAINavigationNext:IsEnabled()'), 'false');
+  assert.equal(vm.evaluate('WoWAINavigationMap:IsEnabled()'), 'false');
+  vm.run(`C_Map.SetUserWaypoint(UiMapPoint.CreateFromCoordinates(1432, 0.12, 0.23))
+    C_SuperTrack.SetSuperTrackedUserWaypoint(true)
+    STUB.denyWaypoint = true; WoWAIMap.Sync(${LAYER})`);
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().status'), 'unavailable');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active'), null);
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().message ~= ""'), 'true');
+  assert.equal(vm.evaluate('WoWAINavigationStop:IsEnabled()'), 'false');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.12);
+  click(vm, 'WoWAINavigationRow2Navigate');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().status'), 'unavailable');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.12);
+  vm.run('STUB.denyWaypoint = false');
+  click(vm, 'WoWAINavigationRow2Navigate');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().status'), 'native');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.6);
+  click(vm, 'WoWAINavigationStop');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.12);
+});
+
+test('native arrival completes only the chosen unordered destination and stop respects a newer player pin', () => {
+  const vm = newVM();
+  vm.run(`WoWAIMap.Sync({ epoch = "places", version = 1, layers = {
+    { name = "places", title = "Places", loop = true, points = {
+      { 1432, 20, 30, "First place", "poi" }, { 1432, 70, 80, "Second place", "poi" } } } } })
+    WoWAIMap.ShowNavigation()`);
+  click(vm, 'WoWAINavigationRow1Navigate');
+  vm.run('STUB.posX, STUB.posY = 0.2, 0.3; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active'), null);
+  assert.equal(vm.evaluate('C_Map.GetUserWaypoint()'), null);
+  click(vm, 'WoWAINavigationRow2Navigate');
+  vm.run(`C_Map.SetUserWaypoint(UiMapPoint.CreateFromCoordinates(1432, 0.31, 0.41))
+    C_SuperTrack.SetSuperTrackedUserWaypoint(true)`);
+  click(vm, 'WoWAINavigationStop');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.31);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.y'), 0.41);
+  assert.equal(vm.evaluate('C_SuperTrack.IsSuperTrackingUserWaypoint()'), 'true');
+});
+
+test('a serialized UI stop does not reactivate the saved route after reload', () => {
+  const vm = newVM();
+  vm.run(`WoWAIMap.Sync(${LAYER}); WoWAIMap.ShowNavigation()`);
+  click(vm, 'WoWAINavigationStop');
+  const reloaded = newVM(savedMap(vm));
+  reloaded.run('WoWAIMap.ShowNavigation(); STUB.Tick(); WoWAIMap.Sync(WoWAIMapDB.map)');
+  assert.equal(reloaded.evaluate('WoWAIMap.GetNavigationState().active'), null);
+  assert.equal(reloaded.evaluate('C_Map.GetUserWaypoint()'), null);
+  assert.equal(reloaded.evaluate('WoWAINavigationStop:IsEnabled()'), 'false');
+  click(reloaded, 'WoWAINavigationRow2Navigate');
+  assert.equal(reloaded.num('C_Map.GetUserWaypoint().position.x'), 0.6);
+});
+
+test('router rejection falls back honestly to native tracking or an unavailable state', () => {
+  const vm = newVM();
+  installRouter(vm);
+  vm.run(`ShortestPathForever.API.Navigate = function() return false end
+    WoWAIMap.Sync(${LAYER}); WoWAIMap.ShowNavigation()`);
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().status'), 'native');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.5);
+  assert.equal(vm.evaluate('STUB.route'), null);
+  click(vm, 'WoWAINavigationStop');
+  vm.run('STUB.denyWaypoint = true');
+  click(vm, 'WoWAINavigationRow3Navigate');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().status'), 'unavailable');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active'), null);
+  assert.equal(vm.evaluate('STUB.route'), null);
+  assert.equal(vm.evaluate('C_Map.GetUserWaypoint()'), null);
+});
+
+test('adding points converts current position and map pins without altering tracking or sending a request', () => {
+  const vm = newVM('STUB.playerMap = 1454; STUB.posX = 0.314159; STUB.posY = 0.271828');
+  vm.run(`C_Map.SetUserWaypoint(UiMapPoint.CreateFromCoordinates(1432, 0.12, 0.23))
+    C_SuperTrack.SetSuperTrackedUserWaypoint(true)
+    WoWAIMap.Sync(${LAYER}); WoWAIMap.Navigate("mining", 2)
+    WoWAI.Toggle(true); WoWAIInput:SetText("keep this draft")
+    WoWAIMap.ShowNavigation()`);
+  click(vm, 'WoWAINavigationAdd');
+  vm.run('WoWAINavigationPointName:SetText("My mailbox"); WoWAINavigationPointMap:SetText("unknown")');
+  click(vm, 'WoWAINavigationPointSave');
+  assert.equal(vm.evaluate('WoWAINavigationPointEditor:IsShown()'), 'true');
+  assert.equal(vm.num('#WoWAINavigationPanel.catalog'), 3);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.6);
+  assert.equal(vm.evaluate('WoWAINavigationPointEditor.error:GetText() ~= ""'), 'true');
+  vm.run('WoWAINavigationPointMap:SetText("1454"); WoWAINavigationPointX:SetText("100.1")');
+  click(vm, 'WoWAINavigationPointSave');
+  assert.equal(vm.num('#WoWAINavigationPanel.catalog'), 3, 'out-of-map coordinates must not be saved');
+  click(vm, 'WoWAINavigationPointCurrent');
+  click(vm, 'WoWAINavigationPointSave');
+  assert.equal(vm.evaluate('WoWAINavigationPointEditor:IsShown()'), 'false');
+  assert.equal(vm.evaluate('STUB.focus'), null);
+  vm.run('WoWAINavigationSearch:SetText("My mailbox")');
+  assert.equal(vm.num('#WoWAINavigationPanel.filtered'), 1);
+  assert.equal(vm.num('WoWAINavigationPanel.filtered[1].point[1]'), 1454);
+  assert.equal(vm.num('WoWAINavigationPanel.filtered[1].point[2]'), 31.4159);
+  assert.equal(vm.num('WoWAINavigationPanel.filtered[1].point[3]'), 27.1828);
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active.layer'), 'mining');
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.6, 'saving a point must not start or replace guidance');
+  click(vm, 'WoWAINavigationStop');
+  click(vm, 'WoWAINavigationAdd');
+  vm.run('WoWAINavigationPointName:SetText("My map pin")');
+  click(vm, 'WoWAINavigationPointPin');
+  click(vm, 'WoWAINavigationPointSave');
+  vm.run('WoWAINavigationSearch:SetText("My map pin")');
+  assert.equal(vm.num('WoWAINavigationPanel.filtered[1].point[1]'), 1432);
+  assert.equal(vm.num('WoWAINavigationPanel.filtered[1].point[2]'), 12);
+  assert.equal(vm.num('WoWAINavigationPanel.filtered[1].point[3]'), 23);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.12);
+  assert.equal(vm.evaluate('WoWAIInput:GetText()'), 'keep this draft');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null);
+  assert.equal(vm.num('#WoWAIDB.chats[1].history'), 0);
+  vm.run('WoWAIMap.Sync({ epoch = "e1", version = 2, layers = {} })');
+  click(vm, 'WoWAINavigationAdd'); // the previously allocated route choice is now gone
+  vm.run('WoWAINavigationPointName:SetText("Do not save")');
+  click(vm, 'WoWAINavigationPointCancel');
+  vm.run('WoWAINavigationSearch:SetText("")');
+  assert.equal(vm.num('#WoWAINavigationPanel.catalog'), 2, 'cancel and bridge clearing must keep only the two local saves');
+});
+
+test('manually appended route stops retain their destination through source changes, clearing and reload', () => {
+  const vm = newVM();
+  vm.run(`WoWAIMap.Sync(${LAYER}); WoWAIMap.ShowNavigation()`);
+  click(vm, 'WoWAINavigationAdd');
+  click(vm, 'WoWAINavigationPointTarget2');
+  vm.run(`WoWAINavigationPointName:SetText("Scenic stop")
+    WoWAINavigationPointMap:SetText("1432")
+    WoWAINavigationPointX:SetText("82"); WoWAINavigationPointY:SetText("92")`);
+  click(vm, 'WoWAINavigationPointSave');
+  vm.run('WoWAINavigationSearch:SetText("Scenic stop")');
+  click(vm, 'WoWAINavigationRow1Navigate');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active.layer'), 'mining');
+  assert.equal(vm.num('WoWAIMap.GetNavigationState().active.index'), 4);
+  vm.run(`local m = ${LAYER}; m.version = 2
+    table.insert(m.layers[1].points, 2, { 1432, 17, 27, "New source stop", "poi" })
+    WoWAIMap.Sync(m)`);
+  assert.equal(vm.num('WoWAIMap.GetNavigationState().active.index'), 5);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.82);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.y'), 0.92);
+  vm.run('WoWAIMap.Sync({ epoch = "e1", version = 3, layers = {} })');
+  assert.equal(vm.num('WoWAIMap.GetNavigationState().active.index'), 1);
+  assert.equal(vm.num('WoWAIMap.GetNavigationState().active.total'), 1);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.82);
+  click(vm, 'WoWAINavigationStop');
+  const reloaded = newVM(savedMap(vm));
+  reloaded.run('WoWAIMap.ShowNavigation(); WoWAINavigationSearch:SetText("Scenic stop")');
+  assert.equal(reloaded.num('#WoWAINavigationPanel.filtered'), 1);
+  click(reloaded, 'WoWAINavigationRow1Navigate');
+  assert.equal(reloaded.num('C_Map.GetUserWaypoint().position.x'), 0.82);
+  click(reloaded, 'WoWAINavigationRow1Delete');
+  reloaded.run('StaticPopupDialogs.WOWAI_MAP_DELETE.OnAccept({}, STUB.popup.data)');
+  assert.equal(reloaded.evaluate('WoWAIMap.GetNavigationState().active'), null);
+  assert.equal(reloaded.evaluate('C_Map.GetUserWaypoint()'), null);
+  assert.equal(reloaded.num('#WoWAINavigationPanel.filtered'), 0);
+});
+
+test('delete confirmation targets its original point after row recycling and refuses a replaced snapshot', () => {
+  const vm = newVM();
+  vm.run(`WoWAIMap.Sync(${LAYER}); WoWAIMap.Stop(); WoWAIMap.ShowNavigation()
+    WoWAINavigationSearch:SetText("2. Copper")`);
+  click(vm, 'WoWAINavigationRow1Delete');
+  assert.equal(vm.num('#WoWAIMap.GetNavigationState().layers[1].points'), 3, 'confirmation must not delete immediately');
+  vm.run('WoWAINavigationSearch:SetText("3. Tin")');
+  click(vm, 'WoWAINavigationRow1Navigate');
+  vm.run('StaticPopupDialogs.WOWAI_MAP_DELETE.OnAccept({}, STUB.popup.data)');
+  assert.equal(vm.num('#WoWAIMap.GetNavigationState().layers[1].points'), 2);
+  assert.equal(vm.num('WoWAIMap.GetNavigationState().active.index'), 2);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.55, 'deleting an earlier point must retain the current destination');
+  click(vm, 'WoWAINavigationRow1Delete');
+  vm.run(`local m = ${LAYER}; m.version = 2
+    m.layers[1].points[3] = { 1432, 77, 66, "Replacement", "poi" }
+    WoWAIMap.Sync(m)
+    StaticPopupDialogs.WOWAI_MAP_DELETE.OnAccept({}, STUB.popup.data)
+    WoWAINavigationSearch:SetText("Replacement")`);
+  assert.equal(vm.num('#WoWAIMap.GetNavigationState().layers[1].points'), 2, 'stale confirmation must not delete the replacement');
+  assert.equal(vm.num('#WoWAINavigationPanel.filtered'), 1);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.77);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.y'), 0.66);
+  vm.run('WoWAINavigationSearch:SetText("2. Copper")');
+  assert.equal(vm.num('#WoWAINavigationPanel.filtered'), 0, 'source updates must not resurrect the earlier deletion');
+});
+
+test('deleting a repeated route stop preserves its other occurrence across bridge epochs and reload', () => {
+  const source = `{ epoch = "repeat", version = 1, layers = {
+    { name = "loop", title = "Repeated crossing", ordered = true, loop = true, points = {
+      { 1432, 10, 20, "Crossing", "poi" }, { 1432, 30, 40, "Middle", "poi" },
+      { 1432, 10, 20, "Crossing", "poi" }, { 1432, 70, 80, "Finish", "poi" } } } } }`;
+  const vm = newVM();
+  vm.run(`WoWAIMap.Sync(${source}); WoWAIMap.Navigate("loop", 4); WoWAIMap.ShowNavigation()`);
+  click(vm, 'WoWAINavigationRow3Delete');
+  vm.run('StaticPopupDialogs.WOWAI_MAP_DELETE.OnAccept({}, STUB.popup.data)');
+  assert.equal(vm.num('WoWAIMap.GetNavigationState().active.index'), 3);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.7);
+  vm.run(`local m = ${source}; m.epoch = "new-process"; m.layers[1].title = "Updated crossing"
+    WoWAIMap.Sync(m); WoWAIMap.Stop()`);
+  const reloaded = newVM(savedMap(vm));
+  reloaded.run(`WoWAIMap.Sync(${source}); WoWAIMap.ShowNavigation()`);
+  assert.equal(reloaded.num('#WoWAIMap.GetNavigationState().layers[1].points'), 3);
+  click(reloaded, 'WoWAINavigationRow1Navigate');
+  assert.equal(reloaded.num('C_Map.GetUserWaypoint().position.x'), 0.1);
+  click(reloaded, 'WoWAINavigationNext');
+  assert.equal(reloaded.num('C_Map.GetUserWaypoint().position.x'), 0.3);
+  click(reloaded, 'WoWAINavigationNext');
+  assert.equal(reloaded.num('C_Map.GetUserWaypoint().position.x'), 0.7);
+});
+
+test('deleting active points releases only owned waypoints and dotted routes', () => {
+  const vm = newVM();
+  vm.run(`C_Map.SetUserWaypoint(UiMapPoint.CreateFromCoordinates(1432, 0.12, 0.23))
+    C_SuperTrack.SetSuperTrackedUserWaypoint(true)
+    WoWAIMap.Sync(${LAYER}); WoWAIMap.ShowNavigation()`);
+  click(vm, 'WoWAINavigationRow1Delete');
+  vm.run('StaticPopupDialogs.WOWAI_MAP_DELETE.OnAccept({}, STUB.popup.data)');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active'), null);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.12);
+  click(vm, 'WoWAINavigationRow1Navigate');
+  vm.run(`C_Map.SetUserWaypoint(UiMapPoint.CreateFromCoordinates(1432, 0.33, 0.44))
+    C_SuperTrack.SetSuperTrackedUserWaypoint(true)`);
+  click(vm, 'WoWAINavigationRow1Delete');
+  vm.run('StaticPopupDialogs.WOWAI_MAP_DELETE.OnAccept({}, STUB.popup.data)');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().active'), null);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.33);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.y'), 0.44);
+  const routed = newVM();
+  installRouter(routed);
+  routed.run(`WoWAIMap.Sync(${LAYER}); WoWAIMap.ShowNavigation(); STUB.route = { owner = "OtherAddon" }`);
+  click(routed, 'WoWAINavigationRow1Delete');
+  routed.run('StaticPopupDialogs.WOWAI_MAP_DELETE.OnAccept({}, STUB.popup.data)');
+  assert.equal(routed.evaluate('WoWAIMap.GetNavigationState().active'), null);
+  assert.equal(routed.evaluate('STUB.route.owner'), 'OtherAddon');
 });

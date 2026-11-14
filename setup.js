@@ -137,6 +137,12 @@ function copyAddon(client) {
 // to the codex and grok blocks from the example. Everything else is kept.
 function upgradeConfig(cfg, example) {
   const notes = [];
+  if (!cfg.capture) { cfg.capture = { ...example.capture }; notes.push('capture'); }
+  if (cfg.capture.pacingVersion !== 1) {
+    if (cfg.capture.intervalMs == null || cfg.capture.intervalMs === 250) cfg.capture.intervalMs = example.capture.intervalMs;
+    cfg.capture.pacingVersion = 1;
+    notes.push('capture pacing');
+  }
   if (/WoWClaude/.test(cfg.inboxFile || '')) {
     cfg.inboxFile = path.join(cfg.addonDir, 'WoWAI', 'Inbox.lua');
     notes.push('inboxFile');

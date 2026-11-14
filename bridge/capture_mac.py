@@ -28,7 +28,7 @@ p = argparse.ArgumentParser()
 p.add_argument("--cell", type=int, default=4)
 p.add_argument("--cells", type=int, default=200)
 p.add_argument("--max-rows", type=int, default=48)
-p.add_argument("--interval-ms", type=int, default=250)
+p.add_argument("--interval-ms", type=int, default=50)
 p.add_argument("--process-name", default="World of Warcraft")
 p.add_argument("--window-name", default="")
 p.add_argument("--test-image", default="")
@@ -41,7 +41,7 @@ p.add_argument("--region-h", type=int, default=400)
 args = p.parse_args()
 
 CELL, CELLS, MAXROWS = args.cell, args.cells, args.max_rows
-W, H = CELLS * CELL, MAXROWS * CELL
+W, H = CELLS * max(CELL, 4), MAXROWS * max(CELL, 4)
 XSLACK = 8
 YSLACK = args.y_slack
 
@@ -55,26 +55,70 @@ def emit(obj):
 # Decoder: identical rules to capture.ps1 and capture_x11.py
 # ---------------------------------------------------------------------------
 
-def cell_value(px, c, r, ox=0, oy=0):
-    rr, gg, bb = px(ox + c * CELL + CELL // 2, oy + r * CELL + CELL // 2)
-    return (4 if rr >= 128 else 0) + (2 if gg >= 128 else 0) + (1 if bb >= 128 else 0)
+# Keep these rules in sync with capture_x11.py and capture.ps1.
+PROFILES = [("robust", CELL)]
+if CELL != 4:
+    PROFILES.append(("robust", 4))
+PROFILES += [("compact", 2), ("quiet", 2), ("quiet4", 4)]
+MAGIC_CELLS = (6, 1, 6, 1, 5)  # The sixth cell contains unknown ID bits.
 
 
-def has_magic(px, ox, oy):
-    acc = 0
-    for i in range(6):  # 18 bits cover the two magic bytes
-        acc = (acc << 3) | cell_value(px, i, 0, ox, oy)
-    return (acc >> 2) == 0xC71A
+def calibration(px, ox, oy, cell):
+    samples = [px(ox + i * cell + cell // 2, oy + cell // 2) for i in range(5)]
+    levels = []
+    for channel, bit in enumerate((4, 2, 1)):
+        low = [samples[i][channel] for i in range(5) if not MAGIC_CELLS[i] & bit]
+        high = [samples[i][channel] for i in range(5) if MAGIC_CELLS[i] & bit]
+        lo, hi = sum(low) / len(low), sum(high) / len(high)
+        separation = hi - lo
+        # Endpoints belong to robust/compact, not to adaptive dark calibration.
+        if separation < 12 or lo > 128 or hi >= 192:
+            return None
+        residual = max(4, min(12, separation * 0.25))
+        if any(abs(v - lo) > residual for v in low) or any(abs(v - hi) > residual for v in high):
+            return None
+        levels.append((lo, hi))
+    return levels
 
 
-def decode(px, ox=0, oy=0):
-    acc = 0
-    nbits = 0
+def cell_value(px, c, r, ox, oy, cell, levels):
+    channels = px(ox + c * cell + cell // 2, oy + r * cell + cell // 2)
+    value = 0
+    for channel, bit in enumerate((4, 2, 1)):
+        v = channels[channel]
+        if levels is None:
+            on = v >= 128
+        else:
+            lo, hi = levels[channel]
+            on = v >= (lo + hi) / 2
+            if abs(v - (hi if on else lo)) > max(10, min(24, (hi - lo) * 0.35)):
+                return None
+        if on:
+            value |= bit
+    return value
+
+
+def decode(px, width, height, ox, oy, display, cell):
+    if ox + CELLS * cell > width or oy + cell > height:
+        return None
+    levels = calibration(px, ox, oy, cell) if display in ("quiet", "quiet4") else None
+    if display in ("quiet", "quiet4") and levels is None:
+        return None
+    if levels is None:
+        # A gamma-brightened quiet palette can cross 128 without becoming an
+        # endpoint palette. Its known symbols still have a small channel span.
+        samples = [px(ox + i * cell + cell // 2, oy + cell // 2) for i in range(5)]
+        if not any(max(s[ch] for s in samples) - min(s[ch] for s in samples) >= 96 for ch in range(3)):
+            return None
+    acc = nbits = 0
     out = bytearray()
     needed = 6
-    total = CELLS * MAXROWS
+    total = CELLS * min(MAXROWS, (height - oy) // cell)
     for i in range(total):
-        acc = (acc << 3) | cell_value(px, i % CELLS, i // CELLS, ox, oy)
+        value = cell_value(px, i % CELLS, i // CELLS, ox, oy, cell, levels)
+        if value is None:
+            return None
+        acc = (acc << 3) | value
         nbits += 3
         while nbits >= 8:
             out.append((acc >> (nbits - 8)) & 0xFF)
@@ -85,7 +129,7 @@ def decode(px, ox=0, oy=0):
             if len(out) == 6:
                 length = out[4] * 256 + out[5]
                 needed = 8 + length
-                if needed > total * 3 // 8:
+                if length > 3200 or needed > total * 3 // 8:
                     return {"error": "length"}
             if len(out) >= needed:
                 break
@@ -101,21 +145,35 @@ def decode(px, ox=0, oy=0):
     if out[6 + length] != s1 or out[7 + length] != s2:
         return {"error": "checksum"}
     text = bytes(out[6:6 + length]).decode("utf-8", errors="replace")
-    return {"id": out[2] * 256 + out[3], "text": text}
+    return {"id": out[2] * 256 + out[3], "text": text, "display": display}
 
 
 def find_and_decode(px, width, height, hint):
-    """Decode at the last good offset, else search a top-left window for the magic.
-    The vertical search window is larger because the macOS title bar pushes the
-    UIParent top-left down."""
-    cands = [hint] if hint else []
-    cands += [(dx, dy) for dy in range(YSLACK + 1) for dx in range(XSLACK + 1)]
-    for ox, oy in cands:
-        if ox + W > width or oy + H > height:
-            continue
-        if has_magic(px, ox, oy):
-            return decode(px, ox, oy), (ox, oy)
-    return None, hint
+    """Cached origin/profile first; bounded search includes the macOS title bar."""
+    rejected = None
+    if hint:
+        if hint[2] in ("quiet", "quiet4"):
+            endpoint = (hint[0], hint[1], "compact" if hint[3] == 2 else "robust", hint[3])
+            msg = decode(px, width, height, *endpoint)
+            if msg and "error" not in msg:
+                return msg, endpoint
+        msg = decode(px, width, height, *hint)
+        if msg and "error" not in msg:
+            return msg, hint
+        rejected = msg
+    # Endpoint profiles precede quiet, so adaptive thresholds never steal them.
+    for display, cell in PROFILES:
+        for oy in range(YSLACK + 1):
+            for ox in range(XSLACK + 1):
+                candidate = (ox, oy, display, cell)
+                if candidate == hint:
+                    continue
+                msg = decode(px, width, height, *candidate)
+                if msg and "error" not in msg:
+                    return msg, candidate
+                if msg:
+                    rejected = msg
+    return rejected, hint
 
 
 # ---------------------------------------------------------------------------
@@ -187,9 +245,14 @@ def write_png(path, px, width, height):
 
 
 if args.test_image:
-    px, w, h = read_png(args.test_image)
-    msg, _ = find_and_decode(px, w, h, None)
-    emit(msg if msg else {"error": "no valid strip in image"})
+    # A directory exercises the same cached path as a live capture sequence.
+    images = ([os.path.join(args.test_image, name) for name in sorted(os.listdir(args.test_image))
+               if name.lower().endswith(".png")] if os.path.isdir(args.test_image) else [args.test_image])
+    hint = None
+    for image in images:
+        px, w, h = read_png(image)
+        msg, hint = find_and_decode(px, w, h, hint)
+        emit(msg if msg else {"error": "no valid strip in image"})
     sys.exit(0)
 
 
@@ -287,8 +350,8 @@ def grab(out_path):
     if not bounds:
         return None
     x, y, ww, wh = bounds
-    rw = min(args.region_w, ww)
-    rh = min(args.region_h, wh)
+    rw = min(max(args.region_w, W + XSLACK), ww)
+    rh = min(max(args.region_h, H + YSLACK), wh)
     if rw <= 0 or rh <= 0:
         return None
     try:
@@ -337,8 +400,8 @@ def run():
             time.sleep(3)
             continue
         x, y, ww, wh = bounds
-        rw = min(args.region_w, ww)
-        rh = min(args.region_h, wh)
+        rw = min(max(args.region_w, W + XSLACK), ww)
+        rh = min(max(args.region_h, H + YSLACK), wh)
         fd, tmp = tempfile.mkstemp(suffix=".png")
         os.close(fd)
         try:
@@ -355,7 +418,7 @@ def run():
                     last_warn = time.time()
                     emit({"warn": "strip seen but rejected: " + msg["error"]})
             elif msg:
-                key = "%d:%s" % (msg["id"], msg["text"])
+                key = "%s:%d:%s" % (msg["display"], msg["id"], msg["text"])
                 if key != last_key:
                     last_key = key
                     emit(msg)

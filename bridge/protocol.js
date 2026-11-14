@@ -125,6 +125,7 @@ function sameFolder(a, b) {
 // empty one clears the context the bridge keeps), "agent=codex" = run this
 // chat with that agent instead of the bridge's default (see agents.js).
 // "model=<hex>" overrides the model; "reasoning=high" overrides reasoning effort.
+// "calibration=<display>" is a hello control, not evidence of the captured display.
 function parseFlags(flags) {
   const out = { newSession: false, hello: false, forget: false, context: false, allow: [], agent: '' };
   for (const tok of String(flags || '').split(';')) {
@@ -138,6 +139,7 @@ function parseFlags(flags) {
     else if (tok.startsWith('reasoning=')) out.reasoning = tok.slice(10).trim().toLowerCase();
     else if (tok.startsWith('nonce=')) out.nonce = tok.slice(6);
     else if (tok.startsWith('profile=')) out.profile = tok.slice(8);
+    else if (tok.startsWith('calibration=')) out.calibration = tok.slice(12);
     else if (tok.startsWith('data=')) out.data = tok.slice(5);
     else if (tok.startsWith('request=')) out.request = tok.slice(8);
     else if (tok.startsWith('encoding=')) out.encoding = tok.slice(9);
@@ -241,6 +243,7 @@ const MAP_HINT = [
   '{"op":"set","layer":"<name>","title":"<shown title>","ordered":true,"loop":false,"points":[{"m":<uiMapID>,"x":<0-100>,"y":<0-100>,"label":"<text>","kind":"quest"}]}  replaces that layer; "ordered" draws a numbered route with a navigator, "loop" closes it.',
   '{"op":"clear","layer":"<name>"} removes a layer; {"op":"clearall"} removes them all.',
   'x and y are map percent on the map with that uiMapID (the context gives the player\'s current one). kind is one of ore, herb, quest, turnin, kill, loot, object, explore, npc, trainer, vendor, dungeon, flight, poi. Only mark the map when asked for a route, marks or locations; say in the reply what you drew.',
+  'Use clear, human-readable layer titles and point labels. Saved marks appear in wow-ai\'s Navigation window, where the player can choose a destination, start a route, move between stops or stop navigation. Direct them to Navigation rather than asking them to type commands or internal layer names. Creating marks does not prove that guidance is active: another route may already own tracking.',
 ];
 
 // How the agent hands the player a ready-made macro (see "Macros" below).
@@ -362,6 +365,7 @@ function luaValue(value, argumentList = false) {
 function luaTable(globalName, records, opts = {}) {
   const now = opts.now || Date.now();
   const agents = Array.isArray(opts.agents) ? opts.agents : [];
+  const captureIntervalMs = Number.isFinite(opts.captureIntervalMs) && opts.captureIntervalMs > 0 ? opts.captureIntervalMs : 50;
   const lines = [
     '-- Written by the wow-ai bridge (bridge/bridge.js). Do not edit by hand.',
     `${globalName} = {`,
@@ -373,6 +377,8 @@ function luaTable(globalName, records, opts = {}) {
     '\tcontextProtocol = 2,',
     '\trequestProtocol = 1,',
     '\tconnectionProtocol = 1,',
+    '\ttransportProtocol = 1,',
+    `\ttransport = { displays = { "robust", "compact", "quiet", "quiet4" }, frameIntervalMs = ${Math.max(100, 2 * captureIntervalMs)}, captureIntervalMs = ${captureIntervalMs} },`,
     `\tcontextEnabled = ${opts.contextEnabled === false ? 'false' : 'true'},`,
   ];
   if (opts.connectionAck) lines.push(`\tconnectionAck = ${luaValue(opts.connectionAck)},`);

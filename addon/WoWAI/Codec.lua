@@ -3,9 +3,9 @@
 -- A message is a byte stream:
 --   [0xC7 0x1A] [id hi, id lo] [len hi, len lo] [payload: len bytes] [fletcher s1, s2]
 -- The checksum covers id..payload. The bytes are packed MSB-first into 3-bit cells;
--- each cell is drawn as one square whose R, G and B channels are each fully on or
--- off (bit 2 = R, bit 1 = G, bit 0 = B). Pure primaries survive any gamma/contrast
--- setting, unlike intermediate levels. bridge/capture.ps1 decodes it.
+-- each cell is drawn as one square with a binary level in each RGB channel
+-- (bit 2 = R, bit 1 = G, bit 0 = B). Endpoint colors are the robust default;
+-- optional quiet colors require a captured, checksum-verified calibration.
 
 WoWAI_Codec = {}
 local C = WoWAI_Codec
@@ -13,6 +13,12 @@ local C = WoWAI_Codec
 C.MAGIC1, C.MAGIC2 = 0xC7, 0x1A
 C.BITS = 3
 C.MAX_PAYLOAD = 3200
+C.DISPLAYS = {
+	robust = { label = "Robust", cell = 4, low = 0, high = 1 },
+	compact = { label = "Compact", cell = 2, low = 0, high = 1 },
+	quiet = { label = "Quiet", cell = 2, low = 16 / 255, high = 80 / 255 },
+	quiet4 = { label = "Quiet", family = "quiet", cell = 4, low = 16 / 255, high = 80 / 255 },
+}
 
 function C.Fletcher16(bytes, from, to)
 	local s1, s2 = 0, 0
@@ -23,7 +29,7 @@ function C.Fletcher16(bytes, from, to)
 	return s1, s2
 end
 
--- Returns an array of cell values (0..63) and the number of bytes encoded.
+-- Returns an array of three-bit cell values (0..7) and the number of bytes encoded.
 function C.Encode(id, payload)
 	local len = #payload
 	local bytes = {
@@ -58,10 +64,11 @@ function C.Encode(id, payload)
 	return cells, #bytes
 end
 
--- Color for a cell value: each channel fully on or off.
-function C.CellColor(v)
+-- Cells stay opaque; lowering alpha would mix data with the moving game world.
+function C.CellColor(v, display)
+	local p = C.DISPLAYS[display or "robust"] or C.DISPLAYS.robust
 	local r = math.floor(v / 4) % 2
 	local g = math.floor(v / 2) % 2
 	local b = v % 2
-	return r, g, b
+	return r == 1 and p.high or p.low, g == 1 and p.high or p.low, b == 1 and p.high or p.low
 end

@@ -18,10 +18,14 @@ The agent can mark your world map. What it draws are **layers**: a named list of
 
 ## In game
 
+- **Navigation in wow-ai:** click **Navigation** in the workspace header. Search saved destinations by their readable names, then click **Navigate** or **Start route**; any route stop can be selected directly. The active card has **Previous**, **Next**, **Stop**, **Show on map** and layer visibility controls. No layer identifier or command is needed, and saved destinations remain usable while the bridge is disconnected.
+- **Add and delete points:** **Add point** opens a form for a name, destination group and coordinates. Choose **My places** or an existing route/group; **Use my position** and **Use map pin** fill the coordinates without typing a map ID. Route additions append a stop, without starting or changing active guidance. Each saved point has **Delete**, with confirmation; deleting the active destination stops only WoWAI's owned tracking.
 - **World map:** pins for every visible layer on the map you are looking at, projected onto continent maps too. Hover for the label; click to track a destination. A point outside Orgrimmar belongs on Durotar's map, not the city map.
 - **Tracked destinations:** the active stop is sent to the game's waypoint tracking, not a separate WoWAI compass. OpenMap follows the native waypoint. With **ShortestPathForever** enabled, its public routing API draws your configured map/minimap route, including dotted paths and directions around terrain. It owns its intermediate waypoint; WoWAI does not overwrite it on each update. Without that routing addon, the game tracks the destination as a native waypoint.
-- **Progress and stopping:** new/changed ordered routes and single destinations on your continent activate automatically unless another route is active. Unordered multi-point collections remain map-only. ShortestPathForever decides routed arrival; native-only navigation advances within 12 yards. `next`, `prev` and `stop` update the tracked destination, and loops wrap around. Stop/completion restores prior player tracking only while the addon still owns it; a player-selected pin or quest is not overwritten. Routing requested in combat starts after combat.
+- **Progress and stopping:** new/changed ordered routes and single destinations on your continent activate automatically unless another route is active. Unordered multi-point collections do not choose a destination until you select one; arrival completes only that chosen destination. ShortestPathForever decides routed arrival; native-only navigation advances within 12 yards. The Navigation window's **Previous**, **Next** and **Stop** buttons control the tracked destination, and ordered loops wrap around. Stop/completion restores prior player tracking only while the addon still owns it; a player-selected pin or quest is not overwritten. Routing requested in combat starts after combat unless another owner has taken over.
 - **Herb and ore nodes:** with a `WoWAI_Nodes` data addon installed (see below), every herb and ore spawn point of the zone on the world map, filtered to what your skill can gather.
+
+Slash commands remain optional shortcuts:
 
 | Command | Does |
 |---|---|
@@ -33,7 +37,9 @@ The agent can mark your world map. What it draws are **layers**: a named list of
 
 `/aimap` is a shorter alias for `/wow-ai map`. Everything here only reads positions and draws. Nothing moves, targets or acts for you.
 
-Activate an already-saved destination with `/aimap nav <layer>`, using the name shown by `/aimap`; for example `/aimap nav nearby-mining`. No new agent request is needed. A stopped destination stays stopped when the bridge resends an unchanged snapshot.
+A stopped destination stays stopped across UI reloads and unchanged bridge snapshots. The Navigation window shows the active stop, routing backend, combat deferral or unavailable guidance rather than treating saved marks as proof that navigation is running.
+
+Point edits are local to the addon and saved across `/reload`, separately from the bridge's source snapshot. Exact deleted entries stay removed when that snapshot is resent or refreshed, including repeated route stops being deleted individually. Manually added points survive the assistant clearing or replacing its layers; delete those points in Navigation. Regenerating a source route does not redirect guidance away from a manually appended active stop.
 
 The native integration uses the client's [`C_Map.SetUserWaypoint`](https://github.com/Ketho/wow-ui-source-forever/blob/forever/Interface/AddOns/Blizzard_APIDocumentationGenerated/MapDocumentation.lua) and [`C_SuperTrack`](https://github.com/Ketho/wow-ui-source-forever/blob/forever/Interface/AddOns/Blizzard_APIDocumentationGenerated/SuperTrackManagerDocumentation.lua) APIs. ShortestPathForever is optional; its v1 API receives one active destination under the owner `WoWAI`, and only that owner's route is cancelled.
 

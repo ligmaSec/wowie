@@ -21,7 +21,7 @@ Nothing here injects code, reads game memory, or generates input. The addon uses
 
 ## How it works, in one paragraph
 
-WoW addons are sandboxed: no network, no file reads at runtime. Two doors remain. **Out:** the addon draws your message as a strip of colored 4-pixel squares in the top-left corner of the screen; the bridge screen-captures that corner four times a second, decodes it, and runs the chat's agent headless in the chat's folder. **In:** a load-on-demand addon reads its files from disk at the moment it is loaded, so the bridge writes the reply into a pool of 200 pre-made slot addons and the game loads a fresh one from a timer. Cheap "is it ready yet" checks ride on a third trick: an empty `.wav` won't play and a valid one will. Map layers travel the same way: the agent's tools hand them to the bridge, which keeps them versioned and ships them inside the slot files. Details in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/MAP.md](docs/MAP.md).
+WoW addons are sandboxed: no general-purpose network or file I/O. **Out:** the addon draws a checked pixel strip in the top-left corner; the bridge captures it at a default 50 ms interval, decodes it, and runs the chat's agent headless in its folder. Uploads negotiate up to 10 frames/s. Robust uses 4-pixel endpoint colors; Compact uses 2-pixel cells. Quiet uses dark colors and verifies whether 2- or 4-pixel cells are reliable on the current display. **In:** the bridge writes replies to 200 pre-made load-on-demand slot addons, and the game loads a fresh one on a readiness hint or bounded schedule. Cheap empty-versus-valid WAV checks provide notifications, not connection authentication. Map layers travel inside the same slot snapshots. Details: [architecture](docs/ARCHITECTURE.md) and [map](docs/MAP.md).
 
 ## Curseforge
 Official curseforge addon page: https://www.curseforge.com/wow/addons/ai-agents-chat
@@ -140,6 +140,8 @@ The discussion takes most of the window, with a compact multiline composer below
 
 Click **Settings** for addon-wide agent/model/reasoning defaults, then **Save**. **Cancel** discards edits; **Use bridge defaults**, then Save, removes addon overrides. These choices survive `/reload` and logout in `WoWAIDB`, without editing `bridge/config.json`. Precedence remains **per-chat choice → addon default for the same agent → bridge config → CLI default**. Clearing a model/effort override starts a fresh session when necessary so a resumed CLI cannot retain it. This redesign changes only wow-ai's own windows; WoW's game UI, maps and other addons are unchanged.
 
+**Settings → Pixel display** offers **Robust**, **Compact** and **Quiet**. Compact uses one-quarter the pixel area where the display can preserve 2-pixel cells. Quiet uses opaque dark colors; if filtering corrupts its 2-pixel grid, it verifies a 4-pixel dark grid instead of immediately returning to bright primaries. **Save** checks a full-size native frame before enabling a candidate; failure keeps Robust and shows the reason. The preferred mode and last verified geometry survive reloads, but connection or display changes still require fresh proof. Update bridge and addon together; restart the bridge when idle and `/reload` the addon. No new addon files are needed.
+
 | Command | What it does |
 |---|---|
 | `/wow-ai` | toggle the window (`/ai`, `/wowai` and the old `/wow-claude` are the same command); the minimize button (top right) or Esc collapses it to a small bar, click the bar to expand |
@@ -182,7 +184,7 @@ Click **Sharing** in the workspace header. **Character**, **Private / Social**, 
 
 Checked snapshot data accompanies your message and can reach the selected AI provider. The agent can request additional read-only data, and the addon checks the **current** permissions before reading it. Broad API/UI/addon permissions can overlap snapshot categories; their descriptions explain this. These controls govern the addon information channel, not the coding agent's separate host-file/tool permissions. No arbitrary Lua, setters, sending/deleting mail, movement or protected gameplay actions are exposed through addon queries. Closed-window, restricted, secret and unsupported values are reported as unavailable rather than guessed.
 
-Large snapshots are transferred across multiple pixel frames instead of being clipped to the short character summary. Updated bridges negotiate native zlib compression plus base64 and larger fragments; clients without native compression use plain base64. This is lossless: all selected information still arrives, and the capture cadence is unchanged. Short summaries reuse the same captured values instead of reading providers twice. API results support explicit pagination and nested paths.
+Large snapshots cross multiple pixel frames instead of being clipped to the short character summary. Native zlib plus base64 and 3,000-character fragments preserve all selected information; clients without compression use plain base64. Fresh bridge capabilities negotiate frame pacing, normally 100 ms, with backoff for stalled receipt. Readiness notifications acknowledge complete queued/working requests promptly so the canvas need not keep flashing while the AI thinks. Short summaries reuse the same captured values rather than reading providers twice. API results support explicit pagination and nested paths.
 
 More snapshot categories still increase the AI's prompt size and processing time: transport compression does not reduce model tokens. For lower latency, choose a lower **Reasoning** setting or a faster **Model** in the UI. Snapshots over 4 MiB require fewer snapshot categories or paginated queries. **Changes affect future snapshots and current queries; already-sent information cannot be recalled.** Manually shift-clicked links still share their tooltip as part of your explicit message.
 
@@ -210,11 +212,15 @@ The agent writes each macro in a ```` ```wowmacro <Name> ```` block (optional `i
 
 The agent can draw on your world map. Ask *"route me through copper and tin around here"*, *"plan the quests I can do in Westfall"* or *"where is the nearest mining trainer?"*, and the answer arrives with:
 
+- **Navigation inside wow-ai:** use the header's **Navigation** button to search saved destinations, **Navigate** to a point or **Start route**. Choose any stop directly; **Previous**, **Next**, **Stop**, **Show on map** and visibility controls are built in. Saved destinations work offline without another agent request or typing a layer name.
+- **Manage saved points:** **Add point** saves your current position, a world-map pin or entered coordinates to **My places** or an existing route. **Delete** beside a point asks for confirmation. Local edits survive reloads and bridge refreshes; adding a point does not interrupt guidance.
 - **Layers on the world map:** numbered pins joined by lines for routes, and pins for quest givers, objectives, turn-ins, trainers, dungeon entrances or any mark. They show on the zone map and on the continent map; hover a pin for its label, click it to navigate there.
-- **Tracked destinations:** the active stop goes to the game's map/minimap waypoint tracking, not a standalone compass. With ShortestPathForever enabled, its routing API draws your configured route dots and terrain-aware path; OpenMap follows the native waypoint. New/changed routes and single destinations activate without opening the map unless another route is active. Use `/aimap nav <layer>` for a saved mark, and `next`, `prev` or `stop` to control it. Player-selected pins and quests keep priority when tracking is stopped or replaced.
+- **Tracked destinations:** the active stop goes to the game's map/minimap waypoint tracking, not a standalone compass. With ShortestPathForever enabled, its routing API draws your configured route dots and terrain-aware path; OpenMap follows the native waypoint. New/changed routes and single destinations activate without opening the map unless another route is active. Player-selected pins and quests keep priority when tracking is stopped or replaced.
 - **Herb and ore spawns:** with an optional `WoWAI_Nodes` data addon installed, every gathering spawn point of the zone you are looking at, filtered to what your skill can gather.
 
 The system prompt tells every agent how to hand marks to the bridge: append commands to the file named in `WOW_AI_MAP_FILE` (set for every run), or end the reply with a small ```` ```wowmap ```` block. The bridge validates the marks, keeps them in `state.json` and ships them to the game, so they survive a UI reload and the beta's saved-data wipes. Where the agent gets its coordinates from is up to the folder the chat works in: [docs/MAP.md](docs/MAP.md) describes the command format and how to feed it game data.
+
+Optional command shortcuts:
 
 | Command | What it does |
 |---|---|
@@ -245,6 +251,7 @@ The keys you are most likely to touch. Every key, flag and environment variable 
 | `gameContext` | `false` never tells the agent about your character, whatever the addon sends (default `true`) |
 | `primerFile` | the addon/macro primer appended with the context (default `docs/WOW-ADDON-PRIMER.md`; `""` = none) |
 | `capture.processName` | the game exe without `.exe` (`Wow` for Forever); set by `setup.js` |
+| `capture.intervalMs` | capture period, default 50 ms; upload pacing adapts to explicit slower values |
 | `capture.keepComposited`, `capture.windowName` | Linux: keep the compositor drawing the game window (if the probe sees black), or find the window by title |
 | `slots`, `actMax`, `presenceMax` | pool sizes; must match the constants at the top of `WoWAI.lua` if you change them |
 | `timeoutMs` | kill a run that takes longer than this (default 30 min) |

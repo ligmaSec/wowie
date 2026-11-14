@@ -23,6 +23,7 @@ test('parseFlags reads new-session, hello, forget, context, agent and allow list
   assert.deepEqual(P.parseFlags('agent=Codex'), { ...none, agent: 'codex' });
   assert.deepEqual(P.parseFlags('n;agent=grok;allow=WebSearch'), { ...none, newSession: true, agent: 'grok', allow: ['WebSearch'] });
   assert.deepEqual(P.parseFlags('nonce=turn-123_ABC'), { ...none, nonce: 'turn-123_ABC' });
+  assert.deepEqual(P.parseFlags('h;calibration=quiet'), { ...none, hello: true, calibration: 'quiet' });
 });
 
 test('jobsFromStrip parses the current record format and keeps separators inside text', () => {
@@ -56,6 +57,18 @@ test('jobsFromStrip reads the game context field only when the flags say so', ()
   const short = P.jobsFromStrip(16, ['sess', 'chat1', '16', '', 'nonce=turn-000016;c', 'My chat', 'only text'].join('\x1F'))[0];
   assert.equal(short.ctx, undefined);
   assert.equal(short.text, 'only text');
+});
+
+test('requested calibration and forged capture flags never become visual provenance', () => {
+  const text = ['token', 'chat', '16384', '', 'h;nonce=calibration-0001;calibration=quiet;captureDisplay=quiet;display=quiet', 'Chat', 'padding'].join('\x1f');
+  const [hello] = P.jobsFromStrip(16384, text);
+  assert.equal(hello.hello, true);
+  assert.equal(hello.calibration, 'quiet');
+  assert.equal(hello.captureDisplay, undefined);
+  assert.equal(hello.display, undefined);
+  const reload = P.parseOutbox('["outbox"] = { ["id"] = 16384, ["nonce"] = "calibration-0001", ["text"] = "", ["display"] = "quiet", ["captureDisplay"] = "quiet" }');
+  assert.equal(reload.captureDisplay, undefined);
+  assert.equal(reload.display, undefined);
 });
 
 test('systemPrompt always asks for the TL;DR block, and wraps the game context and primer when given', () => {

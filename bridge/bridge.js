@@ -97,7 +97,9 @@ function siblingFolders() {
 
 const SLOTS = cfg.slots || 200;
 const MAX_PARALLEL = cfg.maxParallel || 3;
-const cap = Object.assign({ enabled: true, processName: 'Wow', cellPx: 4, cellsPerRow: 200, maxRows: 48, intervalMs: 250 }, cfg.capture || {});
+const cap = Object.assign({ enabled: true, processName: 'Wow', cellPx: 4, cellsPerRow: 200, maxRows: 48, intervalMs: 50 }, cfg.capture || {});
+cap.intervalMs = Number.isFinite(Number(cap.intervalMs)) && Number(cap.intervalMs) > 0 ? Number(cap.intervalMs) : 50;
+const CAPTURE_DISPLAYS = new Set(['robust', 'compact', 'quiet', 'quiet4']);
 // The game-side files. A config.json written for the addon's old name
 // (WoWClaude) still works: the paths are derived from addonDir instead.
 const INBOX_FILE = cfg.inboxFile && !/WoWClaude/.test(cfg.inboxFile) ? cfg.inboxFile : path.join(cfg.addonDir || '', 'WoWAI', 'Inbox.lua');
@@ -188,8 +190,11 @@ function forgetChat(job) {
 
 let lastMtime = 0;
 const running = new Map(); // chatKey -> { job, child }
-const queued = new Map();  // chatKey -> job waiting for that chat (or for a free parallel slot)
+const queued = new Map();  // nonce owner -> job waiting for that chat (or for a free parallel slot)
 const live = new Map();    // chatKey -> latest record shown to the game
+const requestOwners = new Map(); // chatKey -> latest admitted user request nonce, never hello metadata
+const notifiedPhases = new Map();
+let notifiedHello = '';
 const contextTransfers = new C.Transfers();
 const contextProfiles = new Map();
 const pendingProfiles = new Map();
@@ -293,7 +298,7 @@ function takeMapCommands(job, text) {
 // Slot file / Inbox.lua body: see protocol.luaTable.
 function slotFile(globalName, records, urgent = true) {
   const map = Date.now() < mapShareUntil && (urgent || mapLuaSize() <= MAP_PROGRESS_MAX) ? state.map : null;
-  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, agent: DEFAULT_AGENT, agents: A.agentIds(), agentOptions, contextEnabled: cfg.gameContext !== false, map, connectionAck });
+  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, agent: DEFAULT_AGENT, agents: A.agentIds(), agentOptions, contextEnabled: cfg.gameContext !== false, map, connectionAck, captureIntervalMs: cap.intervalMs });
 }
 
 function addonInstalled() {
@@ -323,17 +328,37 @@ function publishNow(urgent = true) {
   }
   if (!slotsInstalled()) return;
   const body = slotFile('WoWAI_SlotData', records, urgent);
+  let slotsWritten = true;
   for (let i = 1; i <= SLOTS; i++) {
-    try { atomicWrite(path.join(cfg.addonDir, 'WoWAI_S' + pad3(i), 'Inbox.lua'), body); } catch {}
+    try { atomicWrite(path.join(cfg.addonDir, 'WoWAI_S' + pad3(i), 'Inbox.lua'), body); } catch { slotsWritten = false; }
   }
+  if (slotsWritten) notifyReady(records);
   // The restore bundle is large; it rides along once and is then dropped.
   // (The game keeps loading fresh slots until it has read one carrying it.)
   if (pendingRestore) { pendingRestore.published = (pendingRestore.published || 0) + 1; if (pendingRestore.published >= 3) pendingRestore = null; }
 }
 
+function notifyReady(records) {
+  let ready = false;
+  for (const [key, record] of live) {
+    if (!records.includes(record)) continue;
+    if (!P.validNonce(record.nonce) || !['queued', 'working', 'context_query', 'done', 'error'].includes(record.status)) continue;
+    const phase = JSON.stringify([record.nonce, record.status, record.status === 'context_query' ? record.request : '']);
+    if (notifiedPhases.get(key) === phase) continue;
+    notifiedPhases.set(key, phase);
+    ready = true;
+  }
+  if (connectionAck) {
+    const hello = JSON.stringify(connectionAck);
+    if (hello !== notifiedHello) { notifiedHello = hello; ready = true; }
+  }
+  if (ready) presenceBeat();
+}
+
 // Final results publish immediately; progress is throttled. `key` is the chat
 // (record.session is the agent's session id, a different thing).
 function publish(key, record, urgent) {
+  if (requestOwners.has(key) && requestOwners.get(key) !== record.nonce) return;
   live.set(key, record);
   if (urgent) { if (publishTimer) { clearTimeout(publishTimer); publishTimer = null; } publishNow(); return; }
   const wait = (cfg.progressWriteMs || 3000) - (Date.now() - lastPublish);
@@ -362,31 +387,25 @@ function beat(job) {
   try { atomicWrite(actFile(job.id, job.beats), SILENT_WAV); } catch {}
 }
 
-// Presence: every 30 s flip the next presence/NNNN.wav valid so the game can tell
-// the bridge is alive without spending a slot. The counter persists across
-// restarts; clients stop at the end of their cached one-shot filenames and use
-// periodic slot clocks instead of wrapping through cached playable sounds.
+// Readiness uses monotonically increasing pre-created presence filenames. Never
+// recycle a cached playable sound; exhausted clients retain bounded slot clocks.
 const PRESENCE_MAX = cfg.presenceMax || 2000;
 function presenceFile(k) {
   return path.join(cfg.addonDir, 'WoWAI', 'presence', String(k).padStart(4, '0') + '.wav');
 }
 function presenceBeat() {
   if (!fs.existsSync(path.join(cfg.addonDir, 'WoWAI', 'presence'))) return;
-  state.presence = ((state.presence || 0) % PRESENCE_MAX) + 1;
-  const k = state.presence;
-  try { atomicWrite(presenceFile(k), SILENT_WAV); } catch {}
-  for (let j = 1; j <= 50; j++) {
-    const n = ((k - 1 + j) % PRESENCE_MAX) + 1;
-    try { atomicWrite(presenceFile(n), Buffer.alloc(0)); } catch {}
-  }
+  const previous = Number.isInteger(state.presence) && state.presence >= 0 ? state.presence : 0;
+  if (previous >= PRESENCE_MAX) return;
+  const k = previous + 1;
+  try { atomicWrite(presenceFile(k), SILENT_WAV); } catch { return; }
+  state.presence = k;
   saveState();
 }
 
-// Slot clocks must advance even when the optional presence sounds are absent.
-// Explicit context notifications already publish before calling presenceBeat().
+// Slot clocks advance even without presence sounds, but are not readiness events.
 function heartbeat() {
   publishNow(false);
-  presenceBeat();
 }
 
 // ---------------------------------------------------------------------------
@@ -521,7 +540,6 @@ function requestContext(job, queries) {
   armContextWait(job);
   saveState();
   publish(chatKey(job), contextRecord(job, 'context_query', 'Reading information allowed by your current Sharing checkboxes...', { request, queries }), true);
-  presenceBeat(); // gives a pending chat a prompt slot read without reusing cached signal files
 }
 
 
@@ -538,7 +556,7 @@ function submit(job) {
   }
   if (alreadyHandled(job)) {
     if (job.hello && !job.data && !job.forget) {
-      connectionAck = { session: job.session, nonce: job.nonce, at: Math.floor(Date.now() / 1000) };
+      connectionAck = { session: job.session, nonce: job.nonce, at: Math.floor(Date.now() / 1000), ...(CAPTURE_DISPLAYS.has(job.captureDisplay) ? { display: job.captureDisplay } : {}) };
       signal('ack', job.id, true);
       mapShareUntil = Date.now() + MAP_SHARE_MS;
       publishNow();
@@ -547,12 +565,7 @@ function submit(job) {
   }
   if (job.data) { receiveContextData(job); return; }
   const key = chatKey(job);
-  const cur = running.get(key);
-  if (cur && cur.job.nonce === job.nonce) return;
-  const q = queued.get(key);
-  if (q && q.nonce === job.nonce) return;
-  if (pendingProfiles.has(C.key(job))) return;
-  if (job.ctx !== undefined) setContext(job);
+  // Controls must not compete with or replace any pending user request.
   if (job.forget) {
     // A deleted chat: forget it and ack. No agent run.
     markHandled(job);
@@ -563,7 +576,8 @@ function submit(job) {
   }
   if (job.hello) {
     // Acknowledge this actual probe, offer a restore, and refresh the slots. No agent run.
-    connectionAck = { session: job.session, nonce: job.nonce, at: Math.floor(Date.now() / 1000) };
+    if (job.ctx !== undefined) setContext(job);
+    connectionAck = { session: job.session, nonce: job.nonce, at: Math.floor(Date.now() / 1000), ...(CAPTURE_DISPLAYS.has(job.captureDisplay) ? { display: job.captureDisplay } : {}) };
     markHandled(job);
     saveState();
     signal('ack', job.id, true);
@@ -574,6 +588,12 @@ function submit(job) {
     log(`hello from session ${job.session}${pendingRestore ? ' (restore offered)' : ''}`);
     return;
   }
+  if (job.calibration !== undefined) return; // calibration is valid only on a hello
+  const cur = running.get(key);
+  if (cur && cur.job.nonce === job.nonce) return;
+  if (queued.has(C.key(job)) || pendingProfiles.has(C.key(job))) return;
+  if (!job.admitted) { requestOwners.set(key, job.nonce); job.admitted = true; }
+  if (job.ctx !== undefined) setContext(job);
   if (cfg.gameContext === false) { delete job.profile; delete job.profilePayload; }
   if (job.profilePayload) {
     try { C.snapshot(job.profilePayload); } catch (err) { finish(job, 'error', err.message); return; }
@@ -585,14 +605,14 @@ function submit(job) {
         pendingProfiles.set(id, job);
         armContextWait(job);
         publish(chatKey(job), contextRecord(job, 'context', 'Receiving the information checked in Sharing...'), true);
-        presenceBeat();
       }
       return;
     }
   }
   // Different nonces remain distinct even when the display counter is reused.
   if (cur || running.size >= MAX_PARALLEL) {
-    queued.set(key, job);
+    queued.set(C.key(job), job);
+    publish(key, contextRecord(job, 'queued', 'Request received in full; waiting for an available agent...'), true);
     log(`#${job.id}${job.session ? '@' + job.session : ''} queued (${cur ? 'chat busy' : running.size + ' running'})`);
     return;
   }
@@ -602,7 +622,7 @@ function submit(job) {
 function drainQueue() {
   for (const [key, job] of queued) {
     if (running.size >= MAX_PARALLEL) break;
-    if (running.has(key)) continue;
+    if (running.has(chatKey(job))) continue;
     queued.delete(key);
     runJob(job);
   }
@@ -843,7 +863,7 @@ function finish(job, status, text, session, denied) {
   contextTransfers.forget(job);
   const key = chatKey(job);
   if (running.get(key)?.job.nonce === job.nonce) running.delete(key);
-  if (queued.get(key)?.nonce === job.nonce) queued.delete(key);
+  queued.delete(C.key(job));
   markHandled(job);
   saveState();
   // A finished reply ends with the "TL;DR:" block the system prompt asks for:
@@ -919,7 +939,10 @@ function startCapture() {
     if (typeof ev.id === 'number') {
       const jobs = jobsFromStrip(ev.id, ev.text);
       log(`strip #${ev.id}: ${jobs.length} message(s)`);
-      for (const job of jobs) submit(job);
+      for (const job of jobs) {
+        if (CAPTURE_DISPLAYS.has(ev.display)) job.captureDisplay = ev.display;
+        submit(job);
+      }
     }
   });
   ps.stderr.on('data', (d) => log('capture stderr:', String(d).trim().slice(0, 300)));

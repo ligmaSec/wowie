@@ -59,15 +59,16 @@ Keys under `capture`:
 |---|---|---|
 | `enabled` | `true` | Run `capture.ps1` (Windows), `capture_mac.py` (macOS) or `capture_x11.py` (Linux). With `false` only the reload path works (`/wow-ai mode reload` in game). |
 | `processName` | `"Wow"` | The game executable without `.exe`. `setup.js` sets it from the `Wow*.exe` it finds in the client folder (on macOS, from the binary inside the `.app` bundle). On Windows the capture also skips a game running from a different client folder than `addonDir`, because retail's exe has the same name. Proton runtimes (Steam, umu-launcher, Faugus) ignore it: they set `WM_CLASS` to `steam_app_<appid>` for every window in the prefix, and the Linux capture matches the client by its "World of Warcraft" title instead. |
-| `cellPx` | `4` | Pixel size of one strip cell. Must match `CELL` in `addon/WoWAI/Codec.lua`. |
+| `cellPx` | `4` | Robust capture geometry. Decoders also discover 2-pixel Compact/Quiet and 4-pixel Quiet fallback; choose optional modes in the in-game Settings panel rather than changing this for appearance. |
 | `cellsPerRow` | `200` | Cells per strip row. Must match the addon. |
 | `maxRows` | `48` | Maximum strip rows captured. Must match the addon. |
-| `intervalMs` | `250` | Capture period. Lower is more responsive and costs a little more CPU. |
+| `intervalMs` | `50` | Capture period. The bridge advertises a frame period of at least twice this value, with a 100 ms floor; slower custom capture values are preserved. |
+| `pacingVersion` | `1` | Installer migration marker. The old 250 ms default upgrades to 50 ms once; later explicit choices and pre-existing non-default rates are kept. |
 | `python` | `"python3"` | Linux and macOS: interpreter for `capture_x11.py` / `capture_mac.py`. |
 | `windowName` | `""` | Linux and macOS: find the game window by title substring instead of by process name (on Linux, by WM_CLASS `<processName>.exe`, or by the game title for Proton's `steam_app_<appid>` windows). |
 | `keepComposited` | `false` | Linux: set `_NET_WM_BYPASS_COMPOSITOR=2` on the game window so the compositor keeps drawing it. Try it if `npm run probe` sees a black or stale strip in borderless fullscreen. |
 
-The capture region is `cellsPerRow × cellPx` by `maxRows × cellPx` pixels (800 × 192 by default) at the top-left of the game's client area.
+The capture region covers `cellsPerRow × cellPx` by `maxRows × cellPx` pixels (800 × 192 by default), plus the backend's bounded alignment search. Optional 2-pixel modes fit inside that region. Profile discovery does not make clipped or checksum-failing frames valid.
 
 ## Slot pool and signal files
 

@@ -3,9 +3,9 @@
 --
 -- Layers arrive in slot files as { epoch, version, layers = { { name, title,
 -- ordered, loop, points = { { uiMapID, x, y, label, kind }, ... } } } }; x/y are
--- map percent. The bridge owns them; a newer version (or another epoch) replaces
--- our copy wholesale. Everything here reads positions and draws; nothing moves,
--- targets or acts for the player.
+-- map percent. The bridge owns the source snapshot; local additions and deletion
+-- masks are merged over it so editing saved points also works offline. Everything
+-- here reads positions and draws; nothing moves, targets or acts for the player.
 
 local ADDON_NAME = ...
 local M = {}
@@ -15,6 +15,7 @@ local ARRIVE_YARDS = 12
 local NODE_SIZE, PIN_SIZE = 9, 16
 local CIRCLE = "Interface\\CHARACTERFRAME\\TempPortraitAlphaMask"
 local CONTINENT = (Enum and Enum.UIMapType and Enum.UIMapType.Continent) or 2
+local LOCAL_LAYER = "@local" -- outside the bridge's allowed layer-name alphabet
 
 local KIND_COLOR = {
 	ore = { 0.95, 0.6, 0.25 }, herb = { 0.35, 0.95, 0.35 }, quest = { 1, 0.85, 0 }, turnin = { 0.35, 0.8, 1 },
@@ -23,7 +24,7 @@ local KIND_COLOR = {
 	flight = { 0.55, 0.75, 1 }, poi = { 1, 1, 1 },
 }
 
-local mdb -- WoWAIMapDB: { map, hidden, nodes, nav = { layer, index }, waypoint = { map, x, y, previous, tracked, quest } }
+local mdb -- WoWAIMapDB: source map, local edits, visibility/nodes, navigation and owned waypoint
 
 local function Try(fn, ...)
 	if type(fn) ~= "function" then return nil end
@@ -46,15 +47,73 @@ local function DB()
 	return mdb
 end
 
+local EMPTY_LAYERS = {}
+local navigationRevision, navigationSnapshot = 0, nil
+local navigationMessage, navigationUnavailable = "", false
+local effectiveLayers
+local RefreshNavigation
+
+local function NavigationChanged()
+	navigationRevision = navigationRevision + 1
+	navigationSnapshot = nil
+	if RefreshNavigation then RefreshNavigation() end
+	M.Refresh()
+	if WoWAI and WoWAI.UpdateNavigation then WoWAI.UpdateNavigation() end
+end
+
+-- Include occurrence numbers so removing a repeated route stop removes just that stop.
+local function PointKey(p, occurrences)
+	local key = string.format("%d/%.6f/%.6f/%q/%q", p[1], p[2], p[3], p[4] or "", p[5] or "")
+	occurrences[key] = (occurrences[key] or 0) + 1
+	return key .. "/" .. occurrences[key]
+end
+
 local function Layers()
-	local m = DB().map
-	return m and m.layers or {}
+	if effectiveLayers then return effectiveLayers end
+	local db = DB()
+	local source = db.map and db.map.layers or EMPTY_LAYERS
+	if not db.edits or not next(db.edits) then effectiveLayers = source; return source end
+	local layers, seen = {}, {}
+	for _, l in ipairs(source) do
+		seen[l.name] = true
+		local edit = db.edits[l.name]
+		if edit then
+			local points, occurrences = {}, {}
+			for _, p in ipairs(l.points) do
+				if not edit.removed or not edit.removed[PointKey(p, occurrences)] then points[#points + 1] = p end
+			end
+			for _, p in ipairs(edit.points) do points[#points + 1] = p end
+			layers[#layers + 1] = { name = l.name, title = l.title, ordered = l.ordered, loop = l.loop, points = points }
+		else
+			layers[#layers + 1] = l
+		end
+	end
+	local extra = {}
+	for name, edit in pairs(db.edits) do
+		if not seen[name] and #edit.points > 0 then extra[#extra + 1] = name end
+	end
+	table.sort(extra)
+	for _, name in ipairs(extra) do
+		local edit = db.edits[name]
+		layers[#layers + 1] = { name = name, title = edit.title, ordered = edit.ordered, loop = edit.loop, points = edit.points }
+	end
+	effectiveLayers = layers
+	return layers
 end
 
 local function FindLayer(name)
 	for i, l in ipairs(Layers()) do
 		if l.name == name then return l, i end
 	end
+end
+
+local function EditLayer(l)
+	local db = DB()
+	db.edits = db.edits or {}
+	local edit = db.edits[l.name]
+	if not edit then edit = { points = {} }; db.edits[l.name] = edit end
+	edit.title, edit.ordered, edit.loop = l.title, l.ordered, l.loop
+	return edit
 end
 
 ---------------------------------------------------------------------------
@@ -422,11 +481,16 @@ local function StartTracking(l, p, i)
 	if backend == "native" and not SetNativeWaypoint(p) then
 		ReleaseTracking()
 		mdb.nav = nil
-		Print("This location cannot be tracked by the client's waypoint API.")
+		navigationMessage = "This location is unavailable in the client's waypoint API."
+		navigationUnavailable = true
+		Print(navigationMessage)
 		return false
 	end
 	tracking = { backend = backend, api = backend == "route" and api or nil, layer = l.name, index = i,
 		map = p[1], x = p[2], y = p[3], title = p[4] ~= "" and p[4] or l.title, kind = p[5] }
+	navigationUnavailable = false
+	navigationMessage = backend == "pending" and "Waiting for combat to end." or ""
+	NavigationChanged()
 	return true
 end
 
@@ -434,14 +498,40 @@ local function NavPoint()
 	local n = DB().nav
 	if not n then return end
 	local l = FindLayer(n.layer)
-	if not l or not l.points[n.index] then return end
+	if not l or #l.points == 0 then
+		mdb.nav = nil
+		return
+	end
+	n.index = math.max(1, math.min(math.floor(tonumber(n.index) or 1), #l.points))
 	return l, l.points[n.index], n.index
 end
 
+-- Snapshots retain the saved layer/point references and are rebuilt only on change.
+function M.GetNavigationState()
+	if navigationSnapshot then return navigationSnapshot end
+	local l, p, i = NavPoint()
+	local backend = tracking and tracking.backend
+	navigationSnapshot = {
+		revision = navigationRevision, layers = Layers(),
+		status = l and (backend or "pending") or (navigationUnavailable and "unavailable" or "idle"),
+		message = navigationMessage,
+	}
+	if l then
+		navigationSnapshot.active = { layer = l.name, title = l.title or "Destinations", index = i,
+			total = #l.points, point = p, ordered = l.ordered == true, loop = l.loop == true,
+			backend = backend or "pending" }
+	end
+	return navigationSnapshot
+end
+
 function M.UpdateNavigator()
+	local hadNav = DB().nav ~= nil
 	local l, p, i = NavPoint()
 	if not l then
-		if tracking or DB().waypoint then ReleaseTracking() end
+		if tracking or DB().waypoint or hadNav then
+			ReleaseTracking()
+			NavigationChanged()
+		end
 		return
 	end
 	-- Respect a pin the player moved or cleared, including between UI reloads.
@@ -450,7 +540,8 @@ function M.UpdateNavigator()
 		or Try(C_SuperTrack and C_SuperTrack.IsSuperTrackingUserWaypoint) == false) then
 		mdb.nav = nil
 		ReleaseTracking()
-		M.Refresh()
+		navigationMessage = "Tracking stopped: the player's waypoint or quest changed."
+		NavigationChanged()
 		return
 	end
 	if tracking and tracking.backend == "route" then
@@ -458,19 +549,31 @@ function M.UpdateNavigator()
 			local reason = Try(tracking.api.Ended, ROUTE_OWNER)
 			if reason == "arrived" then
 				if TrackingMatches(l, p, i) then M.Step(1, true); return end
-				tracking = nil -- the layer moved its target while the old destination completed
+				tracking = nil
 			else
 				mdb.nav = nil
 				ReleaseTracking()
-				M.Refresh()
+				navigationMessage = "Tracking stopped: the dotted route ended or was replaced."
+				NavigationChanged()
 				return
 			end
 		elseif TrackingMatches(l, p, i) then
 			return -- the routing addon, not straight-line distance, decides arrival
 		end
 	end
-	if tracking and tracking.backend == "pending" and InCombatLockdown() then return end
-	if not StartTracking(l, p, i) or tracking.backend ~= "native" then return end
+	if tracking and tracking.backend == "pending" then
+		if InCombatLockdown() then return end
+		local api = Router()
+		if api and Try(api.Active) and not Try(api.CurrentStop, ROUTE_OWNER) then
+			mdb.nav = nil
+			ReleaseTracking()
+			navigationMessage = "Tracking stopped: another addon started a route during combat."
+			NavigationChanged()
+			return
+		end
+	end
+	if not StartTracking(l, p, i) then NavigationChanged(); return end
+	if tracking.backend ~= "native" then return end
 	local dist = DistanceTo(p)
 	if dist and dist <= ARRIVE_YARDS then
 		Try(PlaySound, SOUNDKIT and SOUNDKIT.MAP_PING or 3175)
@@ -480,43 +583,553 @@ end
 
 function M.Navigate(layer, index)
 	local l = FindLayer(layer)
-	if not l then Print("no layer " .. tostring(layer)); return end
-	ReleaseTracking() -- an explicit request may take over tracking or retry an unavailable router
-	DB().nav = { layer = layer, index = math.max(1, math.min(index or 1, #l.points)) }
+	index = tonumber(index) or 1
+	if not l or #l.points == 0 or index < 1 or index > #l.points or index ~= math.floor(index) then
+		return false -- invalid choices must not cancel another valid destination
+	end
+	ReleaseTracking() -- explicit choices may take over tracking or retry a failed router
+	DB().nav = { layer = layer, index = index }
 	mdb.hidden[layer] = nil
+	navigationMessage, navigationUnavailable = "", false
 	M.UpdateNavigator()
-	M.Refresh()
+	NavigationChanged()
+	return not navigationUnavailable
 end
 
 function M.Step(delta, arrived)
 	local l, _, i = NavPoint()
-	if not l then return end
+	if not l then return false end
 	local nexti = i + delta
-	if nexti > #l.points then
-		if l.loop and #l.points > 1 then nexti = 1 else
-			Print("route finished: " .. l.title)
-			mdb.nav = nil
-			M.UpdateNavigator()
-			M.Refresh()
-			return
-		end
-	elseif nexti < 1 then
-		nexti = l.loop and #l.points or 1
+	if (arrived and not l.ordered) or (nexti > #l.points and not (l.loop and #l.points > 1)) then
+		mdb.nav = nil
+		ReleaseTracking()
+		navigationMessage, navigationUnavailable = "Destination reached.", false
+		NavigationChanged()
+		return true
 	end
+	if nexti > #l.points then nexti = 1
+	elseif nexti < 1 then nexti = l.loop and #l.points or 1 end
 	mdb.nav.index = nexti
-	M.Refresh()
 	if arrived then
-		local nextLayer, nextPoint, nextIndex = NavPoint()
-		if nextPoint then StartTracking(nextLayer, nextPoint, nextIndex) end
+		StartTracking(l, l.points[nexti], nexti)
 	else
 		M.UpdateNavigator()
 	end
+	NavigationChanged()
+	return true
 end
 
 function M.Stop()
 	DB().nav = nil
 	ReleaseTracking()
+	navigationMessage, navigationUnavailable = "Navigation stopped.", false
+	NavigationChanged()
+end
+
+function M.SetLayerVisible(name, visible)
+	if not FindLayer(name) then return false end
+	DB().hidden[name] = not visible or nil
+	NavigationChanged()
+	return true
+end
+
+function M.AddPoint(layer, mapID, x, y, label)
+	mapID, x, y = tonumber(mapID), tonumber(x), tonumber(y)
+	if not mapID or mapID <= 0 or mapID ~= math.floor(mapID) or type(Try(C_Map.GetMapInfo, mapID)) ~= "table" then
+		return false, "Enter a valid map ID."
+	end
+	if not x or not y or x ~= x or y ~= y or x < 0 or x > 100 or y < 0 or y > 100 then
+		return false, "X and Y must be map percentages between 0 and 100."
+	end
+	layer = layer or LOCAL_LAYER
+	local l = FindLayer(layer)
+	if not l and layer ~= LOCAL_LAYER then return false, "That destination group changed. Select it again." end
+	l = l or { name = LOCAL_LAYER, title = "My places", ordered = false, loop = false }
+	label = tostring(label or ""):gsub("[%c|]", " "):match("^%s*(.-)%s*$")
+	local point = { mapID, x, y, label ~= "" and label or "Saved place", "poi" }
+	local edit = EditLayer(l)
+	edit.points[#edit.points + 1] = point
+	DB().hidden[layer] = nil
+	effectiveLayers = nil
+	NavigationChanged()
+	return true, point
+end
+
+function M.DeletePoint(layer, index, expected)
+	local l = FindLayer(layer)
+	index = tonumber(index)
+	local p = l and index and l.points[index]
+	if not p or (expected and p ~= expected) then return false, "That destination changed. Select it again." end
+	local edit = EditLayer(l)
+	local removed = false
+	for i, localPoint in ipairs(edit.points) do
+		if localPoint == p then table.remove(edit.points, i); removed = true; break end
+	end
+	if not removed then
+		for _, source in ipairs(DB().map and mdb.map.layers or EMPTY_LAYERS) do
+			if source.name == layer then
+				local occurrences = {}
+				for _, original in ipairs(source.points) do
+					local key = PointKey(original, occurrences)
+					if original == p then
+						edit.removed = edit.removed or {}
+						edit.removed[key] = true
+						removed = true
+						break
+					end
+				end
+				break
+			end
+		end
+	end
+	if not removed then return false, "That destination changed. Select it again." end
+	if #edit.points == 0 and (not edit.removed or not next(edit.removed)) then mdb.edits[layer] = nil end
+	local nav = mdb.nav
+	if nav and nav.layer == layer then
+		if nav.index == index then
+			mdb.nav = nil
+			ReleaseTracking()
+			navigationMessage, navigationUnavailable = "Active destination deleted.", false
+		elseif nav.index > index then
+			nav.index = nav.index - 1
+			if tracking and tracking.layer == layer and tracking.index > index then tracking.index = tracking.index - 1 end
+		end
+	end
+	effectiveLayers = nil
+	if not FindLayer(layer) then mdb.hidden[layer] = nil end
+	M.UpdateNavigator()
+	NavigationChanged()
+	return true
+end
+
+---------------------------------------------------------------------------
+-- Local destination management: saved data works without a bridge connection.
+---------------------------------------------------------------------------
+
+local navigationPanel
+local NAV_ROW_HEIGHT = 72
+local RenderNavigationRows, FilterNavigation, ShowPointEditor
+
+local function HumanTitle(l)
+	return l.title and l.title ~= "" and l.title or "Saved destinations"
+end
+
+local function PointTitle(l, p)
+	return p[4] and p[4] ~= "" and p[4] or HumanTitle(l)
+end
+
+local function DisplayLabel(text)
+	return (tostring(text or ""):gsub("|", "¦"))
+end
+
+local function PointLocation(p)
+	local info = Try(C_Map.GetMapInfo, p[1])
+	return string.format("%s · %.1f, %.1f", info and info.name or "Unknown zone", p[2], p[3])
+end
+
+StaticPopupDialogs["WOWAI_MAP_DELETE"] = {
+	text = "Delete navigation point \"%s\"?\n\nThis removes the saved point locally, including from its route. Bridge refreshes will not restore it.",
+	button1 = OKAY, button2 = CANCEL,
+	timeout = 0, whileDead = true, hideOnEscape = true,
+	OnAccept = function(_, data)
+		if data then
+			local ok, message = M.DeletePoint(data.layer, data.index, data.point)
+			if not ok then Print(message) end
+		end
+	end,
+}
+
+local function ShowPointOnMap(layer, index)
+	local l = FindLayer(layer)
+	local p = l and l.points[index]
+	if not p then return end
+	M.SetLayerVisible(layer, true)
+	if OpenWorldMap then
+		OpenWorldMap(p[1])
+	elseif WorldMapFrame and WorldMapFrame.SetMapID then
+		WorldMapFrame:SetMapID(p[1])
+		WorldMapFrame:Show()
+	end
 	M.Refresh()
+end
+
+local function NewNavigationRow(slot)
+	local panel, UI = navigationPanel, WoWAI.UI
+	local row = CreateFrame("Frame", nil, panel.content, "BackdropTemplate")
+	UI.Surface(row)
+	row:SetHeight(NAV_ROW_HEIGHT - 4)
+	row.label = UI.Label(row, "", 13)
+	row.label:SetPoint("TOPLEFT", row, "TOPLEFT", 10, -9)
+	row.label:SetPoint("TOPRIGHT", row, "TOPRIGHT", -358, -9)
+	row.label:SetHeight(18)
+	row.label:SetWordWrap(false)
+	row.detail = UI.Label(row, "", 11, "muted")
+	row.detail:SetPoint("TOPLEFT", row, "TOPLEFT", 10, -30)
+	row.detail:SetPoint("TOPRIGHT", row, "TOPRIGHT", -358, -30)
+	row.detail:SetHeight(30)
+	row.detail:SetJustifyV("TOP")
+	-- Each closure resolves the current binding, never the row's former stop.
+	row.navigate = UI.Button(row, "Navigate", 92, function()
+		if row.entry then M.Navigate(row.entry.layer, row.entry.index) end
+	end, "primary", "WoWAINavigationRow" .. slot .. "Navigate")
+	row.navigate:SetPoint("RIGHT", row, "RIGHT", -8, 0)
+	row.map = UI.Button(row, "On map", 76, function()
+		if row.entry then ShowPointOnMap(row.entry.layer, row.entry.index) end
+	end, "secondary", "WoWAINavigationRow" .. slot .. "Map")
+	row.map:SetPoint("RIGHT", row.navigate, "LEFT", -6, 0)
+	row.visibility = UI.Button(row, "Hide", 70, function()
+		if row.entry then M.SetLayerVisible(row.entry.layer, DB().hidden[row.entry.layer] == true) end
+	end, "quiet", "WoWAINavigationRow" .. slot .. "Visibility")
+	row.visibility:SetPoint("RIGHT", row.map, "LEFT", -6, 0)
+	row.delete = UI.Button(row, "Delete", 70, function()
+		local entry = row.entry
+		if entry then
+			StaticPopup_Show("WOWAI_MAP_DELETE", entry.label, nil, { layer = entry.layer, index = entry.index, point = entry.point })
+		end
+	end, "danger", "WoWAINavigationRow" .. slot .. "Delete")
+	row.delete:SetPoint("RIGHT", row.visibility, "LEFT", -6, 0)
+	return row
+end
+
+RenderNavigationRows = function()
+	local panel = navigationPanel
+	if not panel or not panel.filtered then return end
+	local first = math.floor(panel.scroll:GetVerticalScroll() / NAV_ROW_HEIGHT) + 1
+	local visible = math.ceil(math.max(1, panel.scroll:GetHeight()) / NAV_ROW_HEIGHT) + 1
+	local active = M.GetNavigationState().active
+	for slot = 1, visible do
+		local entry = panel.filtered[first + slot - 1]
+		local row = panel.rows[slot]
+		if entry then
+			if not row then row = NewNavigationRow(slot); panel.rows[slot] = row end
+			row.entry = entry
+			row:ClearAllPoints()
+			row:SetPoint("TOPLEFT", panel.content, "TOPLEFT", 0, -(first + slot - 2) * NAV_ROW_HEIGHT)
+			row:SetWidth(math.max(1, panel.scroll:GetWidth() - 4))
+			local current = active and active.layer == entry.layer and active.index == entry.index
+			row.label:SetText((current and "To: " or "") .. entry.label)
+			row.detail:SetText(entry.detail)
+			row.navigate:SetText(entry.ordered and entry.index == 1 and "Start route" or "Navigate")
+			row.visibility:SetText(DB().hidden[entry.layer] and "Show" or "Hide")
+			row:Show()
+		elseif row then
+			row.entry = nil
+			row:Hide()
+		end
+	end
+	for slot = visible + 1, #panel.rows do
+		panel.rows[slot].entry = nil
+		panel.rows[slot]:Hide()
+	end
+end
+
+FilterNavigation = function(resetScroll)
+	local panel = navigationPanel
+	if not panel then return end
+	local search = string.lower(panel.search:GetText() or "")
+	panel.filtered = {}
+	for _, entry in ipairs(panel.catalog or {}) do
+		if search == "" or string.find(entry.search, search, 1, true) then
+			panel.filtered[#panel.filtered + 1] = entry
+		end
+	end
+	panel.count:SetText(#panel.filtered .. " shown / " .. #(panel.catalog or {}) .. " saved destinations")
+	panel.empty:SetText(#(panel.catalog or {}) == 0 and "No saved destinations. Add a point here or ask your assistant for places."
+		or "No destinations match this search.")
+	panel.empty:SetShown(#panel.filtered == 0)
+	panel.content:SetWidth(math.max(1, panel.scroll:GetWidth() - 4))
+	panel.content:SetHeight(math.max(1, #panel.filtered * NAV_ROW_HEIGHT))
+	local maximum = math.max(0, #panel.filtered * NAV_ROW_HEIGHT - panel.scroll:GetHeight())
+	panel.scroll:SetVerticalScroll(resetScroll and 0 or math.max(0, math.min(panel.scroll:GetVerticalScroll(), maximum)))
+	RenderNavigationRows()
+end
+
+RefreshNavigation = function()
+	local panel = navigationPanel
+	if not panel or not panel:IsShown() then return end
+	local state = M.GetNavigationState()
+	if panel.layers ~= state.layers then
+		panel.layers, panel.catalog = state.layers, {}
+		for _, l in ipairs(state.layers) do
+			for index, p in ipairs(l.points) do
+				local title = HumanTitle(l)
+				local detail = title .. (l.ordered and (" · Stop " .. index .. "/" .. #l.points) or "") .. "\n" .. PointLocation(p)
+				local label = PointTitle(l, p)
+				panel.catalog[#panel.catalog + 1] = { layer = l.name, index = index, point = p, ordered = l.ordered,
+					label = DisplayLabel(label), detail = DisplayLabel(detail),
+					search = string.lower(label .. " " .. detail) }
+			end
+		end
+		FilterNavigation(false)
+	end
+	local active = state.active
+	panel.active.destination:SetText(active and DisplayLabel(PointTitle(FindLayer(active.layer), active.point)) or "No active destination")
+	panel.active.detail:SetText(active and DisplayLabel(active.title .. " · " .. active.index .. "/" .. active.total .. " · " .. PointLocation(active.point)) or "Choose a saved destination or start a route below.")
+	local status = { idle = "Idle", route = "Dotted route active", native = "Game waypoint active",
+		pending = "Waiting for combat to end", unavailable = "Navigation unavailable" }
+	panel.active.status:SetText(status[state.status] .. (state.message ~= "" and " · " .. DisplayLabel(state.message) or ""))
+	panel.previous:SetEnabled(active ~= nil and active.total > 1 and (active.loop or active.index > 1))
+	panel.next:SetEnabled(active ~= nil and active.total > 1 and (active.loop or active.index < active.total))
+	panel.stop:SetEnabled(active ~= nil)
+	panel.map:SetEnabled(active ~= nil)
+	panel.visibility:SetEnabled(active ~= nil)
+	panel.visibility:SetText(active and DB().hidden[active.layer] and "Show layer" or "Hide layer")
+	RenderNavigationRows()
+end
+
+local function CreatePointEditor()
+	local panel, UI = navigationPanel, WoWAI.UI
+	local editor = UI.Surface(CreateFrame("Frame", "WoWAINavigationPointEditor", panel, "BackdropTemplate"), "background")
+	panel.editor = editor
+	editor:SetSize(600, 420)
+	editor:SetPoint("CENTER", panel, "CENTER")
+	editor:SetFrameStrata("FULLSCREEN_DIALOG")
+	editor:SetToplevel(true)
+	editor:SetClampedToScreen(true)
+	editor:EnableMouse(true)
+	table.insert(UISpecialFrames, "WoWAINavigationPointEditor")
+	local title = UI.Label(editor, "Add navigation point", 18)
+	title:SetPoint("TOPLEFT", editor, "TOPLEFT", 20, -18)
+	local note = UI.Label(editor, "Saved locally. Bridge refreshes keep your changes.", 12, "muted")
+	note:SetPoint("TOPLEFT", editor, "TOPLEFT", 20, -50)
+	editor.fields, editor.targets = {}, {}
+	local function Field(name, label, x, y, width, maximum)
+		local heading = UI.Label(editor, label, 12, "muted")
+		heading:SetPoint("TOPLEFT", editor, "TOPLEFT", x, -y)
+		local field = UI.Surface(CreateFrame("EditBox", name, editor, "BackdropTemplate"), "raised")
+		field:SetPoint("TOPLEFT", editor, "TOPLEFT", x, -y - 22)
+		field:SetSize(width, 30)
+		field:SetFontObject(ChatFontNormal)
+		field:SetTextInsets(8, 8, 0, 0)
+		field:SetAutoFocus(false)
+		field:SetMaxLetters(maximum)
+		field:SetScript("OnEscapePressed", function() editor:Hide() end)
+		field:SetScript("OnEnterPressed", function() editor.save:GetScript("OnClick")(editor.save) end)
+		editor.fields[#editor.fields + 1] = field
+		return field
+	end
+	editor.name = Field("WoWAINavigationPointName", "Name", 20, 84, 560, 80)
+	editor.map = Field("WoWAINavigationPointMap", "Map ID", 294, 150, 286, 10)
+	editor.x = Field("WoWAINavigationPointX", "X % (0–100)", 294, 220, 134, 16)
+	editor.y = Field("WoWAINavigationPointY", "Y % (0–100)", 444, 220, 136, 16)
+	for i, field in ipairs(editor.fields) do
+		field:SetScript("OnTabPressed", function(self)
+			local delta = IsShiftKeyDown() and -1 or 1
+			self:ClearFocus()
+			editor.fields[(i - 1 + delta) % #editor.fields + 1]:SetFocus()
+		end)
+	end
+	editor.targetLabel = UI.Label(editor, "", 12, "muted")
+	editor.targetLabel:SetPoint("TOPLEFT", editor, "TOPLEFT", 20, -150)
+	editor.targetLabel:SetWidth(252)
+	editor.targetLabel:SetWordWrap(false)
+	editor.targetScroll = UI.ScrollFrame(editor, "WoWAINavigationPointTargets")
+	editor.targetScroll:SetPoint("TOPLEFT", editor, "TOPLEFT", 20, -174)
+	editor.targetScroll:SetSize(244, 120)
+	editor.targetContent = CreateFrame("Frame", nil, editor.targetScroll)
+	editor.targetContent:SetWidth(240)
+	editor.targetScroll:SetScrollChild(editor.targetContent)
+	editor.error = UI.Label(editor, "", 12, "danger")
+	editor.error:SetPoint("TOPLEFT", editor, "TOPLEFT", 20, -352)
+	editor.error:SetPoint("TOPRIGHT", editor, "TOPRIGHT", -20, -352)
+	editor.error:SetHeight(20)
+	local function FillPosition(mapID, x, y)
+		if not mapID or not x or not y then return false end
+		editor.map:SetText(tostring(mapID))
+		editor.x:SetText(string.format("%.4f", x * 100))
+		editor.y:SetText(string.format("%.4f", y * 100))
+		editor.error:SetText("")
+		return true
+	end
+	editor.current = UI.Button(editor, "Use my position", 154, function()
+		local mapID = Try(C_Map.GetBestMapForUnit, "player")
+		local pos = mapID and Try(C_Map.GetPlayerMapPosition, mapID, "player")
+		if not pos or (pos.x == 0 and pos.y == 0) or not FillPosition(mapID, pos.x, pos.y) then
+			editor.error:SetText("Player coordinates unavailable. Enter coordinates or use a map pin.")
+		end
+	end, "secondary", "WoWAINavigationPointCurrent")
+	editor.current:SetPoint("TOPLEFT", editor, "TOPLEFT", 20, -310)
+	editor.pin = UI.Button(editor, "Use map pin", 128, function()
+		local point = Try(C_Map.GetUserWaypoint)
+		if not point or not point.position or not FillPosition(point.uiMapID, point.position.x, point.position.y) then
+			editor.error:SetText("Place a pin on your world map first, then use it here.")
+		end
+	end, "secondary", "WoWAINavigationPointPin")
+	editor.pin:SetPoint("LEFT", editor.current, "RIGHT", 8, 0)
+	editor.save = UI.Button(editor, "Add point", 112, function()
+		local ok, result = M.AddPoint(editor.target, editor.map:GetText(), editor.x:GetText(), editor.y:GetText(), editor.name:GetText())
+		if not ok then editor.error:SetText(result); return end
+		editor:Hide()
+		panel.search:SetText("")
+		FilterNavigation(false)
+		for i, entry in ipairs(panel.filtered) do
+			if entry.point == result then
+				local maximum = math.max(0, #panel.filtered * NAV_ROW_HEIGHT - panel.scroll:GetHeight())
+				panel.scroll:SetVerticalScroll(math.min((i - 1) * NAV_ROW_HEIGHT, maximum))
+				break
+			end
+		end
+	end, "primary", "WoWAINavigationPointSave")
+	editor.save:SetPoint("BOTTOMRIGHT", editor, "BOTTOMRIGHT", -20, 16)
+	local cancel = UI.Button(editor, "Cancel", 88, function() editor:Hide() end, "quiet", "WoWAINavigationPointCancel")
+	cancel:SetPoint("RIGHT", editor.save, "LEFT", -8, 0)
+	editor:SetScript("OnHide", function()
+		for _, field in ipairs(editor.fields) do field:ClearFocus() end
+	end)
+	editor:Hide()
+end
+
+ShowPointEditor = function()
+	local panel = navigationPanel
+	if not panel.editor then CreatePointEditor() end
+	local editor, UI = panel.editor, WoWAI.UI
+	local choices = { { name = LOCAL_LAYER, title = "My places" } }
+	for _, l in ipairs(Layers()) do if l.name ~= LOCAL_LAYER then choices[#choices + 1] = l end end
+	local function SelectTarget(name)
+		editor.target = name
+		for _, button in ipairs(editor.targets) do
+			if button.target then
+				local selected = button.target == name
+				button:SetText((selected and "> " or "") .. button.title)
+				if selected then editor.targetLabel:SetText("Save to: " .. button.title) end
+			end
+		end
+	end
+	for i, l in ipairs(choices) do
+		local button = editor.targets[i]
+		if not button then
+			button = UI.Button(editor.targetContent, "", 240, function(self) SelectTarget(self.target) end, "quiet", "WoWAINavigationPointTarget" .. i)
+			editor.targets[i] = button
+		end
+		button.target, button.title = l.name, DisplayLabel(HumanTitle(l)) .. (l.ordered and " (route)" or "")
+		button:ClearAllPoints()
+		button:SetPoint("TOPLEFT", editor.targetContent, "TOPLEFT", 0, -(i - 1) * 30)
+		button:Show()
+	end
+	for i = #choices + 1, #editor.targets do
+		editor.targets[i].target, editor.targets[i].title = nil, nil
+		editor.targets[i]:Hide()
+	end
+	editor.targetContent:SetHeight(#choices * 30)
+	editor.targetScroll:SetVerticalScroll(0)
+	SelectTarget(LOCAL_LAYER)
+	editor.name:SetText("")
+	editor.map:SetText("")
+	editor.x:SetText("")
+	editor.y:SetText("")
+	editor.error:SetText("")
+	editor:Show()
+	editor:Raise()
+	editor.current:GetScript("OnClick")(editor.current)
+	editor.name:SetFocus()
+end
+
+local function CreateNavigationPanel()
+	local UI = WoWAI.UI
+	local panel = CreateFrame("Frame", "WoWAINavigationPanel", UIParent, "BackdropTemplate")
+	navigationPanel = panel
+	panel:SetSize(780, 680)
+	panel:SetScale(math.min(1, math.max(1, UIParent:GetWidth() - 24) / 780, math.max(1, UIParent:GetHeight() - 24) / 680))
+	panel:SetPoint("CENTER")
+	panel:SetFrameStrata("DIALOG")
+	panel:SetToplevel(true)
+	panel:SetClampedToScreen(true)
+	panel:EnableMouse(true)
+	panel:SetMovable(true)
+	panel:RegisterForDrag("LeftButton")
+	panel:SetScript("OnDragStart", panel.StartMoving)
+	panel:SetScript("OnDragStop", panel.StopMovingOrSizing)
+	UI.Surface(panel, "background")
+	table.insert(UISpecialFrames, "WoWAINavigationPanel")
+	panel.rows, panel.filtered = {}, {}
+	local title = UI.Label(panel, "Navigation", 20)
+	title:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -18)
+	local close = UI.Button(panel, "Close", 72, function() panel:Hide() end, "quiet", "WoWAINavigationClose")
+	close:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, -14)
+	local add = UI.Button(panel, "Add point", 112, function() ShowPointEditor() end, "primary", "WoWAINavigationAdd")
+	add:SetPoint("RIGHT", close, "LEFT", -8, 0)
+	local note = UI.Label(panel, "Saved destinations and routes · available even while disconnected", 12, "muted")
+	note:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -52)
+	panel.active = CreateFrame("Frame", "WoWAINavigationActive", panel, "BackdropTemplate")
+	UI.Surface(panel.active)
+	panel.active:SetPoint("TOPLEFT", panel, "TOPLEFT", 16, -80)
+	panel.active:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, -80)
+	panel.active:SetHeight(142)
+	panel.active.destination = UI.Label(panel.active, "", 15)
+	panel.active.destination:SetPoint("TOPLEFT", panel.active, "TOPLEFT", 12, -10)
+	panel.active.destination:SetPoint("TOPRIGHT", panel.active, "TOPRIGHT", -12, -10)
+	panel.active.destination:SetHeight(20)
+	panel.active.destination:SetWordWrap(false)
+	panel.active.detail = UI.Label(panel.active, "", 12, "muted")
+	panel.active.detail:SetPoint("TOPLEFT", panel.active, "TOPLEFT", 12, -35)
+	panel.active.detail:SetPoint("TOPRIGHT", panel.active, "TOPRIGHT", -12, -35)
+	panel.active.detail:SetHeight(18)
+	panel.active.detail:SetWordWrap(false)
+	panel.active.status = UI.Label(panel.active, "", 12, "muted")
+	panel.active.status:SetPoint("TOPLEFT", panel.active, "TOPLEFT", 12, -59)
+	panel.active.status:SetPoint("TOPRIGHT", panel.active, "TOPRIGHT", -12, -59)
+	panel.active.status:SetHeight(32)
+	panel.active.status:SetJustifyV("TOP")
+	panel.previous = UI.Button(panel.active, "Previous", 88, function() M.Step(-1) end, "secondary", "WoWAINavigationPrevious")
+	panel.previous:SetPoint("BOTTOMLEFT", panel.active, "BOTTOMLEFT", 12, 10)
+	panel.next = UI.Button(panel.active, "Next", 72, function() M.Step(1) end, "secondary", "WoWAINavigationNext")
+	panel.next:SetPoint("LEFT", panel.previous, "RIGHT", 6, 0)
+	panel.stop = UI.Button(panel.active, "Stop", 72, M.Stop, "danger", "WoWAINavigationStop")
+	panel.stop:SetPoint("LEFT", panel.next, "RIGHT", 6, 0)
+	panel.map = UI.Button(panel.active, "Show on map", 112, function()
+		local active = M.GetNavigationState().active
+		if active then ShowPointOnMap(active.layer, active.index) end
+	end, "secondary", "WoWAINavigationMap")
+	panel.map:SetPoint("LEFT", panel.stop, "RIGHT", 18, 0)
+	panel.visibility = UI.Button(panel.active, "Hide layer", 100, function()
+		local active = M.GetNavigationState().active
+		if active then M.SetLayerVisible(active.layer, DB().hidden[active.layer] == true) end
+	end, "quiet", "WoWAINavigationVisibility")
+	panel.visibility:SetPoint("LEFT", panel.map, "RIGHT", 6, 0)
+	local searchLabel = UI.Label(panel, "Search places", 12, "muted")
+	searchLabel:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -249)
+	panel.search = CreateFrame("EditBox", "WoWAINavigationSearch", panel, "BackdropTemplate")
+	UI.Surface(panel.search, "raised")
+	panel.search:SetPoint("TOPLEFT", panel, "TOPLEFT", 120, -240)
+	panel.search:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -90, -240)
+	panel.search:SetHeight(32)
+	panel.search:SetFontObject(ChatFontNormal)
+	panel.search:SetTextInsets(9, 9, 0, 0)
+	panel.search:SetAutoFocus(false)
+	panel.search:SetMaxLetters(160)
+	panel.search:SetScript("OnTextChanged", function() FilterNavigation(true) end)
+	panel.search:SetScript("OnEscapePressed", function() panel:Hide() end)
+	panel.search:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+	local clear = UI.Button(panel, "Clear", 64, function() panel.search:SetText("") end, "quiet", "WoWAINavigationClear")
+	clear:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, -240)
+	panel.count = UI.Label(panel, "", 12, "muted")
+	panel.count:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -284)
+	panel.scroll = UI.ScrollFrame(panel, "WoWAINavigationScroll")
+	panel.scroll:SetPoint("TOPLEFT", panel, "TOPLEFT", 16, -308)
+	panel.scroll:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -34, 42)
+	panel.content = CreateFrame("Frame", nil, panel.scroll)
+	panel.content:SetSize(726, 1)
+	panel.scroll:SetScrollChild(panel.content)
+	panel.scroll:HookScript("OnVerticalScroll", RenderNavigationRows)
+	panel.scroll:HookScript("OnSizeChanged", function() FilterNavigation(false) end)
+	panel.empty = UI.Label(panel, "", 13, "muted")
+	panel.empty:SetPoint("TOPLEFT", panel.scroll, "TOPLEFT", 12, -16)
+	panel.empty:SetPoint("TOPRIGHT", panel.scroll, "TOPRIGHT", -12, -16)
+	panel.empty:SetHeight(48)
+	local footer = UI.Label(panel, "Tracking only: follow the map or route yourself. No automatic movement.", 11, "muted")
+	footer:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 20, 16)
+	panel:SetScript("OnHide", function()
+		panel.search:ClearFocus()
+		if panel.editor then panel.editor:Hide() end
+	end)
+	panel:Hide()
+end
+
+function M.ShowNavigation()
+	if not navigationPanel then CreateNavigationPanel() end
+	navigationPanel:Show()
+	navigationPanel:Raise()
+	RefreshNavigation()
 end
 
 ---------------------------------------------------------------------------
@@ -542,16 +1155,41 @@ function M.Sync(m)
 			if old[l.name] ~= LayerKey(l) then changed[#changed + 1] = l end
 		end
 	end
+	-- Keep manually appended stops in place when source layers are regenerated.
+	local _, previousPoint = NavPoint()
+	local localTarget
+	if mdb.nav then
+		local edit = mdb.edits and mdb.edits[mdb.nav.layer]
+		for _, p in ipairs(edit and edit.points or EMPTY_LAYERS) do
+			if p == previousPoint then localTarget = p; break end
+		end
+	end
 	mdb.map = { epoch = m.epoch, version = tonumber(m.version) or 0, layers = layers }
-	-- Drop navigation that points at a layer that is gone.
-	if mdb.nav and not FindLayer(mdb.nav.layer) then mdb.nav = nil end
-	for _, l in ipairs(changed) do
+	effectiveLayers = nil
+	if localTarget and mdb.nav then
+		local l = FindLayer(mdb.nav.layer)
+		for index, p in ipairs(l and l.points or EMPTY_LAYERS) do
+			if p == localTarget then
+				mdb.nav.index = index
+				if tracking and tracking.layer == l.name and tracking.map == p[1] and tracking.x == p[2] and tracking.y == p[3] then
+					tracking.index = index
+				end
+				break
+			end
+		end
+	end
+	-- Normalize an existing target without restarting it at the first stop.
+	NavPoint()
+	for _, source in ipairs(changed) do
+		local edit = mdb.edits and mdb.edits[source.name]
+		if edit then edit.title, edit.ordered, edit.loop = source.title, source.ordered, source.loop end
+		local l = FindLayer(source.name)
 		mdb.hidden[l.name] = nil
 		Print(string.format("%s: %d point(s)%s. Open the map (M) to see it.", l.title or l.name, #l.points, l.ordered and ", route" or ""))
 		-- Routes and single destinations start navigation even with the map closed.
 		-- Unordered collections stay map-only; never take over another active route.
 		local here = PlayerOnContinent()
-		local free = not mdb.nav or mdb.nav.layer == l.name
+		local free = not mdb.nav
 		local api = Router()
 		free = free and (not api or not Try(api.Active) or Try(api.CurrentStop, ROUTE_OWNER) ~= nil)
 		if (l.ordered or #l.points == 1) and #l.points > 0 and free and (not here or ContinentOf(l.points[1][1]) == here) then
@@ -559,7 +1197,7 @@ function M.Sync(m)
 		end
 	end
 	M.UpdateNavigator()
-	M.Refresh()
+	NavigationChanged()
 end
 
 ---------------------------------------------------------------------------
@@ -592,9 +1230,7 @@ function M.Command(msg)
 		Print(rest == "all" and "showing every node" or "showing nodes your skill can gather")
 		M.Refresh()
 	elseif (cmd == "show" or cmd == "hide") and rest ~= "" then
-		if not FindLayer(rest) then Print("no layer " .. rest); return end
-		mdb.hidden[rest] = (cmd == "hide") or nil
-		M.Refresh()
+		M.SetLayerVisible(rest, cmd == "show")
 	elseif cmd == "nav" then
 		local name, idx = rest:match("^(%S+)%s*(%d*)$")
 		M.Navigate(name, tonumber(idx))

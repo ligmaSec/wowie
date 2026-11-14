@@ -15,7 +15,8 @@
     "cellPx": 4,
     "cellsPerRow": 200,
     "maxRows": 48,
-    "intervalMs": 250,
+    "intervalMs": 50,
+    "pacingVersion": 1,
     "python": "python3",
     "windowName": "",
     "keepComposited": false

@@ -112,3 +112,30 @@ test('setup installs before the first login and fills the account in later', t =
   setup(s);
   assert.equal(config(s).savedVariablesFile, path.join(forever, 'WTF', 'Account', '1#1', 'SavedVariables', 'WoWAI.lua'));
 });
+
+test('capture pacing migrates the old default once and preserves explicit custom intervals', t => {
+  const s = sandbox(t);
+  const dir = client(s, '_forever_', 'Wow.exe', 'ACCT');
+  setup(s, '--wow', dir);
+  const file = path.join(s.repo, 'bridge', 'config.json');
+  let cfg = config(s);
+  cfg.capture.intervalMs = 250;
+  delete cfg.capture.pacingVersion;
+  cfg.capture.windowName = 'keep my window selector';
+  cfg.maxParallel = 7;
+  fs.writeFileSync(file, JSON.stringify(cfg));
+  setup(s, '--wow', dir);
+  cfg = config(s);
+  assert.equal(cfg.capture.intervalMs, 50);
+  assert.equal(cfg.capture.windowName, 'keep my window selector');
+  assert.equal(cfg.maxParallel, 7);
+  cfg.capture.intervalMs = 250; // an explicit choice after migration is not an old default
+  fs.writeFileSync(file, JSON.stringify(cfg));
+  setup(s, '--wow', dir);
+  assert.equal(config(s).capture.intervalMs, 250);
+  cfg.capture.intervalMs = 120;
+  delete cfg.capture.pacingVersion;
+  fs.writeFileSync(file, JSON.stringify(cfg));
+  setup(s, '--wow', dir);
+  assert.equal(config(s).capture.intervalMs, 120, 'a pre-existing non-default capture rate must remain authoritative');
+});

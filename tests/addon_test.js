@@ -65,10 +65,12 @@ function decodeStrip(vm) {
   if (vm.evaluate('WoWAIStrip and WoWAIStrip.shown') !== 'true') return null;
   vm.run(`
     local source, lastRow = {}, 0
+    local cell = WoWAIStrip.cell or 4
+    local threshold = WoWAIStrip.display:match("^quiet") and (48 / 255) or 0.5
     for _, t in ipairs(WoWAIStrip.textures) do
       if t.shown and t.color then
-        local c, r = math.floor(t.x / 4), math.floor(-t.y / 4)
-        source[r * ${CELLS_PER_ROW} + c] = (t.color[1] >= 0.5 and 4 or 0) + (t.color[2] >= 0.5 and 2 or 0) + (t.color[3] >= 0.5 and 1 or 0)
+        local c, r = math.floor(t.x / cell), math.floor(-t.y / cell)
+        source[r * ${CELLS_PER_ROW} + c] = (t.color[1] >= threshold and 4 or 0) + (t.color[2] >= threshold and 2 or 0) + (t.color[3] >= threshold and 1 or 0)
         lastRow = math.max(lastRow, r)
       end
     end
@@ -77,7 +79,7 @@ function decodeStrip(vm) {
     local parts = {}
     for r = 0, math.min(48, math.ceil((lastRow + 1) * pixelsPerUnit)) - 1 do
       for c = 0, ${CELLS_PER_ROW} - 1 do
-        -- Sample the rendered texture at each physical four-pixel cell's center.
+        -- Sample physical cell centers; an incorrect native scale still corrupts decoding.
         local sc, sr = math.floor((c + 0.5) / pixelsPerUnit), math.floor((r + 0.5) / pixelsPerUnit)
         parts[#parts + 1] = tostring(sc < ${CELLS_PER_ROW} and source[sr * ${CELLS_PER_ROW} + sc] or 0)
       end
@@ -153,6 +155,38 @@ function loadedSlots(vm) {
   return vm.num('(function() local n = 0; for name in pairs(STUB.loaded) do if name:match("^WoWAI_S%d%d%d$") then n = n + 1 end end; return n end)()');
 }
 
+const FAST_TRANSPORT = 'transportProtocol=1, transport={displays={"robust","compact","quiet","quiet4"},frameIntervalMs=100,captureIntervalMs=50}';
+
+function wake(vm) {
+  vm.run(`STUB.wake = (STUB.wake or 0) + 1
+    STUB.sounds[string.format("Interface\\\\AddOns\\\\WoWAI\\\\presence\\\\%04d.wav", STUB.wake)] = true`);
+}
+
+function connectFast(vm, transport = FAST_TRANSPORT) {
+  vm.run('STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\ctl\\\\valid.wav"] = true');
+  login(vm);
+  vm.run('STUB.Advance(3.01)');
+  nextAck(vm, `{now=time(),replies={},${transport}}`);
+  wake(vm);
+  vm.run('STUB.Advance(0.11)');
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'true');
+}
+
+function chooseDisplay(vm, display, save = true) {
+  vm.run(`WoWAI.ShowDefaults()
+    local b = WoWAIPixelDisplay${display[0].toUpperCase() + display.slice(1)}; b:GetScript("OnClick")(b)
+    local action = ${save ? 'WoWAIDefaultsSave' : 'WoWAIDefaultsCancel'}; action:GetScript("OnClick")(action)`);
+}
+
+function acknowledgeDisplay(vm, display) {
+  const record = stripRecords(vm).find(r => P.parseFlags(r.flags).calibration);
+  assert.ok(record, 'a full-size native display probe must be on the wire');
+  const nonce = P.parseFlags(record.flags).nonce;
+  nextSlot(vm, `{now=time(),connectionProtocol=1,connectionAck={session=${P.luaStr(record.session)},nonce=${P.luaStr(nonce)},at=time(),display=${P.luaStr(display)}},replies={},${FAST_TRANSPORT}}`);
+  wake(vm);
+  vm.run('STUB.Advance(0.11)');
+}
+
 test('addon loads, builds its UI and creates a first chat', () => {
   const vm = newVM();
   login(vm);
@@ -163,6 +197,84 @@ test('addon loads, builds its UI and creates a first chat', () => {
   assert.equal(vm.evaluate('SlashCmdList.WOWAI ~= nil'), 'true');
   assert.deepEqual([1, 2, 3, 4, 5].map(i => vm.evaluate('SLASH_WOWAI' + i)), ['/wow-ai', '/wowai', '/wow-claude', '/ai', '/ask'], 'the old command name and the short forms are aliases');
   assert.equal(vm.evaluate('SlashCmdList.WOWAIASK'), null, '/ai is an alias of the one command, not a handler of its own');
+});
+
+test('navigation is safely unavailable when the map module is not loaded', () => {
+  const vm = newVM();
+  vm.run('WoWAI.UpdateNavigation()'); // Safe even before PLAYER_LOGIN builds the header.
+  login(vm);
+  vm.run('WoWAI.Toggle(true); WoWAIInput:SetText("keep this draft")');
+  assert.equal(vm.evaluate('WoWAINavigation:IsShown()'), 'true');
+  assert.equal(vm.evaluate('WoWAINavigation:IsEnabled()'), 'false');
+  vm.run('WoWAINavigation:GetScript("OnClick")(WoWAINavigation); WoWAI.UpdateNavigation()');
+  assert.equal(vm.evaluate('WoWAINavigationPanel'), null, 'no substitute navigation UI is invented');
+  assert.equal(vm.evaluate('WoWAIInput:GetText()'), 'keep this draft');
+  assert.equal(vm.evaluate('WoWAIDB.hello'), null, 'opening navigation cannot initiate a connection check');
+  assert.equal(vm.evaluate('WoWAIDB.outbox'), null);
+});
+
+test('real map navigation opens offline and updates independently of discussion, drafts and sharing', () => {
+  const vm = newVM();
+  vm.run(fs.readFileSync(path.join(ADDON, 'Map.lua'), 'utf8'), 'WoWAI');
+  vm.run(`
+    WoWAIMapDB = { map = { epoch = "saved", version = 1, layers = {
+      { name = "opaque-layer-42", title = "Darkshire errands", ordered = false, points = {
+        {1431, 30, 40, "Town hall", "poi"}, {1431, 50, 60, "Scarlet Raven inn", "vendor"}
+      } }
+    } } }
+    UiMapPoint = { CreateFromCoordinates = function(mapID, x, y)
+      return {uiMapID=mapID, position={x=x,y=y}}
+    end }
+    C_Map.GetUserWaypoint = function() return STUB.waypoint end
+    C_Map.SetUserWaypoint = function(point) STUB.waypoint = point; return true end
+    C_Map.ClearUserWaypoint = function() STUB.waypoint = nil end
+    C_SuperTrack = {
+      SetSuperTrackedUserWaypoint = function(value) STUB.tracked = value end,
+      IsSuperTrackingUserWaypoint = function() return STUB.tracked == true end
+    }
+  `);
+  login(vm);
+  vm.run(`
+    WoWAI.Toggle(true)
+    table.insert(WoWAIDB.chats[1].history, {role="assistant",text="Keep this selectable answer"})
+    WoWAI.Render()
+    WoWAIInput:SetText("  preserve my next question  ")
+    WoWAIMessageText1:SetFocus()
+    WoWAIMessageText1:HighlightText(5, 14)
+    ORIGINAL_CHAT, ORIGINAL_HISTORY = WoWAIDB.chats[1], WoWAIDB.chats[1].history
+    ORIGINAL_MAP, ORIGINAL_LAYERS = WoWAIMapDB.map, WoWAIMapDB.map.layers
+    ORIGINAL_SHARING = WoWAIDB.settings.context
+    ORIGINAL_SCROLL, ORIGINAL_COMPOSER = WoWAIScroll:GetHeight(), WoWAIInput:GetHeight()
+    function WoWAI.Render() error("navigation must not rebuild the discussion") end
+    function WoWAI.GameContext() error("navigation must not collect character context") end
+    function WoWAIContext.Snapshot() error("navigation must not collect shared information") end
+    function WoWAI.Send() error("navigation must not submit an AI request") end
+  `);
+  assert.equal(vm.evaluate('WoWAINavigation:IsEnabled()'), 'true');
+  assert.equal(vm.evaluate('WoWAINavigationPanel'), null, 'the navigation window remains lazy');
+  vm.run('WoWAINavigation:GetScript("OnClick")(WoWAINavigation)');
+  assert.equal(vm.evaluate('WoWAINavigationPanel:IsShown()'), 'true', 'the header opens the actual map navigation window');
+  vm.run('WoWAIMap.Navigate("opaque-layer-42", 2)');
+  assert.equal(vm.evaluate('WoWAIMap.GetNavigationState().status'), 'native');
+  assert.equal(vm.num('STUB.waypoint.position.x'), 0.5, 'tracking uses the chosen saved destination');
+  assert.match(vm.evaluate('WoWAINavigation:GetText()'), /Scarlet Raven inn/);
+  assert.doesNotMatch(vm.evaluate('WoWAINavigation:GetText()'), /opaque-layer/);
+  assert.match(vm.evaluate('WoWAINavigation.navigationBody'), /2 of 2[\s\S]*native waypoint/i);
+  vm.run('WoWAIMap.Stop(); WoWAI.UpdateNavigation()');
+  assert.equal(vm.evaluate('STUB.waypoint'), null, 'stopping releases navigation rather than leaving phantom tracking');
+  assert.doesNotMatch(vm.evaluate('WoWAINavigation:GetText()'), /Scarlet Raven inn/);
+  assert.match(vm.evaluate('WoWAINavigation.navigationBody'), /No active destination/);
+  assert.equal(vm.evaluate('WoWAIMessageText1:HasFocus()'), 'true');
+  assert.equal(vm.num('WoWAIMessageText1.highlightStart'), 5);
+  assert.equal(vm.num('WoWAIMessageText1.highlightEnd'), 14);
+  assert.equal(vm.evaluate('WoWAIInput:GetText()'), '  preserve my next question  ');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].draft'), '  preserve my next question  ');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1] == ORIGINAL_CHAT and WoWAIDB.chats[1].history == ORIGINAL_HISTORY'), 'true');
+  assert.equal(vm.evaluate('WoWAIMapDB.map == ORIGINAL_MAP and WoWAIMapDB.map.layers == ORIGINAL_LAYERS'), 'true', 'navigation does not rebuild saved layer data');
+  assert.equal(vm.evaluate('WoWAIDB.settings.context == ORIGINAL_SHARING'), 'true');
+  assert.equal(vm.evaluate('WoWAIScroll:GetHeight() == ORIGINAL_SCROLL and WoWAIInput:GetHeight() == ORIGINAL_COMPOSER'), 'true');
+  assert.equal(vm.evaluate('WoWAIDB.hello'), null);
+  assert.equal(vm.evaluate('WoWAIDB.outbox'), null);
 });
 
 test('hello goes out on the strip after login', () => {
@@ -1493,4 +1605,163 @@ test('wrapped replies contain their painted text and actions after width changes
     assert.ok(vm.num('-WoWAIMessageText3:GetParent().y') >= vm.num('-WoWAIMessageText2:GetParent().y') + painted, 'the following message starts after the full reply');
     assert.equal(vm.evaluate('WoWAIMessageText2:GetText()'), text);
   }
+});
+
+test('readiness acknowledges promptly without scheduled or cached hints consuming idle slots', () => {
+  const vm = newVM();
+  connectFast(vm);
+  assert.equal(loadedSlots(vm), 1);
+  assert.equal(decodeStrip(vm), null, 'a verified hello stops drawing immediately, not on the next maintenance tick');
+  vm.run('STUB.Advance(120)');
+  assert.equal(loadedSlots(vm), 1, 'idle readiness checks cannot consume reply slots');
+  assert.equal(vm.evaluate('WoWAI.IsConnected()'), 'false', 'frequent readiness checks cannot renew historical verification');
+});
+
+test('negotiated fast uploads preserve complete selected data and stop on queued full receipt', () => {
+  const vm = newVM(true);
+  connectFast(vm);
+  vm.run(`C_Container = {
+      GetContainerNumSlots=function(bag) return bag == 0 and 96 or 0 end,
+      GetContainerItemInfo=function(bag,slot) return {itemID=20000+slot,stackCount=slot,hyperlink="item:" .. (20000+slot)} end,
+    }
+    C_Item.GetItemInfo=function(id) return "Épée 鉱石 " .. id, "item:" .. id, 2 end
+    WoWAI.Send("fast complete inventory")`);
+  const original = stripRecords(vm).find(r => r.text === 'fast complete inventory');
+  assert.ok(original);
+  const start = vm.num('GetTime()');
+  const receiver = new ContextProtocol.Transfers();
+  let complete, parts;
+  for (let i = 0; i < 200 && !complete; i++) {
+    for (const packet of P.jobsFromStrip(0, decodeStrip(vm).text)) {
+      if (!packet.data) continue;
+      parts = packet.parts;
+      const result = receiver.add(packet);
+      if (result.text) complete = result.text;
+    }
+    if (!complete) vm.run('STUB.Advance(0.05)');
+  }
+  assert.ok(complete, 'fast pacing must deliver all selected data rather than clipping it');
+  assert.equal(complete, vm.evaluate('WoWAIDB.chats[1].request.profile'));
+  // The first data frame also waits for the service ticker's phase; capture samples every 50ms.
+  assert.ok(vm.num('GetTime()') - start <= (parts + 1) * 0.1 + 0.051, 'a complete upload must follow negotiated 100ms pacing, including startup and capture sampling');
+  const flags = P.parseFlags(original.flags);
+  nextSlot(vm, `{now=time(),replies={{chat=${P.luaStr(original.chat)},id=${original.id},nonce=${P.luaStr(flags.nonce)},status="queued",text="Waiting for a worker"}},${FAST_TRANSPORT}}`);
+  wake(vm);
+  vm.run('STUB.Advance(0.11)');
+  assert.equal(decodeStrip(vm), null, 'complete queued receipt ends the upload before an AI worker is available');
+  assert.equal(vm.num('WoWAIDB.chats[1].pendingId'), original.id);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].request.profile'), complete);
+});
+
+test('cached numeric reply sounds cannot drain slots while a nonce-matched job is working', () => {
+  const vm = newVM();
+  connectFast(vm);
+  vm.run('WoWAI.Send("long working request")');
+  const record = stripRecords(vm).find(r => r.text === 'long working request');
+  const nonce = P.parseFlags(record.flags).nonce;
+  nextSlot(vm, `{now=time(),replies={{chat=${P.luaStr(record.chat)},id=${record.id},nonce=${P.luaStr(nonce)},status="working",text="Still working"}},${FAST_TRANSPORT}}`);
+  vm.run(`STUB.sounds[string.format("Interface\\\\AddOns\\\\WoWAI\\\\sig\\\\%03d.wav", ((${record.id}-1)%200)+1)] = true
+    STUB.Advance(60)`);
+  assert.ok(loadedSlots(vm) < 12, 'a cached sound must not cause 600 fast slot reads');
+  assert.equal(vm.num('WoWAIDB.chats[1].pendingId'), record.id);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].request.nonce'), nonce);
+});
+
+for (const display of ['compact', 'quiet']) {
+test(`${display} is enabled only after a full-size nonce- and capture-profile-matched calibration`, () => {
+  const vm = newVM();
+  connectFast(vm);
+  vm.run('WoWAI.Toggle(true); WoWAIInput:SetText("preserve this draft")');
+  chooseDisplay(vm, display, false);
+  assert.equal(vm.evaluate('WoWAIDB.settings.pixelDisplay'), 'robust', 'Cancel cannot persist or preview a different transport');
+  assert.equal(decodeStrip(vm), null);
+  chooseDisplay(vm, display);
+  const probe = decodeStrip(vm);
+  assert.equal(Buffer.byteLength(probe.text), 3200, 'calibration must exercise the whole canvas');
+  assert.equal(vm.num('WoWAIStrip.cell'), 2);
+  assert.equal(vm.evaluate('WoWAIStrip.display'), display);
+  assert.equal(vm.num('#WoWAIDB.chats[1].history'), 0, 'calibration never creates a user/AI turn');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null);
+  acknowledgeDisplay(vm, display);
+  assert.equal(decodeStrip(vm), null);
+  vm.run('WoWAI.Send("after calibration")');
+  assert.equal(vm.evaluate('WoWAIStrip.display'), display);
+  assert.equal(vm.num('WoWAIStrip.cell'), 2);
+  const sent = stripRecords(vm).find(r => r.text === 'after calibration');
+  assert.ok(sent);
+  assert.equal(vm.evaluate('WoWAIInput:GetText()'), 'preserve this draft');
+});
+}
+
+for (const failure of ['wrong profile', 'wrong nonce', 'stale snapshot']) {
+test(`calibration ${failure} falls back without rewriting the pending request or looping probes`, () => {
+  const vm = newVM();
+  connectFast(vm);
+  vm.run('WoWAI.Send("keep this pending request")');
+  const question = questionRecord(vm, 'keep this pending request');
+  const snapshot = vm.evaluate('WoWAIDB.chats[1].request.profile');
+  const requestNonce = vm.evaluate('WoWAIDB.chats[1].request.nonce');
+  chooseDisplay(vm, 'quiet');
+  const calibration = stripRecords(vm).find(r => P.parseFlags(r.flags).calibration);
+  const calibrationNonce = P.parseFlags(calibration.flags).nonce;
+  const display = failure === 'wrong profile' ? 'robust' : 'quiet';
+  const nonce = failure === 'wrong nonce' ? 'wrong-probe-nonce' : calibrationNonce;
+  const clock = failure === 'stale snapshot' ? 'time()-60' : 'time()';
+  nextSlot(vm, `{now=${clock},connectionProtocol=1,connectionAck={session=${P.luaStr(calibration.session)},nonce=${P.luaStr(nonce)},at=time(),display=${P.luaStr(display)}},replies={},${FAST_TRANSPORT}}`);
+  wake(vm);
+  vm.run('STUB.Advance(10)'); // both dark candidates must finish before declaring Robust fallback
+  assert.equal(vm.evaluate('WoWAIStrip.display'), 'robust');
+  assert.equal(vm.evaluate('WoWAIDB.settings.pixelDisplay'), 'quiet', 'fallback is visible state, not a silent preference rewrite');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].request.profile'), snapshot);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].request.nonce'), requestNonce);
+  assert.equal(vm.num('WoWAIDB.chats[1].pendingId'), question.id);
+  const after = vm.num('WoWAIDB.lastSeq');
+  vm.run('STUB.Advance(10)');
+  assert.equal(vm.num('WoWAIDB.lastSeq'), after, 'failed display checks cannot continuously create new controls');
+});
+}
+
+test('a successful quiet display is invalidated and recalibrated after native scale changes', () => {
+  const vm = newVM();
+  connectFast(vm);
+  chooseDisplay(vm, 'quiet');
+  acknowledgeDisplay(vm, 'quiet');
+  vm.run('STUB.dpiScale=1.5; STUB.FireEvent("UI_SCALE_CHANGED"); STUB.Advance(0.11)');
+  const probe = stripRecords(vm).find(r => P.parseFlags(r.flags).calibration);
+  assert.ok(probe, 'a changed physical grid needs a new captured calibration');
+  acknowledgeDisplay(vm, 'quiet');
+  vm.run('WoWAI.Send("scaled quiet send")');
+  assert.equal(vm.evaluate('WoWAIStrip.display'), 'quiet');
+  assert.ok(stripRecords(vm).some(r => r.text === 'scaled quiet send'));
+});
+
+test('filtered two-pixel Quiet falls back to verified dark four-pixel cells and rechecks remembered geometry', () => {
+  const vm = newVM();
+  connectFast(vm);
+  vm.run('WoWAI.Send("preserve the pending data during display negotiation")');
+  const request = questionRecord(vm, 'preserve the pending data during display negotiation');
+  const profile = vm.evaluate('WoWAIDB.chats[1].request.profile');
+  const nonce = vm.evaluate('WoWAIDB.chats[1].request.nonce');
+  chooseDisplay(vm, 'quiet');
+  vm.run('STUB.Advance(4.1)');
+  const larger = stripRecords(vm).find(r => P.parseFlags(r.flags).calibration);
+  assert.equal(P.parseFlags(larger.flags).calibration, 'quiet4');
+  assert.equal(vm.num('WoWAIStrip.cell'), 4);
+  assert.equal(Buffer.byteLength(decodeStrip(vm).text), 3200);
+  acknowledgeDisplay(vm, 'quiet4');
+  assert.equal(vm.evaluate('WoWAIDB.settings.pixelDisplay'), 'quiet');
+  assert.equal(vm.evaluate('WoWAIStrip.display'), 'quiet4');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].request.profile'), profile);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].request.nonce'), nonce);
+  assert.equal(vm.num('WoWAIDB.chats[1].pendingId'), request.id);
+  vm.run('WoWAI.Connect()');
+  nextAck(vm, `{now=time(),replies={},${FAST_TRANSPORT}}`);
+  wake(vm);
+  vm.run('STUB.Advance(0.11)');
+  const repeated = stripRecords(vm).find(r => P.parseFlags(r.flags).calibration);
+  assert.equal(P.parseFlags(repeated.flags).calibration, 'quiet4', 'remembered geometry should not repeat a known-unreadable small-grid attempt');
+  assert.notEqual(P.parseFlags(repeated.flags).nonce, P.parseFlags(larger.flags).nonce, 'remembered dimensions still need fresh native proof');
+  acknowledgeDisplay(vm, 'quiet4');
+  assert.equal(vm.evaluate('WoWAIStrip.display'), 'quiet4');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].request.nonce'), nonce);
 });

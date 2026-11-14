@@ -6,7 +6,7 @@
 -- STUB collects what the addon did: frames, texts, timers, tickers, prints.
 
 STUB = {
-	frames = {}, texts = {}, timers = {}, tickers = {}, prints = {}, bindings = {},
+	frames = {}, texts = {}, timers = {}, tickers = {}, tickerTimers = {}, prints = {}, bindings = {},
 	now = 1000, epoch = 1700000000, sounds = {}, loaded = {}, reloaded = false,
 	tooltips = {}, zone = "Duskwood", subzone = "Darkshire", level = 23, money = 12345,
 }
@@ -138,7 +138,11 @@ function Methods.SetThumbTexture(self, texture)
 	self.thumb:SetTexture(texture)
 end
 function Methods.GetThumbTexture(self) return self.thumb end
-function Methods.SetVerticalScroll(self, value) self.verticalScroll = value end
+function Methods.SetVerticalScroll(self, value)
+	local previous = self.verticalScroll or 0
+	self.verticalScroll = value
+	if previous ~= value then RunScript(self, "OnVerticalScroll", value) end
+end
 function Methods.CreateTexture(self, name, layer)
 	local t = NewObject("Texture", name, self)
 	table.insert(self.textures, t)
@@ -219,6 +223,34 @@ function STUB.Tick()
 	for _, fn in ipairs(STUB.tickers) do fn() end
 end
 
+-- Advance native-like timer deadlines for transport latency/slot-budget scenarios.
+function STUB.Advance(seconds)
+	local finish, epsilon = STUB.now + seconds, 0.0000001
+	while true do
+		local deadline
+		for _, timer in ipairs(STUB.timers) do
+			if timer.at <= finish + epsilon and (not deadline or timer.at < deadline) then deadline = timer.at end
+		end
+		for _, ticker in ipairs(STUB.tickerTimers) do
+			if not ticker.cancelled and ticker.at <= finish + epsilon and (not deadline or ticker.at < deadline) then deadline = ticker.at end
+		end
+		if not deadline then STUB.now = finish; return end
+		STUB.now = deadline
+		local callbacks = {}
+		for i = #STUB.timers, 1, -1 do
+			local timer = STUB.timers[i]
+			if timer.at <= deadline + epsilon then table.insert(callbacks, 1, timer.fn); table.remove(STUB.timers, i) end
+		end
+		for _, ticker in ipairs(STUB.tickerTimers) do
+			if not ticker.cancelled and ticker.at <= deadline + epsilon then
+				ticker.at = ticker.at + ticker.delay
+				callbacks[#callbacks + 1] = ticker.fn
+			end
+		end
+		for _, callback in ipairs(callbacks) do callback() end
+	end
+end
+
 UIParent = CreateFrame("Frame", "UIParent")
 GameTooltip = CreateFrame("Frame", "GameTooltip")
 UIErrorsFrame = CreateFrame("Frame", "UIErrorsFrame")
@@ -247,8 +279,14 @@ function GetTime() return STUB.now end
 function time() return STUB.epoch + math.floor(STUB.now) end
 function date(fmt, t) return "12:00" end
 C_Timer = {
-	After = function(delay, fn) table.insert(STUB.timers, { delay = delay, fn = fn }) end,
-	NewTicker = function(delay, fn) table.insert(STUB.tickers, fn); return { Cancel = noop } end,
+	After = function(delay, fn) table.insert(STUB.timers, { delay = delay, at = STUB.now + delay, fn = fn }) end,
+	NewTicker = function(delay, fn)
+		local ticker = { delay = delay, at = STUB.now + delay, fn = fn }
+		function ticker:Cancel() self.cancelled = true end
+		table.insert(STUB.tickerTimers, ticker)
+		table.insert(STUB.tickers, function() if not ticker.cancelled then ticker.at = STUB.now + ticker.delay; fn() end end)
+		return ticker
+	end,
 }
 C_AddOns = {
 	IsAddOnLoaded = function(name) return STUB.loaded[name] or false end,

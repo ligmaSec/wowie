@@ -153,27 +153,46 @@ function bridgeSandbox(t, initialState, options = {}) {
     process.stdin.on('end', () => {
       if (!input) return;
       const calls = path.join(__dirname, 'calls.jsonl');
-      fs.appendFileSync(calls, JSON.stringify({started: true}) + '\\n');
+      fs.appendFileSync(calls, JSON.stringify({started: true, input}) + '\\n');
       const attempt = fs.readFileSync(calls, 'utf8').trim().split('\\n').length;
+      let progressed = false;
       const timer = setInterval(() => {
+        if (!progressed && fs.existsSync(path.join(__dirname, 'progress-' + attempt))) {
+          progressed = true;
+          console.log(JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'Fixture progress without a phase transition'}]}}));
+        }
         if (!fs.existsSync(path.join(__dirname, 'release-' + attempt))) return;
         clearInterval(timer);
-        console.log(JSON.stringify({type:'result',session_id:'identity-thread',subtype:'success',result:'Question completed.\\n\\nTL;DR:\\nDone.'}));
+        const result = ${options.query ? "attempt === 1 ? '```wowcontext\\n{\"op\":\"snapshot\",\"category\":\"inventory\"}\\n```' :" : ''} 'Question completed.\\n\\nTL;DR:\\nDone.';
+        console.log(JSON.stringify({type:'result',session_id:'identity-thread',subtype:'success',result}));
       }, 10);
     });
   `);
   const clockFile = path.join(dir, 'clock');
-  const clockPreload = path.join(dir, 'clock.js');
+  const clockPreload = path.join(dir, 'preload.js'), readinessFile = path.join(dir, 'readiness.jsonl');
   let now = Date.now();
   const advance = seconds => {
     now += seconds * 1000;
     fs.writeFileSync(clockFile + '.tmp', String(now)); fs.renameSync(clockFile + '.tmp', clockFile);
     return Math.floor(now / 1000);
   };
-  if (options.clock) {
-    advance(0);
-    fs.writeFileSync(clockPreload, `const fs = require('node:fs'); Date.now = () => Number(fs.readFileSync(${JSON.stringify(clockFile)}, 'utf8'));`);
-  }
+  if (options.clock) advance(0);
+  if (options.clock || options.presence) fs.writeFileSync(clockPreload, `
+    const fs = require('node:fs'), path = require('node:path');
+    ${options.clock ? `Date.now = () => Number(fs.readFileSync(${JSON.stringify(clockFile)}, 'utf8'));` : ''}
+    const rename = fs.renameSync;
+    fs.renameSync = function(from, to) {
+      const result = rename.apply(this, arguments);
+      if (path.dirname(to) === ${JSON.stringify(path.join(addons, 'WoWAI/presence'))} && fs.readFileSync(to).length) {
+        fs.appendFileSync(${JSON.stringify(readinessFile)}, JSON.stringify({
+          file: path.basename(to),
+          inbox: fs.readFileSync(${JSON.stringify(inbox)}, 'utf8'),
+          slots: ${JSON.stringify(slots)}.map(file => fs.readFileSync(file, 'utf8'))
+        }) + '\\n');
+      }
+      return result;
+    };
+  `);
   const captureFile = path.join(dir, 'capture.json');
   let captureAttempt = 0;
   if (options.capture) fs.writeFileSync(path.join(dir, 'capture_x11.py'), `
@@ -187,11 +206,11 @@ function bridgeSandbox(t, initialState, options = {}) {
     fs.watch(__dirname, inspect); inspect();
     setInterval(() => { if (process.ppid !== parent) process.exit(); }, 25);
   `);
-  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ addonDir: addons, savedVariablesFile: saved, defaultCwd: path.join(dir, 'project'), agent: 'claude', agents: Object.fromEntries(A.agentIds().map(id => [id, {path:agent}])), capture:{enabled:!!options.capture, python:process.execPath}, primerFile:'', timeoutMs:15000, pollMs:25, slots:slots.length, presenceIntervalMs:options.presenceIntervalMs }));
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ addonDir: addons, savedVariablesFile: saved, defaultCwd: path.join(dir, 'project'), agent: 'claude', agents: Object.fromEntries(A.agentIds().map(id => [id, {path:agent}])), capture:{enabled:!!options.capture, python:process.execPath, intervalMs:options.captureIntervalMs}, primerFile:'', timeoutMs:15000, pollMs:25, slots:slots.length, presenceIntervalMs:options.presenceIntervalMs, presenceMax:options.presenceMax, maxParallel:options.maxParallel, progressWriteMs:options.progressWriteMs }));
   fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(initialState));
   const children = [];
   const start = (args = ['--once']) => {
-    const child = spawn(process.execPath, [...(options.clock ? ['--require', clockPreload] : []), 'bridge.js', ...args], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [...(options.clock || options.presence ? ['--require', clockPreload] : []), 'bridge.js', ...args], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
     child.stdout.on('data', data => output += data); child.stderr.on('data', data => output += data);
     const exited = new Promise(resolve => child.on('exit', code => resolve(code)));
@@ -208,11 +227,14 @@ function bridgeSandbox(t, initialState, options = {}) {
   const release = attempt => fs.writeFileSync(path.join(dir, 'release-' + attempt), '');
   const callCount = () => fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').length : 0;
   const messages = (chat = 'chat') => JSON.parse(fs.readFileSync(path.join(dir, 'transcripts.json'), 'utf8')).chats[chat].messages;
-  const strip = (text, id = 146) => {
-    fs.writeFileSync(captureFile + '.tmp', JSON.stringify({ id, text, attempt: ++captureAttempt })); fs.renameSync(captureFile + '.tmp', captureFile);
+  const strip = (text, id = 146, display) => {
+    fs.writeFileSync(captureFile + '.tmp', JSON.stringify({ id, text, display, attempt: ++captureAttempt })); fs.renameSync(captureFile + '.tmp', captureFile);
   };
   const clearStrip = () => { if (fs.existsSync(captureFile)) fs.unlinkSync(captureFile); };
-  return { dir, addons, inbox, slots, write, outbox, start, release, callCount, messages, advance, strip, clearStrip };
+  const pulses = () => fs.existsSync(readinessFile) ? fs.readFileSync(readinessFile, 'utf8').trim().split('\n').map(JSON.parse) : [];
+  const callsRead = () => fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse) : [];
+  const progress = attempt => fs.writeFileSync(path.join(dir, 'progress-' + attempt), '');
+  return { dir, addons, inbox, slots, write, outbox, start, release, callCount, messages, advance, strip, clearStrip, pulses, callsRead, progress };
 }
 
 function waitClock(fixture, vm, now) {
@@ -539,4 +561,223 @@ test('inject mints a fresh nonce for every invocation and publishes protocol 1 r
   }
   assert.notEqual(nonces[0], nonces[1]);
   assert.equal(fixture.callCount(), 2);
+});
+
+function replyField(vm, nonce, field = 'status', globalName = 'WoWAI_Inbox') {
+  return vm.get(`(function() for _, record in ipairs(${globalName}.replies) do if record.nonce == ${P.luaStr(nonce)} then return record[${P.luaStr(field)}] end end end)()`);
+}
+
+function waitReply(fixture, vm, nonce, status, text) {
+  return waitInbox(fixture.inbox, vm, () =>
+    replyField(vm, nonce) === status && (!text || replyField(vm, nonce, 'text').includes(text)));
+}
+
+async function capturePacket(fixture, running, text, id = 146, display) {
+  const before = (running.output().match(/strip #/g) || []).length;
+  fixture.strip(text, id, display);
+  await waitFor(() => (running.output().match(/strip #/g) || []).length > before);
+}
+
+function assertPulse(fixture, vm, index, nonce, status) {
+  const pulse = fixture.pulses()[index];
+  assert.ok(pulse, `missing readiness pulse ${index + 1}`);
+  assert.equal(pulse.file, String(index + 1).padStart(4, '0') + '.wav');
+  vm.run(pulse.inbox);
+  assert.equal(replyField(vm, nonce), status);
+  for (const source of pulse.slots) {
+    vm.run(source);
+    assert.equal(replyField(vm, nonce, 'status', 'WoWAI_SlotData'), status, 'every slot already contains this phase when its readiness flag is written');
+  }
+}
+
+test('calibration echoes only validated capture provenance, retries retain actual receipt times, and readiness never wraps', async t => {
+  const fixture = bridgeSandbox(t, { lastId: 0, sessions: {}, handled: {} }, { clock: true, capture: true, presence: true, presenceMax: 3, slots: 3, captureIntervalMs: 75, presenceIntervalMs: 25 });
+  const vm = addonVM(), initial = fixture.advance(0), running = fixture.start([]);
+  await waitClock(fixture, vm, initial);
+  assert.equal(vm.get('WoWAI_Inbox.transportProtocol'), '1');
+  assert.equal(vm.get('WoWAI_Inbox.transport.captureIntervalMs'), '75');
+  assert.equal(vm.get('WoWAI_Inbox.transport.frameIntervalMs'), '150');
+  assert.equal(vm.get('table.concat(WoWAI_Inbox.transport.displays, ",")'), 'robust,compact,quiet,quiet4');
+  assert.equal(vm.get('WoWAI_Inbox.requestProtocol'), '1');
+  assert.equal(vm.get('WoWAI_Inbox.connectionProtocol'), '1');
+  assert.equal(vm.get('WoWAI_Inbox.contextProtocol'), '2');
+  assert.equal(fixture.pulses().length, 0, 'idle slot clocks are not readiness boundaries');
+  const hello = nonce => ['token', 'chat', '16384', '', `h;c;nonce=${nonce};calibration=quiet;display=quiet;captureDisplay=quiet`, 'Chat', 'Character: Calibration fixture', ''].join('\x1f').padEnd(3200, '.');
+  const first = 'calibrate-000001';
+  await capturePacket(fixture, running, hello(first), 16384, 'compact');
+  await waitAck(fixture, vm, first, initial);
+  await waitFor(() => fixture.pulses().length >= 1);
+  assert.equal(vm.get('WoWAI_Inbox.connectionAck.display'), 'compact', 'a requested Quiet profile cannot replace an actually captured Compact frame');
+  const received = vm.get('WoWAI_Inbox.connectionAck.at');
+  await capturePacket(fixture, running, hello(first), 16384, 'compact');
+  await waitClock(fixture, vm, fixture.advance(0));
+  assert.equal(fixture.pulses().length, 1, 'identical same-receipt hello headers do not spend readiness flags');
+  const retryAt = fixture.advance(6);
+  await capturePacket(fixture, running, hello(first), 16384, 'compact');
+  await waitAck(fixture, vm, first, retryAt);
+  await waitFor(() => fixture.pulses().length >= 2);
+  assert.notEqual(vm.get('WoWAI_Inbox.connectionAck.at'), received, 'only another actual receipt renews the acknowledgement');
+  await capturePacket(fixture, running, hello('calibrate-000002'), 16384);
+  await waitAck(fixture, vm, 'calibrate-000002', retryAt);
+  await waitFor(() => fixture.pulses().length >= 3);
+  assert.equal(vm.get('WoWAI_Inbox.connectionAck.display'), null, 'requested-only metadata is not visual proof');
+  const lastAt = fixture.advance(2);
+  await capturePacket(fixture, running, hello('calibrate-000003'), 16384, 'quiet-ish');
+  await waitAck(fixture, vm, 'calibrate-000003', lastAt);
+  assert.equal(vm.get('WoWAI_Inbox.connectionAck.display'), null, 'unknown decoder profiles are not echoed');
+  await capturePacket(fixture, running, ['token', 'chat', '16384', '', 'nonce=control-000004;calibration=quiet', 'Chat', 'not a user question'].join('\x1f'), 16384, 'quiet');
+  await waitClock(fixture, vm, fixture.advance(2));
+  assert.equal(vm.get('WoWAI_Inbox.connectionAck.nonce'), 'calibrate-000003');
+  assert.equal(vm.get('WoWAI_Inbox.connectionAck.at'), String(lastAt), 'clocks and ignored controls do not manufacture a new ACK time');
+  assert.equal(fixture.callCount(), 0, 'hello and calibration controls never start a provider');
+  assert.equal(vm.get('#WoWAI_Inbox.replies'), '0', 'controls do not manufacture user replies');
+  assert.equal(fixture.pulses().length, 3, 'the finite readiness pool stops instead of recycling flags');
+  assert.equal(fs.existsSync(path.join(fixture.addons, 'WoWAI/presence/0004.wav')), false);
+  const largerAt = fixture.advance(2);
+  await capturePacket(fixture, running, hello('calibrate-000005'), 16384, 'quiet4');
+  await waitAck(fixture, vm, 'calibrate-000005', largerAt);
+  assert.equal(vm.get('WoWAI_Inbox.connectionAck.display'), 'quiet4', 'dark four-pixel fallback still needs actual capture provenance');
+  assert.equal(fixture.callCount(), 0);
+  assert.equal(fixture.pulses().length, 3, 'an exhausted hint pool cannot recycle flags even for a verified fallback');
+  for (let i = 1; i <= 3; i++) assert.deepEqual(fs.readFileSync(path.join(fixture.addons, `WoWAI/presence/${String(i).padStart(4, '0')}.wav`)), P.SILENT_WAV, 'used flags remain monotonic');
+});
+
+test('complete queued receipts publish promptly across chats without partial, progress or heartbeat readiness storms', async t => {
+  const fixture = bridgeSandbox(t, { lastId: 0, sessions: {}, handled: {} }, { clock: true, capture: true, presence: true, slots: 3, maxParallel: 1, progressWriteMs: 1, presenceIntervalMs: 25 });
+  const vm = addonVM(), initial = fixture.advance(0), running = fixture.start([]);
+  await waitClock(fixture, vm, initial);
+  assert.equal(vm.get('WoWAI_Inbox.transport.captureIntervalMs'), '50');
+  assert.equal(vm.get('WoWAI_Inbox.transport.frameIntervalMs'), '100');
+  const busyNonce = 'busy-chat-000001', nonce = 'queued-chat-000001';
+  const record = (chat, owner, flags, text) => ['token', chat, '146', '', `nonce=${owner}${flags ? ';' + flags : ''}`, chat, text].join('\x1f');
+  await capturePacket(fixture, running, record('busy', busyNonce, '', 'First fixture question'));
+  await waitReply(fixture, vm, busyNonce, 'working');
+  await waitFor(() => fixture.callCount() === 1 && fixture.pulses().length >= 1);
+  assertPulse(fixture, vm, 0, busyNonce, 'working');
+  const profile = JSON.stringify({ version: 1, enabled: ['inventory'], data: { inventory: ['Épée', '鉱石', '🪨', 'x'.repeat(5000)], tail: 'QUEUED_PROFILE_END_SENTINEL' } });
+  const parts = Buffer.from(profile).toString('base64').match(/.{1,1000}/g);
+  const header = record('waiting', nonce, 'profile=146', 'Second fixture question');
+  await capturePacket(fixture, running, header);
+  await waitReply(fixture, vm, nonce, 'context');
+  assert.equal(fixture.pulses().length, 1, 'a partial-profile header is not full receipt');
+  for (let i = 0; i < parts.length; i++) {
+    const part = record('waiting', nonce, `data=profile;profile=146;encoding=b64;part=${i + 1}/${parts.length}`, parts[i]);
+    await capturePacket(fixture, running, header + '\x1e' + part);
+    if (i < parts.length - 1) {
+      await waitReply(fixture, vm, nonce, 'context', `${i + 1}/${parts.length}`);
+      assert.equal(fixture.pulses().length, 1, 'fragments and duplicate headers do not spend readiness flags');
+    }
+  }
+  await waitReply(fixture, vm, nonce, 'queued');
+  await waitFor(() => fixture.pulses().length >= 2);
+  assert.equal(fixture.callCount(), 1, 'a genuine queued receipt precedes provider admission');
+  assertPulse(fixture, vm, 1, nonce, 'queued');
+  await capturePacket(fixture, running, header);
+  await capturePacket(fixture, running, record('waiting', 'stale-chat-000001', `data=profile;profile=146;encoding=b64;part=1/${parts.length}`, parts[0]));
+  fixture.progress(1);
+  await waitReply(fixture, vm, busyNonce, 'working', 'Fixture progress');
+  await waitClock(fixture, vm, fixture.advance(1));
+  assert.equal(replyField(vm, nonce), 'queued', 'another chat and stale nonce fragments cannot replace the queued receipt');
+  assert.equal(fixture.pulses().length, 2, 'same-phase progress, retries and idle clocks are not readiness events');
+  const hello = record('waiting', 'queue-hello-000001', 'h;calibration=quiet', '');
+  await capturePacket(fixture, running, hello, 146, 'quiet');
+  await waitAck(fixture, vm, 'queue-hello-000001', initial);
+  await waitFor(() => fixture.pulses().length >= 3);
+  assert.equal(replyField(vm, nonce), 'queued', 'a concurrent hello never replaces the pending user request');
+  fixture.release(1);
+  await waitReply(fixture, vm, nonce, 'working');
+  await waitFor(() => fixture.callCount() === 2 && fixture.pulses().length >= 5);
+  assertPulse(fixture, vm, 3, busyNonce, 'done');
+  assertPulse(fixture, vm, 4, nonce, 'working');
+  assert.ok(fixture.callsRead()[1].input.includes('QUEUED_PROFILE_END_SENTINEL'), 'the provider receives the complete selected snapshot after queuing');
+  assert.ok(fixture.callsRead()[1].input.includes('Épée'));
+  fixture.release(2);
+  await waitReply(fixture, vm, nonce, 'done');
+  await waitFor(() => fixture.pulses().length >= 6);
+  assertPulse(fixture, vm, 5, nonce, 'done');
+  assert.equal(fixture.messages('busy').filter(message => message.role === 'user').length, 1);
+  assert.equal(fixture.messages('waiting').filter(message => message.role === 'user').length, 1);
+});
+
+test('new context query rounds and results notify once while stale nonce responses and progress cannot resume them', async t => {
+  const fixture = bridgeSandbox(t, { lastId: 0, sessions: {}, handled: {} }, { clock: true, presence: true, query: true, slots: 3, progressWriteMs: 1, presenceIntervalMs: 25 });
+  const vm = addonVM(), nonce = 'query-owner-000001';
+  const profile = JSON.stringify({ version: 1, enabled: ['inventory'], data: { inventory: [] } });
+  const hex = text => Buffer.from(text).toString('hex');
+  const state = (responseNonce, request = '146-1') => fixture.outbox(nonce).replace('["text"]', `["profile"] = "${hex(profile)}", ["text"]`).replace(/ } }$/, `${responseNonce ? ` }, ["contextOutbox"] = { ["id"] = 146, ["session"] = "token", ["chat"] = "chat", ["nonce"] = "${responseNonce}", ["request"] = "${request}", ["text"] = "${hex('[{"ok":true,"data":{"inventory":[]}}]')}"` : ''} } }`);
+  fixture.write(state());
+  fixture.start([]);
+  await waitReply(fixture, vm, nonce, 'working');
+  await waitFor(() => fixture.pulses().length >= 1 && fixture.callCount() === 1);
+  assertPulse(fixture, vm, 0, nonce, 'working');
+  fixture.release(1);
+  await waitReply(fixture, vm, nonce, 'context_query');
+  await waitFor(() => fixture.pulses().length >= 2);
+  assertPulse(fixture, vm, 1, nonce, 'context_query');
+  fixture.write(state('query-stale-000001'));
+  await waitClock(fixture, vm, fixture.advance(1));
+  assert.equal(replyField(vm, nonce), 'context_query');
+  assert.equal(fixture.callCount(), 1, 'a reused numeric id and query round cannot resume another nonce');
+  assert.equal(fixture.pulses().length, 2);
+  fixture.write(state(nonce, '146-0'));
+  await waitClock(fixture, vm, fixture.advance(1));
+  assert.equal(fixture.callCount(), 1, 'an old query round cannot resume this owner');
+  fixture.write(state(nonce));
+  await waitReply(fixture, vm, nonce, 'working');
+  await waitFor(() => fixture.pulses().length >= 3 && fixture.callCount() === 2);
+  assertPulse(fixture, vm, 2, nonce, 'working');
+  fixture.progress(2);
+  await waitReply(fixture, vm, nonce, 'working', 'Fixture progress');
+  fixture.write(state(nonce) + '\n-- repeated complete response');
+  await waitClock(fixture, vm, fixture.advance(1));
+  assert.equal(fixture.callCount(), 2);
+  assert.equal(fixture.pulses().length, 3);
+  fixture.release(2);
+  await waitReply(fixture, vm, nonce, 'done');
+  await waitFor(() => fixture.pulses().length >= 4);
+  assertPulse(fixture, vm, 3, nonce, 'done');
+  assert.equal(fixture.messages().filter(message => message.role === 'user').length, 1);
+});
+
+test('same-chat queued nonces are not overwritten and older phases cannot replace the latest full receipt', async t => {
+  const fixture = bridgeSandbox(t, { lastId: 0, sessions: {}, handled: {} }, { presence: true, maxParallel: 1, progressWriteMs: 1 });
+  const vm = addonVM(), first = 'same-chat-000001', second = 'same-chat-000002', third = 'same-chat-000003';
+  fixture.write(fixture.outbox(first));
+  fixture.start([]);
+  await waitReply(fixture, vm, first, 'working');
+  await waitFor(() => fixture.callCount() === 1);
+  fixture.write(fixture.outbox(second));
+  await waitReply(fixture, vm, second, 'queued');
+  fixture.write(fixture.outbox(third));
+  await waitReply(fixture, vm, third, 'queued');
+  fixture.progress(1);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  vm.run(fs.readFileSync(fixture.inbox, 'utf8'));
+  assert.equal(replyField(vm, third), 'queued', 'older running progress cannot overwrite a newer complete receipt');
+  fixture.release(1);
+  await waitFor(() => fixture.callCount() === 2);
+  vm.run(fs.readFileSync(fixture.inbox, 'utf8'));
+  assert.equal(replyField(vm, third), 'queued', 'starting an earlier queued nonce cannot overwrite the latest accepted request');
+  fixture.release(2);
+  await waitReply(fixture, vm, third, 'working');
+  await waitFor(() => fixture.callCount() === 3);
+  fixture.release(3);
+  await waitReply(fixture, vm, third, 'done');
+  assert.equal(fixture.messages().filter(message => message.role === 'user').length, 3, 'every fully received queued nonce runs once');
+  assert.equal(fixture.messages().filter(message => message.role === 'assistant').length, 3);
+});
+
+test('a final validation error publishes nonce-correlated readiness once without launching a provider', async t => {
+  const fixture = bridgeSandbox(t, { lastId: 0, sessions: {}, handled: {} }, { presence: true, slots: 3, presenceIntervalMs: 25 });
+  const vm = addonVM(), nonce = 'invalid-profile-000001';
+  const source = fixture.outbox(nonce).replace('["text"]', `["profile"] = "${Buffer.from('{"version":0}').toString('hex')}", ["text"]`);
+  fixture.write(source);
+  fixture.start([]);
+  await waitReply(fixture, vm, nonce, 'error');
+  await waitFor(() => fixture.pulses().length >= 1);
+  assertPulse(fixture, vm, 0, nonce, 'error');
+  fixture.write(source + '\n-- duplicate rejected request');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(fixture.callCount(), 0);
+  assert.equal(fixture.pulses().length, 1, 'replayed errors and idle publications do not spend more flags');
 });

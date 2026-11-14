@@ -31,11 +31,12 @@ local SLOT_PREFIX = "WoWAI_S"
 local ACT_MAX = 60 -- heartbeat files per message (act/NNN/01..60.wav)
 local PRESENCE_MAX = 2000 -- presence/0001..2000.wav, one flipped by the bridge every 30 s
 local STRIP_TRIES = 3 -- re-show an unacknowledged message this many times before falling back
-local CELL, CELLS_PER_ROW, MAX_ROWS = 4, 200, 48
+local CELLS_PER_ROW, MAX_ROWS = 200, 48
 local STRIP_SECONDS = 40 -- max per message; it leaves the strip as soon as the bridge acknowledges
 local POLL_SCHEDULE = { 5, 10, 16, 24, 34, 46, 60, 80, 100, 130, 160, 200, 240, 300 }
 local POLL_TAIL = 60
 local TICK_SECONDS = 2
+local TRANSPORT_SECONDS = 0.1 -- cheap readiness and negotiated frame pacing, not slot polling
 local CONNECT_WAIT = 15 -- seconds to wait for a fresh nonce acknowledgement
 local VERIFIED_SECONDS = 90 -- confirmation age, never renewed by clocks or sound hints
 local IDLE_POLL_SECONDS = 600 -- without recent presence progress, spend one idle slot this often
@@ -47,6 +48,7 @@ local db
 local ui = {}
 -- Transport state for this UI session. outbound[id] = { chat, cwd, flags, text, sentAt, acked }
 local run = { outbound = {} }
+local tx = { active = "robust", interval = 0.5, reason = "" }
 
 local UI = {}
 WoWAI.UI = UI
@@ -413,6 +415,8 @@ local function InitDB()
 	end
 	s.echo = s.echo or "summary"
 	s.mode = s.mode or "pixel"
+	if not Codec.DISPLAYS[s.pixelDisplay] or Codec.DISPLAYS[s.pixelDisplay].family then s.pixelDisplay = "robust" end
+	if type(s.pixelVerified) ~= "table" then s.pixelVerified = {} end
 	s.interval = s.interval or 20
 	s.cwd = s.cwd or DEFAULT_CWD
 	s.width = s.width or 960
@@ -526,13 +530,15 @@ local strip
 local cellPool = {}
 
 local function EnsureStrip()
+	local display = tx.probe and tx.probe.display or tx.active
+	local cell = Codec.DISPLAYS[display].cell
 	if not strip then
 		strip = CreateFrame("Frame", "WoWAIStrip", UIParent)
 		strip:SetFrameStrata("TOOLTIP")
 		strip:SetFrameLevel(10000)
 		if strip.SetIgnoreParentScale then strip:SetIgnoreParentScale(true) end
 		strip:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 0, 0)
-		strip:SetSize(CELLS_PER_ROW * CELL, MAX_ROWS * CELL)
+		strip:SetSize(CELLS_PER_ROW * cell, MAX_ROWS * cell)
 		strip:Hide()
 	end
 	-- GetPhysicalScreenSize excludes the DPI factor used by the rendered window.
@@ -544,36 +550,51 @@ local function EnsureStrip()
 	end
 	local dpiScale = GetScreenDPIScale and GetScreenDPIScale() or 1
 	strip:SetScale(768 / (physH * dpiScale))
+	if strip.cell ~= cell then
+		strip:SetSize(CELLS_PER_ROW * cell, MAX_ROWS * cell)
+		for i, t in ipairs(cellPool) do
+			t:SetSize(cell, cell)
+			t:ClearAllPoints()
+			t:SetPoint("TOPLEFT", strip, "TOPLEFT", ((i - 1) % CELLS_PER_ROW) * cell, -math.floor((i - 1) / CELLS_PER_ROW) * cell)
+		end
+	end
+	strip.cell, strip.display = cell, display
 	return strip
 end
 
 local function HideStrip()
-	if strip then strip:Hide() end
+	if strip then strip:Hide(); strip.lastPayload = nil end
 	run.stripShown = nil
 end
 
 local function ShowStrip(id, payload)
-	local cells = Codec.Encode(id % 65536, payload)
 	local s = EnsureStrip()
+	if s:IsShown() and s.lastId == id and s.lastPayload == payload and s.lastDisplay == s.display and s.lastScale == s:GetScale() then
+		run.stripShown = true
+		return
+	end
+	local cells = Codec.Encode(id % 65536, payload)
+	local cell = s.cell
 	local rows = math.ceil(#cells / CELLS_PER_ROW)
 	local total = rows * CELLS_PER_ROW
 	for i = 1, total do
 		local t = cellPool[i]
 		if not t then
 			t = s:CreateTexture(nil, "OVERLAY")
-			t:SetSize(CELL, CELL)
+			t:SetSize(cell, cell)
 			local c = (i - 1) % CELLS_PER_ROW
 			local r = math.floor((i - 1) / CELLS_PER_ROW)
-			t:SetPoint("TOPLEFT", s, "TOPLEFT", c * CELL, -r * CELL)
+			t:SetPoint("TOPLEFT", s, "TOPLEFT", c * cell, -r * cell)
 			cellPool[i] = t
 		end
-		local cr, cg, cb = Codec.CellColor(cells[i] or 0)
+		local cr, cg, cb = Codec.CellColor(cells[i] or 0, s.display)
 		t:SetColorTexture(cr, cg, cb, 1)
 		t:Show()
 	end
 	for i = total + 1, #cellPool do
 		cellPool[i]:Hide()
 	end
+	s.lastId, s.lastPayload, s.lastDisplay, s.lastScale = id, payload, s.display, s:GetScale()
 	s:Show()
 	run.stripShown = true
 end
@@ -647,6 +668,11 @@ end
 
 -- Redraw the strip from every outbound message the bridge hasn't acknowledged.
 local function RefreshStrip(prefer)
+	if tx.probe then
+		local rec = run.outbound[tx.probe.id]
+		if rec then ShowStrip(tx.probe.id, RecordFor(tx.probe.id, rec)); return end
+	end
+	tx.nextFrameAt = GetTime() + tx.FramePeriod()
 	local ids = {}
 	for id, rec in pairs(run.outbound) do
 		if not rec.acked then table.insert(ids, id) end
@@ -677,6 +703,140 @@ local function RefreshStrip(prefer)
 		size = size + #r + 1
 	end
 	ShowStrip(latest, table.concat(parts, RS))
+end
+
+function tx.FramePeriod()
+	local period, count, now = tx.interval, 0, GetTime()
+	for _, rec in pairs(run.outbound) do if not rec.acked then count = count + 1 end end
+	for _, rec in pairs(run.outbound) do
+		if rec.parts and not rec.acked then
+			local cycle = (#rec.parts + 1) * tx.interval * math.max(1, count)
+			local wait = math.max(3, cycle * 2)
+			local age = now - rec.sentAt
+			if age > wait * 2 then period = math.max(period, 0.5)
+			elseif age > wait then period = math.max(period, 0.25) end
+		end
+	end
+	return period
+end
+
+function tx.Status()
+	if tx.probe then return "Checking " .. Codec.DISPLAYS[tx.probe.display].label .. " against a full-size captured frame..." end
+	local profile = Codec.DISPLAYS[tx.active]
+	local text = profile.label .. " active · " .. profile.cell .. " px · up to " .. string.format("%.0f", 1 / tx.interval) .. " frames/s"
+	if tx.reason ~= "" then text = text .. "\n" .. tx.reason end
+	return text
+end
+
+function tx.UpdateSettings()
+	if ui.pixelStatus then ui.pixelStatus:SetText(tx.Status()) end
+	for display, button in pairs(ui.pixelButtons or {}) do
+		local selected = ui.defaultsDraft and ui.defaultsDraft.pixelDisplay == display
+		button:SetText((selected and "> " or "") .. Codec.DISPLAYS[display].label)
+	end
+end
+
+function tx.FreshAck(data, nonce, startedEpoch)
+	local ack, clock = data.connectionAck, data.now
+	return data.connectionProtocol == 1 and type(ack) == "table"
+		and ack.session == db.session and ack.nonce == nonce
+		and type(clock) == "number" and clock >= time() - CONNECT_WAIT and clock <= time() + 2
+		and type(ack.at) == "number" and ack.at >= startedEpoch and ack.at <= clock
+end
+
+function tx.Fail(reason)
+	local probe = tx.probe
+	if probe then run.outbound[probe.id] = nil end
+	tx.probe, tx.active = nil, "robust"
+	if probe and probe.display == "quiet" and tx.displays and tx.displays.quiet4 then
+		tx.retryDisplay, tx.failed, tx.reason = "quiet4", nil, "Two-pixel colors were not reliable; checking four-pixel Quiet."
+	else
+		tx.retryDisplay, tx.failed, tx.reason = nil, probe and probe.preference or db.settings.pixelDisplay, reason
+	end
+	RefreshStrip()
+	tx.UpdateSettings()
+end
+
+function tx.MaybeCalibrate()
+	local preference = db.settings.pixelDisplay
+	local active = Codec.DISPLAYS[tx.active]
+	if preference == "robust" or preference == (active.family or tx.active) or tx.failed == preference or tx.probe then return end
+	local display = tx.retryDisplay or db.settings.pixelVerified[preference]
+	if not Codec.DISPLAYS[display or ""] or not tx.displays or not tx.displays[display]
+		or (Codec.DISPLAYS[display].family or display) ~= preference then display = preference end
+	if not tx.displays or not tx.displays[display] then
+		local reason = WoWAI.IsConnected() and "Update/restart the bridge to check Compact or Quiet."
+			or "Reconnect to check the saved display preference."
+		if tx.reason ~= reason then tx.reason = reason; tx.UpdateSettings() end
+		return
+	end
+	if run.connectingAt or not WoWAI.IsConnected() then return end
+	tx.retryDisplay = nil
+	db.lastSeq = db.lastSeq + 1
+	local nonce, now = NewNonce(), GetTime()
+	local pollDelay = math.max(1, (tx.captureInterval or 0.25) * 2 + 0.25)
+	tx.probe = { id = db.lastSeq, nonce = nonce, display = display, preference = preference, startedEpoch = time(),
+		pollAt = now + pollDelay, deadline = now + math.max(4, pollDelay + 2) }
+	local c = ActiveChat()
+	local rec = { chat = c and c.id or "", cwd = "", flags = "h;nonce=" .. nonce .. ";calibration=" .. display,
+		name = "", text = "", hello = true, calibration = true, nonce = nonce, sentAt = now }
+	-- Exercise the complete canvas, not just a small header, without sharing character data.
+	local length = Codec.MAX_PAYLOAD - #RecordFor(tx.probe.id, rec)
+	local pattern = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	rec.text = string.rep(pattern, math.ceil(length / #pattern)):sub(1, length)
+	run.outbound[tx.probe.id] = rec
+	tx.reason = ""
+	RefreshStrip()
+	tx.UpdateSettings()
+end
+
+function tx.Accept(data, verified)
+	if verified then
+		local capability = data.transport
+		tx.displays, tx.interval, tx.captureInterval = nil, 0.5, nil
+		if data.transportProtocol == 1 and type(capability) == "table" and type(capability.displays) == "table" then
+			tx.displays = {}
+			for _, display in ipairs(capability.displays) do
+				if Codec.DISPLAYS[display] then tx.displays[display] = true end
+			end
+			tx.interval = math.max(0.1, (tonumber(capability.frameIntervalMs) or 500) / 1000)
+			tx.captureInterval = math.max(0.01, (tonumber(capability.captureIntervalMs) or 250) / 1000)
+			tx.nextFrameAt = GetTime()
+		end
+	end
+	local probe = tx.probe
+	if probe and tx.FreshAck(data, probe.nonce, probe.startedEpoch) then
+		if data.connectionAck.display == probe.display then
+			run.outbound[probe.id] = nil
+			db.settings.pixelVerified[probe.preference] = probe.display
+			tx.active, tx.probe, tx.failed = probe.display, nil, nil
+			tx.reason = probe.display == "quiet4" and "Four-pixel dark cells selected for reliable capture." or ""
+			RefreshStrip()
+		else tx.Fail("Display check did not match the captured mode; using Robust.") end
+	end
+	tx.UpdateSettings()
+end
+
+function tx.SetPreference(display)
+	if not Codec.DISPLAYS[display] or Codec.DISPLAYS[display].family then return end
+	local changed, retry = db.settings.pixelDisplay ~= display, tx.failed == display
+	if changed then db.settings.pixelVerified[display] = nil end
+	db.settings.pixelDisplay = display
+	if changed or retry or (display == "robust" and (tx.active ~= "robust" or tx.probe)) then
+		if tx.probe then run.outbound[tx.probe.id] = nil end
+		tx.active, tx.probe, tx.failed, tx.retryDisplay, tx.reason = "robust", nil, nil, nil, ""
+		RefreshStrip()
+	end
+	tx.UpdateSettings()
+	if display ~= "robust" and not WoWAI.IsConnected() then WoWAI.Connect()
+	else tx.MaybeCalibrate() end
+end
+
+function tx.Invalidate()
+	if tx.probe then run.outbound[tx.probe.id] = nil end
+	tx.active, tx.probe, tx.failed, tx.retryDisplay, tx.reason = "robust", nil, nil, nil, ""
+	RefreshStrip()
+	tx.UpdateSettings()
 end
 
 ---------------------------------------------------------------------------
@@ -843,7 +1003,7 @@ local STATE_ICON = {
 function WoWAI.UpdateDot()
 	local state, _, _, _, tip = WoWAI.BridgeState()
 	if run.pixelFailed and not run.connectingAt then state = "down" end
-	tip = tip .. "\n" .. PresenceStatus()
+	tip = tip .. "\n" .. PresenceStatus() .. "\n" .. tx.Status()
 	for _, dot in ipairs({ ui.dot, ui.miniDot }) do
 		if dot then
 			dot:SetTexture(STATE_ICON[state] or STATE_ICON.unknown)
@@ -854,6 +1014,51 @@ function WoWAI.UpdateDot()
 		ui.connection:SetText(db and db.settings.mode == "reload" and "Reload transport" or ConnectionLabel())
 		ui.connection:SetTextColor(unpack(UI.colors[state == "ok" and "success" or (state == "stale" and "warning" or "muted")]))
 	end
+end
+
+-- Map changes notify this entry directly; navigation never rebuilds the
+-- discussion or collects character/provider context.
+function WoWAI.UpdateNavigation()
+	local button = ui.navigation
+	if not button then return end
+	local map = WoWAIMap
+	local available = type(map) == "table" and type(map.GetNavigationState) == "function" and type(map.ShowNavigation) == "function"
+	local state = available and map.GetNavigationState() or nil
+	if ui.navigationMap == map and ui.navigationState == state and ui.navigationReady == available then return end
+	ui.navigationMap, ui.navigationState, ui.navigationReady = map, state, available
+	button:SetEnabled(available and state ~= nil)
+	local label, title, body = "Navigation", "Navigation", "The navigation module is not available."
+	if state then
+		local count = 0
+		for _, layer in ipairs(state.layers or {}) do count = count + #(layer.points or {}) end
+		label = count > 0 and ("Navigation · " .. count) or label
+		body = count > 0 and (count .. " saved destinations. Choose a destination or route without sending an AI request.")
+			or "No saved destinations yet."
+		local active = state.active
+		if active then
+			local point = active.point or {}
+			local destination = point[4] and point[4] ~= "" and point[4] or active.title
+			destination = destination and destination ~= "" and destination or "Destination"
+			label, title = "To: " .. Display(destination), "Navigation · " .. Display(destination)
+			body = Display(active.title or "Destination") .. "\n"
+				.. (active.ordered and "Route stop " or "Destination ") .. (active.index or 1) .. " of " .. (active.total or 1)
+				.. (active.ordered and active.loop and " · Looping" or "")
+			if type(point[2]) == "number" and type(point[3]) == "number" then
+				body = body .. string.format("\nCoordinates: %.1f, %.1f", point[2], point[3])
+			end
+		end
+		local status = state.status
+		local detail = status == "pending" and "Waiting for combat to end."
+			or status == "route" and "Tracking on the map and minimap."
+			or status == "native" and "Tracking with a native waypoint."
+			or status == "unavailable" and "Navigation unavailable."
+			or "No active destination."
+		body = body .. "\n" .. detail
+		if state.message and state.message ~= "" then body = body .. "\n" .. Display(state.message) end
+		body = body .. "\nOpen Navigation to choose a destination or manage tracking. Saved destinations work offline."
+	end
+	button:SetText(label)
+	button.navigationTitle, button.navigationBody = title, body
 end
 
 -- Reload transport still uses its explicit reload cycle. Pixel sends require a
@@ -875,6 +1080,8 @@ function WoWAI.Connect()
 		WoWAI.SayHello()
 		return
 	end
+	tx.Invalidate()
+	tx.interval, tx.displays, tx.captureInterval = 0.5, nil, nil
 	for id, rec in pairs(run.outbound) do if rec.hello then run.outbound[id] = nil end end
 	db.hello = nil
 	run.probe, run.verifiedAt = nil, nil
@@ -1005,7 +1212,9 @@ local Finish -- defined below
 local function NoteAcked(rec)
 	rec.acked = true
 	if rec.ctx ~= nil then run.contextSent = rec.ctx end
-	if rec.hello and db.hello and db.hello.nonce == rec.nonce then db.hello = nil end
+	if rec.hello and db.hello and db.hello.nonce == rec.nonce then
+		db.hello, run.helloPollAt = nil, nil
+	end
 end
 
 local function MarkAcked(id, nonce)
@@ -1062,7 +1271,7 @@ local function ApplyReplies(replies)
 				Finish(c, "assistant", r.text or "", denied, r.agent, r.summary, WoWAI.CleanMacros(r.macros))
 			elseif r.status == "error" then
 				Finish(c, "system", "Bridge error: " .. tostring(r.text), denied)
-			elseif r.status == "working" then
+			elseif r.status == "working" or r.status == "queued" then
 				c.progress = r.text
 			elseif r.status == "context" then
 				c.progress = r.text
@@ -1123,22 +1332,19 @@ end
 local function ApplyBridgeData(data)
 	if type(data) ~= "table" then return false end
 	local probe, ack = run.probe, data.connectionAck
-	local clock = data.now
-	if run.connectingAt and probe and GetTime() - probe.startedAt <= CONNECT_WAIT
-		and data.connectionProtocol == 1 and type(ack) == "table"
-		and ack.session == probe.session and ack.session == db.session and ack.nonce == probe.nonce
-		and type(clock) == "number" and clock >= time() - CONNECT_WAIT and clock <= time() + 2
-		and type(ack.at) == "number" and ack.at >= probe.startedEpoch and ack.at <= clock then
+	local verified = run.connectingAt and probe and probe.session == db.session
+		and GetTime() - probe.startedAt <= CONNECT_WAIT and tx.FreshAck(data, probe.nonce, probe.startedEpoch)
+	if verified then
 		-- Capture this acknowledgement's actual age once. Republishing metadata
 		-- or a later retry must not renew a completed verification.
 		if not probe.acknowledgedAt then
 			probe.acknowledgedAt = ack.at
 			run.verifiedAt = GetTime() - math.max(0, time() - ack.at)
 			run.pixelFailed = nil
-			local rec = run.outbound[probe.id]
-			if rec and rec.hello and rec.nonce == probe.nonce then NoteAcked(rec) end
+			MarkAcked(probe.id, probe.nonce)
 		end
 	end
+	tx.Accept(data, verified)
 	if type(data.cwd) == "string" and data.cwd ~= "" then run.bridgeCwd = data.cwd end
 	if type(data.agent) == "string" and data.agent ~= "" then run.bridgeAgent = data.agent end
 	if type(data.agents) == "table" and #data.agents > 0 then run.bridgeAgents = data.agents end
@@ -1186,10 +1392,49 @@ local function TryLoadSlot(why)
 	WoWAI.Render()
 end
 
+local function TransportTick()
+	if not db or db.settings.mode ~= "pixel" then return end
+	local now, read = GetTime(), false
+	local busy = AnyPending() or run.connectingAt ~= nil or tx.probe ~= nil
+	if busy or not tx.lastSignalCheck or now - tx.lastSignalCheck >= TICK_SECONDS then
+		tx.lastSignalCheck = now
+		if PollPresence() and busy then
+			TryLoadSlot("notification")
+			read = true
+		end
+		run.signalSeen = run.signalSeen or {}
+		if not read then
+			for _, c in ipairs(db.chats) do
+				local nonce = c.request and c.request.nonce
+				if c.pendingId and nonce and run.signalSeen[c.id] ~= nonce and CheckSignal("sig", c.pendingId) then
+					-- A numeric sound path can be cached. It gets at most one read per request,
+					-- even if that read contains only working status rather than the final reply.
+					run.signalSeen[c.id] = nonce
+					TryLoadSlot("signal")
+					read = true
+					break
+				end
+			end
+		end
+	end
+	local probe = tx.probe
+	if probe and not probe.polled and now >= probe.pollAt and not read then
+		probe.polled = true
+		TryLoadSlot("calibration")
+	end
+	if tx.probe and now >= tx.probe.deadline then tx.Fail("Display check timed out; using Robust. Save again to retry.") end
+	WoWAI.CheckConnection()
+	tx.MaybeCalibrate()
+	if not tx.probe and (not tx.nextFrameAt or now + 0.001 >= tx.nextFrameAt) then
+		for _, rec in pairs(run.outbound) do
+			if rec.parts and not rec.acked then RefreshStrip(); break end
+		end
+	end
+end
+
 local function Tick()
 	if not db then return end
 	local now = GetTime()
-	local presenceMoved = PollPresence()
 	if db.settings.mode ~= "pixel" then
 		WoWAI.UpdateDot()
 		WoWAI.CheckConnection()
@@ -1262,22 +1507,12 @@ local function Tick()
 		RefreshStrip()
 		WoWAI.UpdateStatus()
 	end
-	if presenceMoved and AnyPending() and run.contextProtocol == 2 then
-		TryLoadSlot("context")
-		return
-	end
 	if not AnyPending() then return end
 	local moved = false
 	for _, c in ipairs(db.chats) do
 		if c.pendingId and PollActivity(c) then moved = true end
 	end
 	if moved then WoWAI.Render() end
-	for _, c in ipairs(db.chats) do
-		if c.pendingId and CheckSignal("sig", c.pendingId) then
-			TryLoadSlot("signal")
-			return
-		end
-	end
 	if run.nextPollAt and now >= run.nextPollAt then
 		TryLoadSlot("schedule")
 	end
@@ -1852,6 +2087,7 @@ function WoWAI.SaveDefaults()
 	end
 	db.settings.defaults = nextDefaults
 	ui.defaultsPanel:Hide()
+	tx.SetPreference(draft.pixelDisplay)
 	WoWAI.Render()
 end
 
@@ -2896,7 +3132,7 @@ end
 
 local function MakeDefaultsPanel(parent)
 	local panel = UI.Surface(CreateFrame("Frame", "WoWAIDefaults", parent, "BackdropTemplate"))
-	panel:SetSize(590, 260)
+	panel:SetSize(590, 430)
 	panel:SetPoint("CENTER")
 	panel:SetFrameStrata("DIALOG")
 	panel:SetToplevel(true)
@@ -2907,7 +3143,7 @@ local function MakeDefaultsPanel(parent)
 	panel:SetScript("OnDragStart", panel.StartMoving)
 	panel:SetScript("OnDragStop", panel.StopMovingOrSizing)
 	tinsert(UISpecialFrames, "WoWAIDefaults")
-	local title = UI.Label(panel, "Settings · Agent defaults", 17)
+	local title = UI.Label(panel, "Settings", 17)
 	title:SetPoint("TOPLEFT", panel, "TOPLEFT", 18, -18)
 	local description = UI.Label(panel, "Chats set to Default inherit these choices, then the bridge / CLI defaults.\nChoose an explicit agent before setting its model or reasoning.", 12, "muted")
 	description:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -14)
@@ -2918,8 +3154,26 @@ local function MakeDefaultsPanel(parent)
 	local note = UI.Label(panel, "Applies to future messages only. Pending requests keep their original settings.\nNew chats inherit the current chat's choices. Bridge configuration is unchanged.", 11, "muted")
 	note:SetPoint("TOPLEFT", row, "BOTTOMLEFT", 0, -14)
 	note:SetWidth(550)
+	local transportTitle = UI.Label(panel, "Pixel display", 14)
+	transportTitle:SetPoint("TOPLEFT", panel, "TOPLEFT", 18, -212)
+	ui.pixelButtons = {}
+	for i, display in ipairs({ "robust", "compact", "quiet" }) do
+		local button = UI.Button(panel, Codec.DISPLAYS[display].label, 174, function()
+			if ui.defaultsDraft then ui.defaultsDraft.pixelDisplay = display; tx.UpdateSettings() end
+		end, "secondary", "WoWAIPixelDisplay" .. Codec.DISPLAYS[display].label)
+		button:SetPoint("TOPLEFT", panel, "TOPLEFT", 18 + (i - 1) * 182, -238)
+		ui.pixelButtons[display] = button
+	end
+	local transportNote = UI.Label(panel, "Compact uses 2px cells. Quiet uses dark colors, with 4px if 2px is not reliable.\nSave verifies a full-size captured frame before applying the mode.", 12, "muted")
+	transportNote:SetPoint("TOPLEFT", panel, "TOPLEFT", 18, -280)
+	transportNote:SetWidth(550)
+	transportNote:SetHeight(34)
+	ui.pixelStatus = UI.Label(panel, "", 12, "muted")
+	ui.pixelStatus:SetPoint("TOPLEFT", panel, "TOPLEFT", 18, -322)
+	ui.pixelStatus:SetWidth(550)
+	ui.pixelStatus:SetHeight(42)
 	local reset = UI.Button(panel, "Use bridge defaults", 156, function()
-		ui.defaultsDraft = { agent = "", model = "", reasoning = "" }
+		ui.defaultsDraft = { agent = "", model = "", reasoning = "", pixelDisplay = ui.defaultsDraft.pixelDisplay }
 		if ui.selectionMenu then ui.selectionMenu:Hide() end
 		WoWAI.UpdateSelectors()
 	end, "secondary", "WoWAIDefaultsReset")
@@ -2937,11 +3191,12 @@ local function MakeDefaultsPanel(parent)
 
 	function WoWAI.ShowDefaults()
 		local d = db.settings.defaults
-		ui.defaultsDraft = { agent = d.agent, model = d.model, reasoning = d.reasoning }
+		ui.defaultsDraft = { agent = d.agent, model = d.model, reasoning = d.reasoning, pixelDisplay = db.settings.pixelDisplay }
 		if ui.selectionMenu then ui.selectionMenu:Hide() end
 		WoWAI.Toggle(true)
 		panel:Show()
 		WoWAI.UpdateSelectors()
+		tx.UpdateSettings()
 	end
 
 	function WoWAI.SetDefaultChoice(key, value)
@@ -3002,7 +3257,7 @@ local function BuildUI()
 	f:EnableMouse(true)
 	local drag = CreateFrame("Frame", "WoWAIDragHeader", f)
 	drag:SetPoint("TOPLEFT", f, "TOPLEFT", 0, 0)
-	drag:SetPoint("TOPRIGHT", f, "TOPRIGHT", -260, 0)
+	-- The right edge is anchored to Navigation once the header actions exist.
 	drag:SetHeight(42)
 	drag:EnableMouse(true)
 	drag:RegisterForDrag("LeftButton")
@@ -3036,6 +3291,7 @@ local function BuildUI()
 	ui.dot = dot
 	ui.connection = UI.Label(f, "Idle / not verified", 12, "muted")
 	ui.connection:SetPoint("LEFT", dotHolder, "RIGHT", 5, 0)
+	ui.connection:SetWordWrap(false)
 	local close = UI.Button(f, "X", 30, function() WoWAI.Toggle(false) end, "quiet", "WoWAIClose")
 	close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -10, -10)
 	UI.Tooltip(close, "Close", "Hide the workspace and compact bar. /wow-ai opens it again.")
@@ -3048,6 +3304,25 @@ local function BuildUI()
 		if WoWAIContextUI then WoWAIContextUI.Show() end
 	end, "secondary", "WoWAISharing")
 	sharing:SetPoint("RIGHT", settings, "LEFT", -6, 0)
+	local navigation = UI.Button(f, "Navigation", 160, function()
+		local map = WoWAIMap
+		if map and type(map.ShowNavigation) == "function" and type(map.GetNavigationState) == "function" then
+			map.ShowNavigation()
+		end
+	end, "secondary", "WoWAINavigation")
+	navigation:SetPoint("RIGHT", sharing, "LEFT", -6, 0)
+	navigation:SetMotionScriptsWhileDisabled(true)
+	ui.navigation = navigation
+	navigation:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:SetText(self.navigationTitle or "Navigation")
+		GameTooltip:AddLine(self.navigationBody or "", 0.75, 0.81, 0.89, true)
+		GameTooltip:Show()
+	end)
+	navigation:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	drag:SetPoint("TOPRIGHT", navigation, "TOPLEFT", -6, 10)
+	ui.connection:SetPoint("RIGHT", navigation, "LEFT", -8, 0)
+	WoWAI.UpdateNavigation()
 
 	f:SetScript("OnHide", function()
 		if ui.input then ui.input:ClearFocus() end
@@ -3389,6 +3664,7 @@ function WoWAI.Toggle(show)
 	db.settings.shown = show
 	if show then
 		WoWAI.Render()
+		WoWAI.UpdateNavigation()
 		-- No auto-focus: the game keeps the keyboard until you click the box.
 		-- Opening the panel alone does not send anything; Send checks the bridge
 		-- automatically, and the direct Reconnect action is always available.
@@ -3700,6 +3976,7 @@ local ev = CreateFrame("Frame")
 ev:RegisterEvent("ADDON_LOADED")
 ev:RegisterEvent("PLAYER_LOGIN")
 ev:RegisterEvent("UI_SCALE_CHANGED")
+ev:RegisterEvent("DISPLAY_SIZE_CHANGED")
 ev:RegisterEvent("PLAYER_REGEN_ENABLED")
 ev:RegisterEvent("UPDATE_MACROS")
 ev:RegisterEvent("CHAT_MSG_WHISPER")
@@ -3712,8 +3989,8 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 	elseif event == "CHAT_MSG_WHISPER" or event == "CHAT_MSG_BN_WHISPER" then
 		-- A real person whispered: /r belongs to them again.
 		run.lastMessenger = "player"
-	elseif event == "UI_SCALE_CHANGED" then
-		if strip then EnsureStrip() end
+	elseif event == "UI_SCALE_CHANGED" or event == "DISPLAY_SIZE_CHANGED" then
+		tx.Invalidate()
 		if ui.frame then
 			local maxW, maxH = math.max(360, UIParent:GetWidth() - 24), math.max(360, UIParent:GetHeight() - 24)
 			ui.frame:SetResizeBounds(math.min(720, maxW), math.min(500, maxH), maxW, maxH)
@@ -3724,6 +4001,8 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 		if not db then InitDB() end
 		BuildUI()
 		run = { outbound = {} }
+		tx.active, tx.probe, tx.failed, tx.retryDisplay, tx.reason = "robust", nil, nil, nil, ""
+		tx.interval, tx.displays, tx.captureInterval, tx.nextFrameAt, tx.lastSignalCheck = 0.5, nil, nil, nil, nil
 		SelfTestSignals()
 		ApplyBridgeData(WoWAI_Inbox)
 		if AnyPending() then
@@ -3770,12 +4049,7 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 		if db.settings.longchat then ApplyLongChat() end
 		HookReplyCommand()
 		C_Timer.NewTicker(TICK_SECONDS, Tick)
-		C_Timer.NewTicker(0.5, function()
-			if db.settings.mode ~= "pixel" then return end
-			for _, rec in pairs(run.outbound) do
-				if rec.parts and not rec.acked then RefreshStrip(); return end
-			end
-		end)
+		C_Timer.NewTicker(TRANSPORT_SECONDS, TransportTick)
 		C_Timer.After(3, WoWAI.SayHello)
 	elseif event == "UPDATE_MACROS" then
 		-- "Create" / "Update" on the macro buttons follows what exists now.
