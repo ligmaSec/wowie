@@ -1,4 +1,4 @@
--- WoWAI pixel codec. Pure Lua, no WoW APIs, so it can be tested outside the game.
+-- Wowie pixel codec. Pure Lua, no WoW APIs, so it can be tested outside the game.
 --
 -- A message is a byte stream:
 --   [0xC7 0x1A] [id hi, id lo] [len hi, len lo] [payload: len bytes] [fletcher s1, s2]
@@ -7,8 +7,8 @@
 -- (bit 2 = R, bit 1 = G, bit 0 = B). Endpoint colors are the robust default;
 -- optional quiet colors require a captured, checksum-verified calibration.
 
-WoWAI_Codec = {}
-local C = WoWAI_Codec
+Wowie_Codec = {}
+local C = Wowie_Codec
 
 C.MAGIC1, C.MAGIC2 = 0xC7, 0x1A
 C.BITS = 3

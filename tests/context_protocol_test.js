@@ -110,7 +110,7 @@ test('read-only request batches remain data, and unsupported request operations 
 test('reload character snapshots and query results remain separate from ordinary player text', () => {
   const profile = { version: 1, enabled: ['inventory'], data: { inventory: ['Épée'] } };
   const hex = value => Buffer.from(value).toString('hex');
-  const source = `WoWAIDB = { ["outbox"] = { ["id"] = 7, ["session"] = "token", ["chat"] = "chat", ["nonce"] = "owner-000007", ["text"] = "${hex('question')}", ["profile"] = "${hex(JSON.stringify(profile))}" }, ["contextOutbox"] = { ["id"] = 7, ["session"] = "token", ["chat"] = "chat", ["nonce"] = "owner-000007", ["request"] = "7-1", ["text"] = "${hex('[{"ok":false}]')}" } }`;
+  const source = `WowieDB = { ["outbox"] = { ["id"] = 7, ["session"] = "token", ["chat"] = "chat", ["nonce"] = "owner-000007", ["text"] = "${hex('question')}", ["profile"] = "${hex(JSON.stringify(profile))}" }, ["contextOutbox"] = { ["id"] = 7, ["session"] = "token", ["chat"] = "chat", ["nonce"] = "owner-000007", ["request"] = "7-1", ["text"] = "${hex('[{"ok":false}]')}" } }`;
   const job = P.parseOutbox(source), response = P.parseContextOutbox(source);
   assert.equal(job.text, 'question');
   assert.equal(job.nonce, 'owner-000007');

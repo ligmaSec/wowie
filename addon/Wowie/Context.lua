@@ -1,6 +1,6 @@
 -- Read-only character context. No commands, scripts, requests or protected actions.
-WoWAIContext = {}
-local Context = WoWAIContext
+WowieContext = {}
+local Context = WowieContext
 local unpack = unpack or table.unpack
 local function pack(...) return { n = select("#", ...), ... } end
 local function secret(v)
@@ -77,8 +77,8 @@ function Context.Encode(value)
 	return '{"status":"unavailable","reason":"inaccessible value"}'
 end
 local function db()
-	WoWAIDB = WoWAIDB or {}; WoWAIDB.settings = WoWAIDB.settings or {}
-	local settings = WoWAIDB.settings
+	WowieDB = WowieDB or {}; WowieDB.settings = WowieDB.settings or {}
+	local settings = WowieDB.settings
 	if settings.context == nil then settings.context = true end
 	settings.sharing = settings.sharing or {}
 	return settings
@@ -445,7 +445,7 @@ providers.spells = function()
 	return available({ skillLines = lines, player = player, pet = pet, petStatus = type(petCount) == "number" and "available" or "unavailable or no pet", includesFutureSpells = true })
 end
 providers.professions = function()
-	local lines = WoWAI and type(WoWAI.SkillLines) == "function" and call(WoWAI.SkillLines) or nil
+	local lines = Wowie and type(Wowie.SkillLines) == "function" and call(Wowie.SkillLines) or nil
 	if not lines then
 		lines = array()
 		local modern = exists("C_SkillInfo.GetNumSkillLines")

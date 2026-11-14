@@ -1,302 +1,227 @@
-# wow-ai
+# Wowie
+
+**An in-game AI chat assistant for World of Warcraft: Forever.**
+
+Ask questions about your character, items, spells, professions or quests without leaving the game. Wowie connects an addon chat window to an AI CLI on your computer, with checkboxes controlling which addon-readable information accompanies your questions.
+
+> **A chat companion, not an autopilot.** Wowie is intended for conversation, explanations and read-only character context—not botting, unattended play or gaining an unfair advantage. You remain in control of your character and every gameplay action.
+
+Wowie is an independently maintained fork with its own interface and workflow. It builds on the original project's chat and bridge foundation; see [Credits](#credits) for attribution.
+
+## Interface
 
 <p align="center">
-  <img src="docs/screenshot.jpg" alt="The WoW AI chat window open in Goldshire, with a message on its way to a coding agent" width="900">
+  <img src="docs/screenshots/wowie-chat.png" alt="Wowie chat window with conversations, agent, model and reasoning selectors, and Sharing, Navigation and Settings controls" width="1000">
 </p>
 
-Chat with your local coding agents from inside **World of Warcraft: Forever**: [Claude Code](https://claude.com/claude-code), [OpenAI Codex](https://developers.openai.com/codex), [xAI's Grok Build](https://docs.x.ai/build/overview), Google's Antigravity CLI and Hermes Agent. Send a task, go back to questing, get pinged in-game when the answer lands. No alt-tabbing, no `/reload` per message.
+*Local folder path blurred.*
 
-- Multiple chats, each its own persistent agent session (like separate terminals), running in parallel. Each chat picks its agent, model, reasoning effort and folder
-- Live progress while the agent works: action count, elapsed time, the files it's editing and commands it's running
-- Replies echoed into the game chat; `/r` replies to the agent when it was the last to message you
-- Choose what the AI knows through searchable Sharing checkboxes: gear, bags, spells, skills, quests and other addon-readable information, with opt-in native API queries
-- The agent can mark your world map and track destinations on your map/minimap, with dotted routes through ShortestPathForever when enabled
-- Herb and ore spawns on the world map, filtered by your gathering skill (`/wow-ai map ore`, `/wow-ai map herb`)
-- Ready-made macros: ask for one and the reply carries a **Create macro** button that saves it and puts it on your cursor, ready to drop on an action bar (`/wow-ai macro undo` reverts it)
-- An **Allow & retry** button when Claude or Grok needs a command outside your allowlist
-- A status light for the bridge, automatic retries, and recovery of your chats (and map layers) if the beta client wipes addon data
-- Runs on Windows, on Linux with the game under Wine, and on macOS with a native client
+## Purpose and boundaries
 
-Nothing here injects code, reads game memory, or generates input. The addon uses documented addon APIs only; the companion reads your screen and writes ordinary files.
+**The assistant reads character information; it does not control your character.** The addon's information-query channel exposes permission-gated data readers, not arbitrary Lua execution or gameplay commands.
 
-## How it works, in one paragraph
+- **No automated gameplay:** the addon does not move your character, cast spells, execute combat rotations, gather resources, trade or complete quests for you.
+- **No injected game code or game-memory inspection:** communication uses addon-visible pixels and ordinary addon files, not a process hook or generated keyboard/mouse input.
+- **No privileged game knowledge:** queries are limited to what the client's addon APIs and permitted addon data expose. Restricted, unavailable and unsupported values are reported as such.
+- **Visible UI conveniences, not character control:** map annotations and waypoint tracking update your map UI. Optional macro buttons save a draft only when you click them; Wowie does not execute the macro.
 
-WoW addons are sandboxed: no general-purpose network or file I/O. **Out:** the addon draws a checked pixel strip in the top-left corner; the bridge captures it at a default 50 ms interval, decodes it, and runs the chat's agent headless in its folder. Uploads negotiate up to 10 frames/s. Robust uses 4-pixel endpoint colors; Compact uses 2-pixel cells. Quiet uses dark colors and verifies whether 2- or 4-pixel cells are reliable on the current display. **In:** the bridge writes replies to 200 pre-made load-on-demand slot addons, and the game loads a fresh one on a readiness hint or bounded schedule. Cheap empty-versus-valid WAV checks provide notifications, not connection authentication. Map layers travel inside the same slot snapshots. Details: [architecture](docs/ARCHITECTURE.md) and [map](docs/MAP.md).
+Local AI CLIs have their own computer-side permissions, separate from character sharing; see [Agent permissions](#agent-permissions). The read-only information channel is not a sandbox for those tools.
 
-## Curseforge
-Official curseforge addon page: https://www.curseforge.com/wow/addons/ai-agents-chat
+This intended use is not a guarantee that a particular server permits external AI tools. Wowie is unofficial and makes no claim of server approval or ban immunity.
 
-## Agents
+## The Wowie experience
 
-The bridge drives whichever of these you have installed; each chat can use a different one.
+- **Chat-first workspace:** a black-and-gold interface, searchable conversations, a large discussion area, directly selectable replies and persistent per-chat drafts.
+- **Agent, model and reasoning controls:** choose them in the discussion header, or save addon-wide defaults in **Settings**. Each conversation keeps its own session and overrides.
+- **Explicit character sharing:** searchable checkboxes for gear, bags, spellbooks, professions, talents, quests and other available information. Private/social and advanced scopes are opt-in.
+- **Integrated navigation:** search saved destinations, add or delete points, show them on the map and manage route stops from **Navigation**, without typing layer names.
+- **Bridge verification and recovery:** fresh round-trip checks, delivery acknowledgements, persistent transcripts and clearer idle/error states.
+- **Less intrusive transport options:** **Robust**, **Compact** and **Quiet** pixel displays, with calibration before a smaller or dark display is enabled.
 
-| Agent | CLI the bridge runs | Permissions | Allow & retry |
-|---|---|---|---|
-| **Claude Code** (`claude`) | `claude -p --output-format stream-json`, resumed with `--resume` | `permissionMode` + `allowedTools` rules | yes |
-| **Codex** (`codex`) | `codex exec --json`, resumed with `codex exec resume` | a sandbox chosen from `permissionMode` (read-only, workspace-write, or none) | no: a command the sandbox declined is reported in the reply |
-| **Grok Build** (`grok`) | `grok --prompt-file … --output-format streaming-json`, resumed with `-r` | `permissionMode` + the same `allowedTools` rules, translated to Grok's globs | yes, when Grok reports a refused tool |
-| **Antigravity** (`agy`) | `agy -p=<prompt> --output-format stream-json`, resumed with `--conversation` | Antigravity permission switches | no |
-| **Hermes** (`hermes`) | `hermes chat --query-file -`, resumed with `--resume` | default only; the bridge never uses `--yolo` | no |
+Supported agents are **Claude Code**, **OpenAI Codex**, **Grok Build**, **Antigravity CLI** and **Hermes Agent**. Model and reasoning options depend on the selected CLI and its capabilities. Installation, authentication and provider-specific limits are documented in [Agents](docs/AGENTS.md).
 
-`agent` in `bridge/config.json` is the default (`claude`). Use the **Agent** selector in the discussion header to switch the current chat, or `/wow-ai agent codex` / **Agent...** in its conversation menu. **Model** and **Reasoning** beside it configure the next message. Reply bubbles and game-chat echo identify whoever answered. Changing agent starts a fresh session while keeping the transcript. Install notes, CLI switches and limits are in [docs/AGENTS.md](docs/AGENTS.md).
+## Getting started
 
-## Requirements
+### Requirements
 
-- Windows (NTFS), or Linux with the game using Wine/Proton's X11 backend on **X11 or Xwayland** and python3 (see [docs/INSTALL-LINUX.md](docs/INSTALL-LINUX.md)), or macOS with a native client and python3
-- World of Warcraft: Forever (tested on 1.60.1.69913 and 1.60.1.69977, TOC 16001), **windowed or borderless** (exclusive fullscreen blocks screen capture)
-- [Node.js](https://nodejs.org) 22.2 or newer
-- At least one agent CLI, installed and logged in:
-  - [Claude Code](https://claude.com/claude-code): `claude --version` works
-  - [Codex](https://developers.openai.com/codex): `npm install -g @openai/codex`, then `codex` once to log in
-  - [Grok Build](https://docs.x.ai/build/overview): `irm https://x.ai/cli/install.ps1 | iex`, then `grok login`
-  - Antigravity (`agy`): install Google's Antigravity CLI, then run `agy` once to log in
-  - Hermes Agent (`hermes`): install it, then run `hermes setup` once
+- **World of Warcraft: Forever**, windowed or borderless. Tested builds include 1.60.1.69913 and 1.60.1.69977, TOC 16001; compatibility with other clients is not implied.
+- **Node.js 22.2 or newer**.
+- At least one supported AI CLI, installed and authenticated on the bridge computer. Its normal provider/account requirements still apply.
+- A supported capture environment:
+  - **Windows:** NTFS.
+  - **Linux:** Python 3 and Wine/Proton using **X11 or Xwayland**. Native Wine Wayland windows are not supported by the X11 capture helper.
+  - **macOS:** Python 3 and a native game client, with Automation and Screen Recording permission for the terminal running the bridge.
 
-## Install
+The bridge runs locally; the selected AI CLI may send prompts to an external provider. “Local bridge” does not mean “local model.”
 
-### Windows
+### Install and launch
 
-Step-by-step for a fresh machine, with troubleshooting: [docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md). The short version:
+1. **Fully quit WoW before running setup.** This is especially important when migrating an existing installation so the client can save its latest data.
+2. Clone this repository and install the addon:
 
-```powershell
-git clone https://github.com/chelinho139/wow-ai
-cd wow-ai
-node setup.js --project "C:\path\to\the\project\you\want\to\work\on"
-```
+   ```sh
+   git clone https://github.com/ligmaSec/wowie
+   cd wowie
+   node setup.js --project "<folder for the AI CLI to work in>"
+   ```
 
-`setup.js` finds the client (pass `--wow "<client folder>"` if it can't), copies the addon into `Interface\AddOns\WoWAI`, writes `bridge/config.json`, reports which agent CLIs it found, and generates the slot pool and signal files (≈15,000 tiny files; that's normal — the client only discovers addon files at launch, so they have to exist up front).
+   Setup finds the client automatically where possible. If necessary, add `--wow "<client folder>"`, pointing at the folder containing `Interface` and `WTF`, such as `_forever_`.
 
-Then **fully quit and relaunch WoW**, enable *WoW AI* on the AddOns screen, and start the bridge:
+   The installer copies **Wowie**, writes `bridge/config.json` and generates its load-on-demand reply slots and signal files. Thousands of tiny generated files are expected: the client must discover them at launch.
 
-```
-npm start               # in the current terminal (or: bridge\start.ps1)
-bridge\start-window.cmd # double-click version: opens its own window
-```
+3. Launch WoW and enable **Wowie** and its generated slot addons at character selection.
+4. Start the bridge from the repository:
 
-It restarts itself if it ever crashes. Ctrl+C (or closing the window) stops it. The banner lists every agent with where its executable was found, or what to install.
+   ```sh
+   npm start
+   ```
 
-### Linux (Wine)
+   Keep that terminal open while using Wowie. The supervisor restarts a crashed bridge; **Ctrl+C** stops it. Windows also has `bridge\start.ps1` and `bridge\start-window.cmd`.
 
-Details and capture troubleshooting: [docs/INSTALL-LINUX.md](docs/INSTALL-LINUX.md). The short version:
+5. Open **`/wowie`**, choose your agent, review **Sharing**, then send a question. **Reconnect** checks the bridge without asking the AI anything.
 
-```bash
-git clone https://github.com/chelinho139/wow-ai
-cd wow-ai
-node setup.js --project ~/path/to/the/project   # finds the client in $WINEPREFIX, ~/.wine...; or pass --wow "<client folder>"
-npm start
-```
+Platform walkthroughs: [Windows](docs/INSTALL-WINDOWS.md) · [Linux / Wine / Proton](docs/INSTALL-LINUX.md). On macOS, setup checks `/Applications/World of Warcraft` and `~/Applications/World of Warcraft`; grant the requested capture permissions on first use.
 
-The bridge captures the game window through X11/Xwayland (`bridge/capture_x11.py`, no packages needed), including clients launched through Proton runtimes such as Steam, umu-launcher and Faugus, and writes the slot files straight into the Wine prefix. Check the capture once: send any message from the game and, while the strip of colored squares is in the top-left corner, run `npm run probe` in a second terminal. It saves what the capture sees to `bridge/probe.png` and says whether it decoded the strip.
+The `--project` folder is the AI CLI's working directory, not an extra source of in-game character data. Choose it with the CLI's host permissions in mind.
 
-### macOS (native client)
+### Updating or migrating an existing installation
 
-Same commands as Linux: `node setup.js --project <dir>` (it looks for the client under `/Applications/World of Warcraft` and `~/Applications/World of Warcraft`; pass `--wow "<client folder>"` otherwise), then `npm start`. The bridge captures the game window with `bridge/capture_mac.py`, which needs only python3: it finds the window through System Events and grabs its top-left corner with the built-in `screencapture`. The first run asks for two permissions in System Settings, **Automation** (System Events) and **Screen Recording**, for the terminal the bridge runs in. `npm run probe:mac` saves what the capture sees to `bridge/probe.png` and says whether it decoded the strip.
+Let active agent jobs finish, stop the bridge, and **fully quit WoW**. Update this checkout, then run:
 
-### Moving from the beta to the Forever release
-
-The release client lives in `_forever_` and its exe is `Wow.exe` (the beta's were `_classic_beta_` and `WowB.exe`). An install from the beta needs one step:
-
-```
-git pull
+```sh
 node setup.js
 ```
 
-It moves `bridge/config.json` to `_forever_` (the paths and the process name; your other settings stay) and installs the addon and its slots there. It works before your first login, so you can do it ahead of launch. The beta folder is left alone.
+The installer carries forward account data, chats, settings, pending request identities, local map edits, generated sounds, addon-enable choices and hotkey targets. Existing Wowie data is not overwritten; previous saved files and cache backups are retained for recovery. Obsolete addon/slot folders are removed only after installation succeeds.
 
-Then fully quit and relaunch the game, and enable "WoW AI" at the character select AddOns screen. Your chats come back from the bridge's `transcripts.json` the first time the addon talks to it.
+Relaunch the game and start the bridge again. **`/reload` cannot discover renamed or newly added addon files.** For later Lua-only updates, deploy the files and use `/reload`; restart the bridge after bridge changes when it is idle.
 
-### Upgrading from wow-claude
+If you used a previous global launcher, unlink that command and run `npm link` from this repository. The current launcher is **`wowie`**; `wowie --project <folder>` selects a working folder explicitly. Otherwise, `wowie` uses the folder it is launched from, while `npm start` in this repository falls back to the configured `defaultCwd`. Run only one bridge at a time.
 
-This project used to be called wow-claude, with a `WoWClaude` addon and a `/wow-claude` command. `git pull` (or clone the new name) and run `node setup.js` again: it copies your chats and settings from the old addon's saved data, removes the old `WoWClaude` addon and its slot folders so the two don't fight over `/ai` and `/r`, and rewrites the paths and the Claude settings in `bridge/config.json` into the new layout. Then quit and relaunch WoW. If you had installed the command, run `npm unlink -g wow-claude` and `npm link` again, and re-do `/wow-ai bind <key>` if you had a hotkey. Your agent sessions carry on: the bridge keeps them per chat.
+## Using Wowie
 
-### `wow-ai`: start it from the project folder
+Open `/wowie` and use **New chat** in the Conversations sidebar. Each chat has a persistent agent session, transcript, working folder and draft. Its **...** menu provides rename, copy, folder, fresh-session, clear and delete actions.
 
-Like the agent CLIs themselves, the bridge works in the folder you start it from. Install the command once:
+- **Agent / Model / Reasoning** apply to the next message. Changing agents starts a fresh agent session while keeping the transcript. Pending requests retain the settings they were sent with.
+- **Settings** saves addon-wide defaults without editing the bridge configuration. Selection precedence is **per-chat choice → addon default for that agent → bridge config → CLI default**.
+- **Enter** sends; **Shift+Enter** inserts a newline. Drag-select reply text and press **Ctrl+C** to copy it directly. **Esc** releases text focus without discarding your draft.
+- **Shift-click** an item, spell, quest or chat link into the composer to include its name and tooltip in your question.
+- **Cancel wait** stops local waiting, not the external AI process. **Check reply** retrieves an outstanding reply without consuming your next-message draft.
 
-```powershell
-npm link          # in the wow-ai folder; makes `wow-ai` available everywhere
-```
+The full answer stays in the discussion window. Game-chat echo defaults to a short `TL;DR` with an **open** link; `/wowie echo full` changes that.
 
-Then, from any project:
+### Map annotations and navigation
 
-```powershell
-cd C:\path\to\realms
-wow-ai
-```
+Ask for a location or route, then manage its points through **Navigation**:
 
-Every chat that hasn't picked its own folder now works in `realms`, and the workspace header shows it. `wow-ai --project <dir>` names the folder explicitly; `npm start` inside this repo falls back to `defaultCwd` in the config. Only one bridge can run at a time (two would fight over the screen and the slot files), so this sets the default folder rather than giving you one bridge per project.
+- **Navigate**, **Start route**, **Previous**, **Next**, **Stop** and **Show on map** control guidance.
+- **Add point** saves your current position, a world-map pin or entered coordinates to **My places** or an existing route.
+- **Delete** asks for confirmation; local edits persist through reloads and bridge refreshes.
 
-## Use
+Guidance uses native map/minimap waypoint tracking. With **ShortestPathForever** enabled, its routing API can provide terrain-aware dotted paths. These are directions for you to follow, not automatic movement.
 
-In game, `/wow-ai` opens the workspace. **Reconnect** is always visible beside the small **...** recovery menu, even after a successful check. Each new Reconnect sends a fresh challenge; only its matching fresh bridge acknowledgement confirms the round trip. Send/**Check reply** remains available and automatically verifies first when needed. A failed check preserves the draft and re-enables Reconnect.
+Optional **`Wowie_Nodes`** data provides known herb/ore spawn coordinates filtered by gathering skill. Neither those static points nor an AI-generated map mark proves that a resource is currently present. AI-supplied locations can be wrong.
 
-The addon has no persistent socket. Its badge says **Verified … ago**, **Idle / not verified**, **Checking bridge...**, or **Bridge not responding**, rather than claiming a durable connection. Verification expires after 90 seconds; this does not mean a quiet bridge is necessarily stopped. Sending after idle verifies again automatically, without restarting the bridge. Cached sound flags, old acknowledgements and fresh heartbeat clocks alone cannot complete a new check. The separate **200-slot per UI session limit** can still require `/reload`; restarting Node does not free those slots. Update both bridge and addon for `connectionProtocol = 1`.
+See [Map and navigation](docs/MAP.md) for data sources, layers and optional command shortcuts.
 
-The **Conversations** sidebar is searchable and scrollable. Click **New chat**, choose a conversation, or open its visible **...** menu (right-click also works) for rename, working folder, agent, copy, clear transcript, fresh agent session and delete actions. Destructive menu actions ask for confirmation. Each chat retains its own project, agent choices, transcript and multiline draft.
+### Macro drafts
 
-The compact **Agent**, **Model** and **Reasoning** selectors in the discussion header configure the **next message** in this chat. Pickers are searchable, include inherited values, and still offer a custom model ID. Model choices include configured IDs, Claude aliases, and live Codex/Antigravity catalogs; unsupported reasoning controls are disabled. Changing agent clears its model/effort overrides. Already-pending requests and resends keep their original settings.
+An answer can include a **Create macro** or **Update macro** button. Clicking it saves the proposed macro and puts it on your cursor for manual placement. Replacing a different existing macro, or saving one containing `/run`, `/script` or `/click`, asks for confirmation.
 
-The discussion takes most of the window, with a compact multiline composer below it. **Enter** sends, **Shift+Enter** inserts a newline, and **Esc** releases keyboard focus without discarding a draft. One bottom action row separates Reconnect/recovery, status, **Cancel wait**, and Send/**Check reply**. Checking a reply keeps the next-message draft; cancel stops local waiting, not the external agent. Reading older messages does not snap to the bottom; **Latest** in the header returns to the newest reply without covering discussion text. The minimized bar retains its **Open** button and unread/working state.
+No macro is saved in combat, and Wowie never runs it. Execution remains a normal player action through the game's macro system. `/wowie macro undo` restores the previous macro or removes one the button created.
 
-Click **Settings** for addon-wide agent/model/reasoning defaults, then **Save**. **Cancel** discards edits; **Use bridge defaults**, then Save, removes addon overrides. These choices survive `/reload` and logout in `WoWAIDB`, without editing `bridge/config.json`. Precedence remains **per-chat choice → addon default for the same agent → bridge config → CLI default**. Clearing a model/effort override starts a fresh session when necessary so a resumed CLI cannot retain it. This redesign changes only wow-ai's own windows; WoW's game UI, maps and other addons are unchanged.
+### Useful commands
 
-**Settings → Pixel display** offers **Robust**, **Compact** and **Quiet**. Compact uses one-quarter the pixel area where the display can preserve 2-pixel cells. Quiet uses opaque dark colors; if filtering corrupts its 2-pixel grid, it verifies a 4-pixel dark grid instead of immediately returning to bright primaries. **Save** checks a full-size native frame before enabling a candidate; failure keeps Robust and shows the reason. The preferred mode and last verified geometry survive reloads, but connection or display changes still require fresh proof. Update bridge and addon together; restart the bridge when idle and `/reload` the addon. No new addon files are needed.
+Most controls are available in the UI; commands are optional shortcuts.
 
-| Command | What it does |
+| Command | Purpose |
 |---|---|
-| `/wow-ai` | toggle the window (`/ai`, `/wowai` and the old `/wow-claude` are the same command); the minimize button (top right) or Esc collapses it to a small bar, click the bar to expand |
-| `/ai <text>` | send from the normal chat box (`/wow-ai <text>` is the same). `/ai` is a full alias, so `/ai agent grok` or `/ai cd realms` work too; a message that merely starts with a command word, like `/ai help me with this macro` or `/ai delete the unused imports`, is still sent as a message because the rest of the line doesn't fit that command |
-| `/r <text>` | replies to the agent when it was the last to message you; otherwise the normal whisper reply |
-| `/wow-ai new [name]` | new chat = new agent session. Unnamed chats take their title from your first message |
-| `/wow-ai chat <n\|name>` | switch chats (or choose one in Conversations; its **...** menu exposes chat actions) |
-| `/wow-ai agent [claude\|codex\|grok\|agy\|hermes]` | which agent this chat talks to; no name shows the current one, `default` uses the saved addon default (or the bridge's when unset). Changing agent starts a fresh session |
-| `/wow-ai cd <folder>` | folder this chat's agent works in (**Folder...** after right-clicking the chat opens the same thing as a dialog). Relative to the bridge's folder (`/wow-ai cd realms`, `/wow-ai cd ../other`), `~` works, a full path too; `/wow-ai cd` alone goes back to the bridge's default. A chat that changes folder starts a fresh session there |
-| `/wow-ai reset` | wipe this chat's agent memory, keep the transcript |
-| `/wow-ai context [on\|off]` | show the selected short summary or pause/resume sharing; **Sharing...** controls individual information categories |
-| `/wow-ai rename`, `/wow-ai delete`, `/wow-ai clear` | manage the current chat |
-| `/wow-ai echo summary\|full\|short\|off\|<chars>` | how much of each reply to print into the game chat. `summary` (the default) prints only the agent's closing TL;DR lines, the full reply is in the window behind `[open]`; `full` prints up to 4000 chars, `short` one preview line |
-| `/wow-ai longchat on` | let the game chat box take 4000 characters, for long `/ai` messages |
-| `/wow-ai bind <key>` | hotkey: checks for a reply while waiting, otherwise toggles the window |
-| `/wow-ai cancel` | stop waiting on this chat's reply |
-| `/wow-ai resend` | show the strip again if the bridge missed it |
-| `/wow-ai reload` | reload the UI now (also frees the slot pool) |
-| `/wow-ai mode reload` | fallback transport that costs a `/reload` per step, if pixels or slots can't work |
-| `/wow-ai diag`, `/wow-ai slots` | transport diagnostics |
-| `/wow-ai help` | the full list |
+| `/wowie` | Open or collapse the workspace; `/ai` and `/ask` are aliases |
+| `/wowie <text>` | Send a question from the normal chat box |
+| `/wowie new [name]` | Start a separate conversation |
+| `/wowie agent <id>` | Select `claude`, `codex`, `grok`, `agy` or `hermes` |
+| `/wowie cd <folder>` | Change the current chat's AI working folder |
+| `/wowie context [on\|off]` | Show the selected summary or resume/pause character sharing |
+| `/wowie copy` | Open the whole-reply copy box |
+| `/wowie diag`, `/wowie slots` | Inspect transport and reply-slot status |
+| `/wowie help` | Show the full command list |
 
-Drag-select text directly inside a message and press **Ctrl+C**; no copy dialog is required. Message text is read-only, retains literal text/indentation, and stays selected across unchanged redraws. **Esc** releases message focus. Optional **Copy latest reply** in the chat menu and `/wow-ai copy` still open the separate whole-reply copy box. Drag the window by its header, not by discussion text.
+## Sharing and privacy
 
-### Short in the chat, full in the window
+Open **Sharing** to choose the information the AI receives. Character snapshots accompany questions; additional queries are checked against the **current** permissions before the addon reads them.
 
-Every run tells the agent that only a short summary of its reply is printed in the game chat, and asks it to end each reply with a `TL;DR:` block of one or two lines. The bridge splits that block off and the addon prints just those lines under `[Claude · chat]`, with the `[open]` link to the whole reply in the window (the window keeps the full text, TL;DR included). When an agent forgets the block, the first two lines of the reply are printed instead, with a hint to open the rest. `/wow-ai echo full` goes back to printing the whole reply.
+- Common character categories such as identity, location, equipment, inventory, spells, skills, talents and quests are enabled by default.
+- Bank, mail, chat history, guild, friends/Battle.net, party/raid, target/focus, UI, addon/global tables and advanced API scopes are off by default.
+- **Sensitive** means private or broad data access, not permission to automate gameplay. Broad API/UI/addon scopes can overlap other categories; read their descriptions before enabling them.
+- Bank and mailbox information depends on the relevant window being open. **Mail message bodies require separate consent because the client's read API marks those messages as read.** This is an explicit side-effect exception, not a zero-write guarantee.
+- **Sharing on / paused** preserves your choices while pausing snapshot/query access. It cannot recall information already sent. Links you manually include in a message still share their tooltip.
 
-### Choose what the AI knows
+Prompts and permitted character data can reach the selected AI provider. Chat history and bridge state are also persisted locally for recovery. Do not treat the Sharing panel as an anonymity mechanism or a way to remove data from a provider after delivery.
 
-Click **Sharing** in the workspace header. **Character**, **Private / Social**, **Advanced API** and **Selected** views organize the 26 built-in categories and native API scopes discovered from your client; search filters the current view. Checkmarks and counts update immediately, and large catalogs reuse only visible rows. The master **Sharing on / paused** control pauses access without erasing your editable choices. **Common defaults** restores conservative choices; **Clear choices** removes every selected scope, including saved API scopes that are not currently available. Permissions save immediately—there is no separate Save action.
+Only approved native data getters and permitted raw data are exposed through character queries. Arbitrary Lua, setters, mail sending/deletion and protected gameplay commands are not query operations. Closed-window, secret or restricted values are returned as unavailable.
 
-| Information | Default | Availability |
-|---|---|---|
-| Identity, location, money, gear, carried items, player/pet spellbooks, professions/skills, talents and quests | On | Fresh snapshot with each question; uncached item details and unsupported APIs are explicit |
-| Reputation, auras, pet state, combat stats, currencies, achievements and collections | Off | Where the client exposes them |
-| Target/focus, party/raid, bank, mail, chat, guild, friends/Battle.net, UI and addon/global tables | Off | Sensitive/broad scopes; bank and mail require their windows open |
-| Mail message bodies | Off | Separate explicit consent: reading loaded messages marks them as read |
-| Advanced `api:<namespace>` scopes | Off | Permission-gated documented getters, queried only when the AI needs more data |
+### Agent permissions
 
-Checked snapshot data accompanies your message and can reach the selected AI provider. The agent can request additional read-only data, and the addon checks the **current** permissions before reading it. Broad API/UI/addon permissions can overlap snapshot categories; their descriptions explain this. These controls govern the addon information channel, not the coding agent's separate host-file/tool permissions. No arbitrary Lua, setters, sending/deleting mail, movement or protected gameplay actions are exposed through addon queries. Closed-window, restricted, secret and unsupported values are reported as unavailable rather than guessed.
+The external AI CLIs are general-purpose tools. Depending on their own configuration, they can read or edit files and run commands in their working folder. **Character-sharing checkboxes do not restrict those host tools.**
 
-Large snapshots cross multiple pixel frames instead of being clipped to the short character summary. Native zlib plus base64 and 3,000-character fragments preserve all selected information; clients without compression use plain base64. Fresh bridge capabilities negotiate frame pacing, normally 100 ms, with backoff for stalled receipt. Readiness notifications acknowledge complete queued/working requests promptly so the canvas need not keep flashing while the AI thinks. Short summaries reuse the same captured values rather than reading providers twice. API results support explicit pagination and nested paths.
+Review `agents.<id>` in `bridge/config.json`, including the permission mode, tool rules and provider-specific sandbox options. Use a CLI's read-only/planning mode where supported if you want host-side work to be read-only too; the default configuration must not be assumed to enforce that.
 
-More snapshot categories still increase the AI's prompt size and processing time: transport compression does not reduce model tokens. For lower latency, choose a lower **Reasoning** setting or a faster **Model** in the UI. Snapshots over 4 MiB require fewer snapshot categories or paginated queries. **Changes affect future snapshots and current queries; already-sent information cannot be recalled.** Manually shift-clicked links still share their tooltip as part of your explicit message.
+For Claude and Grok, **Allow & retry** can permanently add displayed tool rules to the configuration. That is computer-side authorization, not a gameplay permission. See [Agents](docs/AGENTS.md) and [Configuration](docs/CONFIGURATION.md) for the exact behavior of each CLI.
 
-`/wow-ai context` shows the short selected summary; `/wow-ai context off` pauses snapshot/query sharing, and `gameContext: false` disables it at the bridge. The pixel path needs no reload per query. The reload fallback stores pending snapshots/results in SavedVariables and uses its normal hardware-event reload cycle.
+## How communication works
 
-Update both bridge and addon together. A first install of the Sharing panel needs a **full WoW restart**, because it adds Lua files; later Lua-only updates need a bridge restart and `/reload`. Requests carry immutable identities so a rolled-back saved counter cannot silently discard a new question. Pending pre-nonce questions migrate automatically on reload, preserving their original data and selections; do not retype them just to resume the transfer.
+WoW addons cannot open a normal network connection or freely write files. Wowie uses two channels:
 
-Along with it, every run gets [docs/WOW-ADDON-PRIMER.md](docs/WOW-ADDON-PRIMER.md): a short reference on writing addons and macros for this client (TOC layout, sandbox rules, common frames and events, where to verify an API), so "write me an addon that..." works from any folder, not just this repo. Edit the file to suit your setup; the bridge re-reads it on every run. `"primerFile": ""` in the config drops it, and `/wow-ai context off` turns it off together with the character context.
+1. **Out of the game:** the addon encodes requests in a checked pixel strip. The bridge captures and decodes that strip, then runs the selected CLI.
+2. **Into the game:** the bridge writes ordinary files in pre-created load-on-demand slot addons. WoW loads a fresh slot to receive replies, progress, context queries and map annotations.
 
-### Link items, spells and quests
+Sound-file readiness checks are notification hints, not proof of a live connection. **Reconnect** requires a fresh matching challenge/acknowledgement round trip. The UI reports verification age rather than pretending there is a persistent socket.
 
-Click the input box, then **shift-click** an item in your bags, a spell in the spellbook, a quest in the log, or a link in the chat: it lands in your message the way it would in the game chat. When you send, each link becomes `[Name]` in the text and its tooltip (an item's stats, a spell's description) is attached below, so the agent sees what you see when hovering it. This works from the game chat box too (`/ai is this an upgrade? [Fine Longsword]`). Without a box focused, shift-click keeps its normal meaning.
+Under **Settings → Pixel display**, Compact uses smaller cells where the display supports them. Quiet uses dark colors and verifies whether a smaller or larger dark grid is reliable. Failed calibration keeps the robust display. These options reduce visual intrusion; they do not change the assistant's permissions.
 
-### Macros, ready to use
+Normal pixel-mode exchanges do not require a reload per message. The reply pool is still finite: **200 slots per UI session**, freed by `/reload`, not by restarting Node. A reload-based fallback exists for setups where capture is unavailable.
 
-Ask for a macro (*"a Charge macro that uses Intercept in combat"*, *"a mouseover heal"*) and the reply comes with a **Create macro: <name>** button under it. A click saves it (an account macro, or a character one if the agent says so) and puts it on your cursor: click an action bar slot to place it. It is also in `/macro` as usual.
-
-- A macro with that name already there? The button says **Update**, and it asks before replacing a different one of yours. `/wow-ai macro undo` brings back what was there (or removes the macro the button created).
-- Macros that run code (`/run`, `/script`, `/click`) are marked on the button and ask before being saved.
-- Nothing is saved in combat, and the addon never runs a macro: only your own click on the bar does.
-
-The agent writes each macro in a ```` ```wowmacro <Name> ```` block (optional `icon=` and `scope=character` after the name); the bridge checks the game's limits (name up to 16 characters, text up to 255 bytes) and keeps a readable copy in the reply. The buttons live with the message in the addon's saved data, so they don't come back after the beta wipes it (the macro text does).
-
-### Map, routes and gathering nodes
-
-The agent can draw on your world map. Ask *"route me through copper and tin around here"*, *"plan the quests I can do in Westfall"* or *"where is the nearest mining trainer?"*, and the answer arrives with:
-
-- **Navigation inside wow-ai:** use the header's **Navigation** button to search saved destinations, **Navigate** to a point or **Start route**. Choose any stop directly; **Previous**, **Next**, **Stop**, **Show on map** and visibility controls are built in. Saved destinations work offline without another agent request or typing a layer name.
-- **Manage saved points:** **Add point** saves your current position, a world-map pin or entered coordinates to **My places** or an existing route. **Delete** beside a point asks for confirmation. Local edits survive reloads and bridge refreshes; adding a point does not interrupt guidance.
-- **Layers on the world map:** numbered pins joined by lines for routes, and pins for quest givers, objectives, turn-ins, trainers, dungeon entrances or any mark. They show on the zone map and on the continent map; hover a pin for its label, click it to navigate there.
-- **Tracked destinations:** the active stop goes to the game's map/minimap waypoint tracking, not a standalone compass. With ShortestPathForever enabled, its routing API draws your configured route dots and terrain-aware path; OpenMap follows the native waypoint. New/changed routes and single destinations activate without opening the map unless another route is active. Player-selected pins and quests keep priority when tracking is stopped or replaced.
-- **Herb and ore spawns:** with an optional `WoWAI_Nodes` data addon installed, every gathering spawn point of the zone you are looking at, filtered to what your skill can gather.
-
-The system prompt tells every agent how to hand marks to the bridge: append commands to the file named in `WOW_AI_MAP_FILE` (set for every run), or end the reply with a small ```` ```wowmap ```` block. The bridge validates the marks, keeps them in `state.json` and ships them to the game, so they survive a UI reload and the beta's saved-data wipes. Where the agent gets its coordinates from is up to the folder the chat works in: [docs/MAP.md](docs/MAP.md) describes the command format and how to feed it game data.
-
-Optional command shortcuts:
-
-| Command | What it does |
-|---|---|
-| `/wow-ai map` | list the layers, navigation and node settings |
-| `/wow-ai map ore [on\|off]`, `/wow-ai map herb [on\|off]` | show or hide mining / herbalism spawns on the world map |
-| `/wow-ai map filter all\|skill` | every spawn, or only what your skill can gather (default) |
-| `/wow-ai map hide <layer>`, `/wow-ai map show <layer>` | hide or show one of the agent's layers |
-| `/wow-ai map nav <layer> [n]`, `next`, `prev`, `stop` | track a destination or control the owned map route |
-
-`/aimap` is a shorter alias. To remove layers for good, ask the agent ("clear the map", "remove the mining route").
-
-### Permissions
-
-The agents run headless, so they can't ask you to approve a tool. Each agent's block in `bridge/config.json` has a `permissionMode`, `acceptEdits` by default: file edits inside the project are auto-approved, `allowedTools` lists the commands it may run (`Bash(git:*)` is any command starting with `git`; the same rule syntax for every agent, translated for Grok), and `deniedTools` the ones it never may. What happens to anything else differs. Claude denies it. Codex has no allowlist: it runs commands in a sandbox that can write the project folder but not reach the network (unless `networkAccess` is on), and explains a blocked command in its reply. Grok's headless mode runs ordinary commands on its own and blocks the dangerous ones (deleting a project file, pushing) unless a rule allows them. With Claude and Grok the reply then grows an **Allow WebSearch, Bash(cargo:*) & retry** button: click it, the rules are added to that agent's list in your config permanently, and the agent resumes where it stopped. The rule is a prefix (`Bash(rm:*)` allows any `rm`), so read the button before clicking. `bypassPermissions` gives any agent full autonomy; you decide. The mapping per agent, as measured against the real CLIs, is in [docs/AGENTS.md](docs/AGENTS.md).
-
-## Configuration (`bridge/config.json`)
-
-The keys you are most likely to touch. Every key, flag and environment variable is in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
-
-| Key | Meaning |
-|---|---|
-| `defaultCwd` | folder for chats that haven't been given one with `/wow-ai cd` |
-| `agent` | the agent for chats that haven't picked one with `/wow-ai agent` (`claude`, `codex`, `grok`, `agy` or `hermes`) |
-| `agents.<id>.permissionMode`, `.allowedTools`, `.deniedTools`, `.model` | that agent's permissions, allowlist, denylist and model; `.path` where its executable is if the bridge can't find it, `.extraArgs` anything else to pass it |
-| `agents.<id>.reasoning`, `.models` | default reasoning effort for Claude/Codex/Antigravity; optional model IDs to add to the in-game picker |
-| `agents.codex.networkAccess` | let Codex's sandbox reach the network (default `false`) |
-| `maxParallel` | how many chats may run an agent at once (default 3) |
-| `gameContext` | `false` never tells the agent about your character, whatever the addon sends (default `true`) |
-| `primerFile` | the addon/macro primer appended with the context (default `docs/WOW-ADDON-PRIMER.md`; `""` = none) |
-| `capture.processName` | the game exe without `.exe` (`Wow` for Forever); set by `setup.js` |
-| `capture.intervalMs` | capture period, default 50 ms; upload pacing adapts to explicit slower values |
-| `capture.keepComposited`, `capture.windowName` | Linux: keep the compositor drawing the game window (if the probe sees black), or find the window by title |
-| `slots`, `actMax`, `presenceMax` | pool sizes; must match the constants at the top of `WoWAI.lua` if you change them |
-| `timeoutMs` | kill a run that takes longer than this (default 30 min) |
+Protocol details and limitations: [Architecture](docs/ARCHITECTURE.md).
 
 ## Troubleshooting
 
-- **A check says "Bridge not responding"** — start the bridge when you intend to use it, then click the always-visible Reconnect. The game window must be capturable. Cached clocks/sounds cannot complete this fresh check; `bridge.log` shows decoded strips and rejected frames. A timeout does not send or discard the queued draft.
-- **The badge becomes "Idle / not verified"** — the last round trip is over 90 seconds old, not proof that Node stopped. Send automatically checks again; Reconnect is available at any time. The former long green fallback grace period is gone. If reply slots are exhausted, use `/reload`, not repeated Node restarts.
-- **Linux: `bridge.log` keeps saying `waiting for Wow window`** — the game isn't running or its window has another name: set `capture.processName` to the exe name, or `capture.windowName` to part of the window title. On Wayland, the game must use Wine/Proton's X11 backend (Xwayland); Wine's native Wayland windows cannot be captured.
-- **Linux: `npm run probe` shows a black or stale picture** — the compositor is letting the game present on its own. Try `"keepComposited": true` under `capture`, then windowed mode, then `nvidia-settings -a AllowFlipping=0` on NVIDIA; `/wow-ai mode reload` works without any capture.
-- **No herb/ore pins after `/wow-ai map ore`** — `/wow-ai map` says whether the `WoWAI_Nodes` data addon is installed; pins show on zone maps only, and with `filter skill` only what your skill can gather.
-- **The reply says "X is not installed on the bridge PC"** — the bridge's banner shows where it looked for each agent. Install the CLI, or put the full path of its executable in `agents.<id>.path` in `bridge/config.json` and restart the bridge.
-- **A reply says the agent is not logged in, or asks for a login** — run the CLI once by hand on the bridge PC (`claude`, `codex`, or `grok login`) and log in; the bridge reuses that.
-- **Reply never appears but `bridge.log` says `done`** — `/wow-ai slots`; if the pool is empty, `/wow-ai reload` frees it and picks the reply up via the fallback path.
-- **"Reply slots not installed"** — `node bridge/install-slots.js`, then restart WoW.
-- **Chats vanished after a reload** — the beta client sometimes wipes addon saved data. The bridge keeps `transcripts.json` and sends your chats back automatically on the next message.
-- **`/wow-ai diag` says the sound channel is unusable** — the cheap readiness checks and heartbeat are off; everything still works through slot polls, just with coarser progress. If it says a valid file reports as unplayable, WoW hasn't been restarted since the files were created.
+- **Bridge not responding:** start the bridge, ensure the game window is capturable, then click **Reconnect**. A failed check keeps your draft.
+- **Idle / not verified:** the previous verification expired; this is not proof that the bridge stopped. Sending checks again automatically.
+- **Replies stop after extended use:** inspect `/wowie slots`. If exhausted, `/reload` frees the pool.
+- **A question takes a long time:** more shared data means a larger prompt. Select fewer categories, a faster model or a lower reasoning level; compression does not reduce model tokens.
+- **Linux capture is black, stale or cannot find the game:** follow the [Linux capture guide](docs/INSTALL-LINUX.md). `npm run probe` captures a diagnostic image; avoid sharing it if it contains private information.
+- **New addon files or slots are missing:** run setup with the client closed, then fully relaunch—not just `/reload`.
+- **An agent is missing or not authenticated:** check the bridge banner and run that CLI manually once. See [Agents](docs/AGENTS.md).
+- **Saved chats disappeared:** the bridge keeps transcripts and can restore them on the next exchange. Preserve bridge data instead of deleting it as a connection fix.
 
 ## Documentation
 
-- [docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md): step-by-step install on a fresh machine, with troubleshooting
-- [docs/AGENTS.md](docs/AGENTS.md): each agent's install, how the bridge drives it, permissions per agent, limits, and how to add another
-- [docs/CONFIGURATION.md](docs/CONFIGURATION.md): every config key, command-line flag and environment variable
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how the pixel strip, slot pool and signal files work, and why
-- [docs/INSTALL-LINUX.md](docs/INSTALL-LINUX.md): Linux + Wine install, and how to check the screen capture
-- [docs/MAP.md](docs/MAP.md): map layers, tracked destinations and herb/ore nodes
-- [CONTRIBUTING.md](CONTRIBUTING.md): repo layout, running the tests, conventions
-- [CHANGELOG.md](CHANGELOG.md): release notes
+- [Windows installation](docs/INSTALL-WINDOWS.md)
+- [Linux / Wine / Proton installation](docs/INSTALL-LINUX.md)
+- [Agents, authentication and host permissions](docs/AGENTS.md)
+- [Configuration, flags and environment variables](docs/CONFIGURATION.md)
+- [Architecture and transport](docs/ARCHITECTURE.md)
+- [Map layers and navigation](docs/MAP.md)
+- [Addon and macro API primer](docs/WOW-ADDON-PRIMER.md)
+- [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
 
 ## Development
 
-```
+```sh
 npm install
-npm test          # everything except the live test; CI runs it on Windows (.github/workflows/test.yml), and it runs on Linux and macOS too
-npm run test:live # runs the bridge in a sandbox with a real agent call (add -- --agent codex or grok)
+npm test
 ```
 
-Layout: `addon/WoWAI` is the addon (`WoWAI.lua` the chat and transport, `Map.lua` the map layers, tracked destinations and nodes), `bridge/` the companion (`bridge.js` does I/O and processes, `protocol.js` is the pure part, `agents.js` knows how to launch and read each agent, `capture.ps1` / `capture_x11.py` the screen capture per platform), `docs/` the design and reference, `tests/` the checks (`map_test.js` and `map_addon_test.js` cover the map protocol and `Map.lua` in a Lua VM). After editing the addon, copy it into the game folder (`node setup.js` does that too) and `/reload`. What each test covers, and the conventions for changes, are in [CONTRIBUTING.md](CONTRIBUTING.md).
+Source lives in `addon/Wowie/` and `bridge/`; isolated checks live in `tests/`. The optional `npm run test:live` makes a real AI request and is not part of the normal suite. See [Contributing](CONTRIBUTING.md) for the repository layout and test conventions.
 
 ## Credits
 
-- [0xInuarashi's wow-forever-codex](https://github.com/0xinuarashi/wow-forever-codex) measured the client's file-loading rules on a live Forever build (files must exist at launch; a not-yet-loaded file is read fresh on first use) and pioneered the pixel-out channel for Codex, with a font-metrics return channel. This project uses the same rules with load-on-demand addons instead of fonts.
-- [Gethe/wow-ui-source](https://github.com/Gethe/wow-ui-source) — Blizzard's UI code, `forever` branch, used to verify every API this addon calls.
-- [Questie](https://github.com/Questie/Questie) and [QuestieDB](https://github.com/Questie/QuestieDB) documented how Forever's maps work (Classic uiMapIDs, re-projected zones), which the map layer relies on.
+- [chelinho139's original project](https://github.com/chelinho139/wow-ai) — the upstream foundation from which Wowie was forked.
+- [0xInuarashi's wow-forever-codex](https://github.com/0xinuarashi/wow-forever-codex) — investigation of Forever's file-loading behavior and the pixel-out channel.
+- [Gethe/wow-ui-source](https://github.com/Gethe/wow-ui-source) — client UI/API reference.
+- [Questie](https://github.com/Questie/Questie) and [QuestieDB](https://github.com/Questie/QuestieDB) — documentation of Forever's map behavior.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Original attribution and license notices are retained.

@@ -1,4 +1,4 @@
--- WoWAI: talk to local coding agents (Claude Code, Codex, Grok) from inside WoW,
+-- Wowie: talk to local coding agents (Claude Code, Codex, Grok) from inside WoW,
 -- without reloading.
 --
 -- The WoW sandbox has no network and no file reads at runtime. Two doors remain open:
@@ -8,7 +8,7 @@
 --        bridge.js screen-captures that corner and decodes it. Nothing touches the game.
 --   IN:  load-on-demand addons read their files from disk at the moment they load.
 --        The bridge writes the latest replies for every chat into a pool of pre-made
---        slot addons (WoWAI_S001..S200); we load a fresh slot from a timer.
+--        slot addons (Wowie_S001..S200); we load a fresh slot from a timer.
 --        Each slot is single-use per session; a /reload frees them all.
 --   Fallback ("reload" mode): SavedVariables + Inbox.lua, a ReloadUI() per step.
 --
@@ -17,9 +17,9 @@
 -- Everything here is plain addon API. No automation, no memory reading.
 
 local ADDON_NAME = ...
-local WoWAI = {}
-_G.WoWAI = WoWAI
-local Codec = WoWAI_Codec
+local Wowie = {}
+_G.Wowie = Wowie
+local Codec = Wowie_Codec
 local unpack = unpack or table.unpack
 
 local DEFAULT_CWD = "" -- empty = the bridge's configured defaultCwd
@@ -27,7 +27,7 @@ local MAX_HISTORY = 200
 local MAX_CHATS = 16
 
 local SLOT_COUNT = 200
-local SLOT_PREFIX = "WoWAI_S"
+local SLOT_PREFIX = "Wowie_S"
 local ACT_MAX = 60 -- heartbeat files per message (act/NNN/01..60.wav)
 local PRESENCE_MAX = 2000 -- presence/0001..2000.wav, one flipped by the bridge every 30 s
 local STRIP_TRIES = 3 -- re-show an unacknowledged message this many times before falling back
@@ -51,13 +51,19 @@ local run = { outbound = {} }
 local tx = { active = "robust", interval = 0.5, reason = "" }
 
 local UI = {}
-WoWAI.UI = UI
+Wowie.UI = UI
+UI.font = ChatFontNormal:GetFont()
+UI.titleFont = STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
 UI.colors = {
-	background = { 0.055, 0.067, 0.086, 1 }, surface = { 0.08, 0.095, 0.12, 1 },
-	raised = { 0.11, 0.13, 0.16, 1 }, border = { 0.19, 0.23, 0.29, 1 },
-	text = { 0.91, 0.94, 0.98, 1 }, muted = { 0.58, 0.65, 0.74, 1 },
-	accent = { 0.30, 0.66, 0.98, 1 }, success = { 0.32, 0.81, 0.59, 1 },
-	warning = { 0.96, 0.72, 0.36, 1 }, danger = { 0.94, 0.37, 0.42, 1 },
+	background = { 0.025, 0.025, 0.022, 0.92 }, surface = { 0.055, 0.055, 0.048, 0.52 },
+	raised = { 0.11, 0.105, 0.085, 0.62 }, input = { 0.018, 0.018, 0.015, 0.72 },
+	border = { 0.32, 0.30, 0.24, 0.38 }, hover = { 0.19, 0.17, 0.10, 0.76 },
+	primary = { 0.20, 0.16, 0.045, 0.84 }, text = { 0.94, 0.93, 0.88, 1 },
+	muted = { 0.64, 0.63, 0.58, 1 }, accent = { 1, 0.82, 0.18, 1 },
+	success = { 0.40, 0.77, 0.52, 1 }, warning = { 0.95, 0.66, 0.28, 1 },
+	danger = { 0.92, 0.37, 0.31, 1 }, highlight = { 1, 0.82, 0.18, 0.25 },
+	userBand = { 0.12, 0.105, 0.065, 0.42 }, replyBand = { 0.035, 0.035, 0.030, 0.25 },
+	noticeBand = { 0.085, 0.075, 0.050, 0.32 },
 }
 local BACKDROP = {
 	bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8",
@@ -71,13 +77,52 @@ function UI.Surface(frame, tone)
 	return frame
 end
 
+function UI.Rule(parent, tone, alpha, vertical)
+	local rule = parent:CreateTexture(nil, "BORDER")
+	local c = UI.colors[tone or "border"]
+	rule:SetColorTexture(c[1], c[2], c[3], alpha or c[4])
+	if vertical then rule:SetWidth(1) else rule:SetHeight(1) end
+	return rule
+end
+
+function UI.Window(frame, headerHeight)
+	UI.Surface(frame, "background")
+	local border = UI.colors.border
+	frame:SetBackdropBorderColor(border[1], border[2], border[3], 0.22)
+	local rule = UI.Rule(frame, "accent", 0.48)
+	rule:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, -(headerHeight or 44))
+	rule:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -14, -(headerHeight or 44))
+	return frame
+end
+
 function UI.Label(parent, text, size, tone)
 	local label = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	label:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF", size or 12, "")
+	label:SetFont(UI.font, size or 12, "")
 	label:SetTextColor(unpack(UI.colors[tone or "text"]))
 	label:SetJustifyH("LEFT")
+	label:SetShadowColor(0, 0, 0, 0.7)
+	label:SetShadowOffset(0, -1)
 	label:SetText(text or "")
 	return label
+end
+
+function UI.Title(parent, text, size)
+	local title = UI.Label(parent, text, size or 18, "accent")
+	title:SetFont(UI.titleFont, size or 18, "")
+	return title
+end
+
+function UI.Input(frame, field)
+	UI.Surface(frame, "input")
+	field = field or frame
+	field:SetTextColor(unpack(UI.colors.text))
+	field:SetHighlightColor(unpack(UI.colors.highlight))
+	field:HookScript("OnEditFocusGained", function()
+		local c = UI.colors.accent
+		frame:SetBackdropBorderColor(c[1], c[2], c[3], 0.7)
+	end)
+	field:HookScript("OnEditFocusLost", function() frame:SetBackdropBorderColor(unpack(UI.colors.border)) end)
+	return frame
 end
 
 function UI.Tooltip(control, title, body)
@@ -100,18 +145,26 @@ function UI.Button(parent, label, width, onClick, style, name)
 	b.label:SetWordWrap(false)
 	b:SetFontString(b.label)
 	b:SetText(label)
-	UI.Surface(b, style == "primary" and "accent" or "raised")
+	UI.Surface(b)
+	b.selectionLine = UI.Rule(b, "accent", 0.72)
+	b.selectionLine:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 8, 1)
+	b.selectionLine:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -8, 1)
 	local function Paint(self)
 		local enabled = self:IsEnabled()
-		local tone = style == "primary" and "accent" or (self.hover and "border" or (style == "quiet" and "surface" or "raised"))
-		self:SetBackdropColor(unpack(UI.colors[tone]))
-		self.label:SetTextColor(unpack(UI.colors[not enabled and "muted" or (style == "danger" and "danger" or (style == "primary" and "background" or "text"))]))
-		self:SetAlpha(enabled and 1 or 0.55)
+		local emphasized = style == "primary" or self.isSelected
+		local tone = self.pressed and "hover" or (emphasized and "primary" or (self.hover and "hover" or "surface"))
+		local fill, edge = UI.colors[tone], UI.colors[(emphasized or self.hover) and "accent" or "border"]
+		self:SetBackdropColor(fill[1], fill[2], fill[3], style == "quiet" and not self.hover and not self.isSelected and 0 or fill[4])
+		self:SetBackdropBorderColor(edge[1], edge[2], edge[3], emphasized and 0.52 or (self.hover and 0.34 or (style == "quiet" and 0 or 0.22)))
+		self.label:SetTextColor(unpack(UI.colors[not enabled and "muted" or (style == "danger" and "danger" or (emphasized and "accent" or "text"))]))
+		self.selectionLine:SetShown(enabled and emphasized and true or false)
+		self:SetAlpha(enabled and 1 or 0.45)
 	end
+	b.RefreshAppearance = Paint
 	b:HookScript("OnEnter", function(self) self.hover = true; Paint(self) end)
-	b:HookScript("OnLeave", function(self) self.hover = nil; Paint(self) end)
-	b:SetScript("OnMouseDown", function(self) if self:IsEnabled() then self:SetBackdropColor(unpack(UI.colors.border)) end end)
-	b:SetScript("OnMouseUp", Paint)
+	b:HookScript("OnLeave", function(self) self.hover, self.pressed = nil, nil; Paint(self) end)
+	b:SetScript("OnMouseDown", function(self) if self:IsEnabled() then self.pressed = true; Paint(self) end end)
+	b:SetScript("OnMouseUp", function(self) self.pressed = nil; Paint(self) end)
 	b:HookScript("OnEnable", Paint)
 	b:HookScript("OnDisable", Paint)
 	b:SetScript("OnClick", onClick)
@@ -119,12 +172,19 @@ function UI.Button(parent, label, width, onClick, style, name)
 	return b
 end
 
+function UI.SetSelected(control, selected)
+	selected = selected and true or false
+	if control.isSelected == selected then return end
+	control.isSelected = selected
+	control:RefreshAppearance()
+end
+
 -- Native scroll templates use client-specific artwork. Keep our own scrollbars
 -- on standard ScrollFrame/Slider behavior without borrowing Blizzard textures.
 function UI.ScrollFrame(parent, name)
 	local scroll = CreateFrame("ScrollFrame", name, parent)
 	local bar = CreateFrame("Slider", nil, parent, "BackdropTemplate")
-	UI.Surface(bar, "raised")
+	UI.Surface(bar, "background")
 	bar:SetFrameLevel(scroll:GetFrameLevel() + 1)
 	bar:SetWidth(7)
 	bar:SetPoint("TOPLEFT", scroll, "TOPRIGHT", 5, -2)
@@ -135,7 +195,7 @@ function UI.ScrollFrame(parent, name)
 	bar:SetObeyStepOnDrag(true)
 	bar:SetThumbTexture("Interface\\Buttons\\WHITE8X8")
 	local thumb = bar:GetThumbTexture()
-	thumb:SetWidth(5)
+	thumb:SetWidth(3)
 	thumb:SetVertexColor(unpack(UI.colors.muted))
 	scroll.bar = bar
 	local updating = false
@@ -180,9 +240,9 @@ function UI.ScrollFrame(parent, name)
 end
 
 local ROLE_STYLE = {
-	user = { label = "You", color = UI.colors.accent, bg = UI.colors.raised },
-	assistant = { label = "AI", color = UI.colors.success, bg = UI.colors.surface },
-	system = { label = "Notice", color = UI.colors.muted, bg = UI.colors.background },
+	user = { label = "You", color = UI.colors.text, bg = UI.colors.userBand },
+	assistant = { label = "AI", color = UI.colors.accent, bg = UI.colors.replyBand },
+	system = { label = "Notice", color = UI.colors.muted, bg = UI.colors.noticeBand },
 }
 
 ---------------------------------------------------------------------------
@@ -395,8 +455,8 @@ local function AnyPending()
 end
 
 local function InitDB()
-	WoWAIDB = WoWAIDB or {}
-	db = WoWAIDB
+	WowieDB = WowieDB or {}
+	db = WowieDB
 	db.settings = db.settings or {}
 	local s = db.settings
 	s.defaults = s.defaults or {}
@@ -481,7 +541,7 @@ end
 
 local function SafeReload()
 	if InCombatLockdown() then
-		WoWAI.reloadAfterCombat = true
+		Wowie.reloadAfterCombat = true
 		if ui.status then
 			ui.status:SetText("In combat - will reload as soon as it ends")
 		end
@@ -493,12 +553,12 @@ end
 -- ReloadUI() only works from a hardware event (a keypress or click), never from
 -- a timer. So the automatic reload piggybacks on the player's own next keypress
 -- once the interval has elapsed. The key still reaches the game normally.
-local keyCatcher = CreateFrame("Frame", "WoWAIKeyCatcher", UIParent)
+local keyCatcher = CreateFrame("Frame", "WowieKeyCatcher", UIParent)
 keyCatcher:Hide()
 keyCatcher:EnableKeyboard(true)
 keyCatcher:SetScript("OnKeyDown", function(self, key)
 	if db and AnyPending() and db.settings.autoRefresh
-		and GetTime() >= (WoWAI.nextAutoRefresh or 0)
+		and GetTime() >= (Wowie.nextAutoRefresh or 0)
 		and not InCombatLockdown() then
 		self:Hide()
 		ReloadUI()
@@ -507,7 +567,7 @@ end)
 
 -- Arm the keypress reload. In pixel mode this is only used once the slot pool
 -- is exhausted (a reload frees every slot) or the slots are not installed.
-function WoWAI.ArmAutoRefresh()
+function Wowie.ArmAutoRefresh()
 	keyCatcher:Hide()
 	if not AnyPending() or not db.settings.autoRefresh then return end
 	if db.settings.mode == "pixel" and not (run.slotsExhausted or run.slotsMissing or run.pixelFailed) then return end
@@ -518,7 +578,7 @@ function WoWAI.ArmAutoRefresh()
 		keyCatcher:SetPropagateKeyboardInput(true)
 		keyCatcher.propagates = true
 	end
-	WoWAI.nextAutoRefresh = GetTime() + db.settings.interval
+	Wowie.nextAutoRefresh = GetTime() + db.settings.interval
 	keyCatcher:Show()
 end
 
@@ -533,7 +593,7 @@ local function EnsureStrip()
 	local display = tx.probe and tx.probe.display or tx.active
 	local cell = Codec.DISPLAYS[display].cell
 	if not strip then
-		strip = CreateFrame("Frame", "WoWAIStrip", UIParent)
+		strip = CreateFrame("Frame", "WowieStrip", UIParent)
 		strip:SetFrameStrata("TOOLTIP")
 		strip:SetFrameLevel(10000)
 		if strip.SetIgnoreParentScale then strip:SetIgnoreParentScale(true) end
@@ -732,7 +792,8 @@ function tx.UpdateSettings()
 	if ui.pixelStatus then ui.pixelStatus:SetText(tx.Status()) end
 	for display, button in pairs(ui.pixelButtons or {}) do
 		local selected = ui.defaultsDraft and ui.defaultsDraft.pixelDisplay == display
-		button:SetText((selected and "> " or "") .. Codec.DISPLAYS[display].label)
+		button:SetText(Codec.DISPLAYS[display].label)
+		UI.SetSelected(button, selected)
 	end
 end
 
@@ -765,12 +826,12 @@ function tx.MaybeCalibrate()
 	if not Codec.DISPLAYS[display or ""] or not tx.displays or not tx.displays[display]
 		or (Codec.DISPLAYS[display].family or display) ~= preference then display = preference end
 	if not tx.displays or not tx.displays[display] then
-		local reason = WoWAI.IsConnected() and "Update/restart the bridge to check Compact or Quiet."
+		local reason = Wowie.IsConnected() and "Update/restart the bridge to check Compact or Quiet."
 			or "Reconnect to check the saved display preference."
 		if tx.reason ~= reason then tx.reason = reason; tx.UpdateSettings() end
 		return
 	end
-	if run.connectingAt or not WoWAI.IsConnected() then return end
+	if run.connectingAt or not Wowie.IsConnected() then return end
 	tx.retryDisplay = nil
 	db.lastSeq = db.lastSeq + 1
 	local nonce, now = NewNonce(), GetTime()
@@ -828,7 +889,7 @@ function tx.SetPreference(display)
 		RefreshStrip()
 	end
 	tx.UpdateSettings()
-	if display ~= "robust" and not WoWAI.IsConnected() then WoWAI.Connect()
+	if display ~= "robust" and not Wowie.IsConnected() then Wowie.Connect()
 	else tx.MaybeCalibrate() end
 end
 
@@ -867,12 +928,12 @@ end
 
 local function CheckSignal(kind, id)
 	if run.signalUnreliable then return false end
-	return SoundValid(string.format("Interface\\AddOns\\WoWAI\\%s\\%03d.wav", kind, SlotNumber(id)))
+	return SoundValid(string.format("Interface\\AddOns\\Wowie\\%s\\%03d.wav", kind, SlotNumber(id)))
 end
 
 -- Heartbeat: the bridge flips act/NNN/kk.wav for the k-th action of message NNN.
 local function ActPath(id, k)
-	return string.format("Interface\\AddOns\\WoWAI\\act\\%03d\\%02d.wav", SlotNumber(id), k)
+	return string.format("Interface\\AddOns\\Wowie\\act\\%03d\\%02d.wav", SlotNumber(id), k)
 end
 
 local function StartActivity(chat, id)
@@ -910,7 +971,7 @@ local function NotedBridge(at)
 end
 
 local function PresencePath(k)
-	return string.format("Interface\\AddOns\\WoWAI\\presence\\%04d.wav", k)
+	return string.format("Interface\\AddOns\\Wowie\\presence\\%04d.wav", k)
 end
 
 -- Valid presence files form a prefix 1..k, so a binary search finds the head.
@@ -982,7 +1043,7 @@ local function ConnectionLabel()
 	return "Idle / not verified"
 end
 
-function WoWAI.BridgeState()
+function Wowie.BridgeState()
 	if run.connectingAt then return "unknown", 0.6, 0.6, 0.6, "Bridge: checking a fresh challenge" end
 	if run.connectFailed then return "down", 0.9, 0.25, 0.25, "Bridge: not responding to the latest check" end
 	local age = VerificationAge()
@@ -1000,8 +1061,8 @@ local STATE_ICON = {
 	unknown = "Interface\\FriendsFrame\\StatusIcon-Offline",
 }
 
-function WoWAI.UpdateDot()
-	local state, _, _, _, tip = WoWAI.BridgeState()
+function Wowie.UpdateDot()
+	local state, _, _, _, tip = Wowie.BridgeState()
 	if run.pixelFailed and not run.connectingAt then state = "down" end
 	tip = tip .. "\n" .. PresenceStatus() .. "\n" .. tx.Status()
 	for _, dot in ipairs({ ui.dot, ui.miniDot }) do
@@ -1018,10 +1079,10 @@ end
 
 -- Map changes notify this entry directly; navigation never rebuilds the
 -- discussion or collects character/provider context.
-function WoWAI.UpdateNavigation()
+function Wowie.UpdateNavigation()
 	local button = ui.navigation
 	if not button then return end
-	local map = WoWAIMap
+	local map = WowieMap
 	local available = type(map) == "table" and type(map.GetNavigationState) == "function" and type(map.ShowNavigation) == "function"
 	local state = available and map.GetNavigationState() or nil
 	if ui.navigationMap == map and ui.navigationState == state and ui.navigationReady == available then return end
@@ -1063,7 +1124,7 @@ end
 
 -- Reload transport still uses its explicit reload cycle. Pixel sends require a
 -- recent acknowledgement of this session's current challenge.
-function WoWAI.IsConnected()
+function Wowie.IsConnected()
 	if not db or db.settings.mode ~= "pixel" then return true end
 	local age = VerificationAge()
 	return age ~= nil and age < VERIFIED_SECONDS and not run.pixelFailed
@@ -1071,13 +1132,13 @@ end
 
 -- An explicit new check supersedes old confirmation immediately. Repeated
 -- clicks/callers during a pending check retransmit the same operation.
-function WoWAI.Connect()
+function Wowie.Connect()
 	if db.settings.mode ~= "pixel" then
 		SafeReload()
 		return
 	end
 	if run.connectingAt then
-		WoWAI.SayHello()
+		Wowie.SayHello()
 		return
 	end
 	tx.Invalidate()
@@ -1089,21 +1150,21 @@ function WoWAI.Connect()
 	run.pixelFailed = nil
 	run.connectFailed = nil
 	run.connectingAt = nil -- SayHello records both clocks before publishing
-	WoWAI.SayHello()
+	Wowie.SayHello()
 end
 
 -- One word for the connection state, so Tick can tell when it changed.
 local function ConnectionKey()
 	if run.connectingAt then return "connecting" end
 	if run.connectFailed then return "failed" end
-	return WoWAI.IsConnected() and "ok" or "unverified"
+	return Wowie.IsConnected() and "ok" or "unverified"
 end
 
 -- Called every tick: time out a Connect attempt, and redraw when the state flips
 -- (light, button, status line, placeholder) without redrawing every tick.
-function WoWAI.CheckConnection()
+function Wowie.CheckConnection()
 	if run.connectingAt then
-		if WoWAI.IsConnected() then
+		if Wowie.IsConnected() then
 			run.connectingAt, run.connectFailed = nil, nil
 			-- A message typed while disconnected goes out now, without a second click,
 			-- as long as the same chat is still in front and free.
@@ -1112,7 +1173,7 @@ function WoWAI.CheckConnection()
 			local c = queued and ActiveChat()
 			if c and c.id == queued.chat and not c.pendingId then
 				if ui.input and Trim(ui.input:GetText() or "") == queued.text then ui.input:SetText("") end
-				WoWAI.Send(queued.text, queued.allow)
+				Wowie.Send(queued.text, queued.allow)
 			end
 		elseif GetTime() - run.connectingAt > CONNECT_WAIT then
 			run.connectingAt, run.connectFailed = nil, true
@@ -1122,18 +1183,18 @@ function WoWAI.CheckConnection()
 			for id, rec in pairs(run.outbound) do if rec.hello then run.outbound[id] = nil end end
 			RefreshStrip()
 		end
-	elseif run.connectFailed and WoWAI.IsConnected() then
+	elseif run.connectFailed and Wowie.IsConnected() then
 		run.connectFailed = nil
 	end
 	local key = ConnectionKey()
 	if key ~= run.connKey then
 		run.connKey = key
-		WoWAI.Render()
+		Wowie.Render()
 	end
 end
 
 -- Both actions remain available; only the direct check waits for its probe.
-function WoWAI.UpdateConnect()
+function Wowie.UpdateConnect()
 	if not ui.reconnect or not ui.send then return end
 	ui.send:Show()
 	ui.reconnect:Show()
@@ -1150,8 +1211,8 @@ local function SelfTestSignals()
 		signalStats.selftest = "PlaySoundFile missing"
 		return
 	end
-	local emptyLooksValid = SoundValid("Interface\\AddOns\\WoWAI\\ctl\\empty.wav")
-	local validLooksValid = SoundValid("Interface\\AddOns\\WoWAI\\ctl\\valid.wav")
+	local emptyLooksValid = SoundValid("Interface\\AddOns\\Wowie\\ctl\\empty.wav")
+	local validLooksValid = SoundValid("Interface\\AddOns\\Wowie\\ctl\\valid.wav")
 	if emptyLooksValid then
 		signalAvailable = false
 		signalStats.selftest = "an empty file reports as playable"
@@ -1173,7 +1234,7 @@ local function ActivityLine(chat)
 		if a.last then
 			local quiet = now - a.last
 			s = s .. ", last " .. FmtDur(quiet) .. " ago"
-			if quiet > 120 then s = s .. " (quiet for a while - stuck? /wow-ai cancel)" end
+			if quiet > 120 then s = s .. " (quiet for a while - stuck? /wowie cancel)" end
 		elseif now - started > 60 then
 			s = s .. ", no activity seen yet"
 		end
@@ -1234,7 +1295,7 @@ local function ReplyToContext(c, r)
 		local results = {}
 		for _, query in ipairs(r.queries) do
 			if query.category == nil and query.op == "snapshot" then query.category = query.name end
-			results[#results + 1] = WoWAIContext.Query(query)
+			results[#results + 1] = WowieContext.Query(query)
 		end
 		c.queryReply = { nonce = r.nonce, request = r.request, text = "[" .. table.concat(results, ",") .. "]" }
 	end
@@ -1250,7 +1311,7 @@ local function ReplyToContext(c, r)
 	end
 	run.sentAt, run.polls = GetTime(), 0
 	ScheduleNextPoll()
-	WoWAI.ArmAutoRefresh()
+	Wowie.ArmAutoRefresh()
 end
 
 -- Dispatch a list of reply records to the chats waiting for them.
@@ -1268,7 +1329,7 @@ local function ApplyReplies(replies)
 			end
 			local denied = type(r.denied) == "table" and #r.denied > 0 and r.denied or nil
 			if r.status == "done" then
-				Finish(c, "assistant", r.text or "", denied, r.agent, r.summary, WoWAI.CleanMacros(r.macros))
+				Finish(c, "assistant", r.text or "", denied, r.agent, r.summary, Wowie.CleanMacros(r.macros))
 			elseif r.status == "error" then
 				Finish(c, "system", "Bridge error: " .. tostring(r.text), denied)
 			elseif r.status == "working" or r.status == "queued" then
@@ -1324,7 +1385,7 @@ local function ImportRestore(r)
 			end
 		end
 		AddHistory(current, "system", "Restored " .. added .. " chat(s) from the bridge after the game reset the saved data.")
-		WoWAI.RenderChatList()
+		Wowie.RenderChatList()
 	end
 end
 
@@ -1354,7 +1415,7 @@ local function ApplyBridgeData(data)
 	run.contextEnabled = data.contextEnabled ~= false
 	local matched = ApplyReplies(data.replies)
 	if data.restore then ImportRestore(data.restore) end
-	if data.map and WoWAIMap then WoWAIMap.Sync(data.map) end
+	if data.map and WowieMap then WowieMap.Sync(data.map) end
 	return matched
 end
 
@@ -1363,24 +1424,24 @@ local function TryLoadSlot(why)
 	local name = FreeSlot()
 	if not name then
 		run.slotsExhausted = true
-		WoWAI.ArmAutoRefresh()
-		WoWAI.UpdateStatus()
+		Wowie.ArmAutoRefresh()
+		Wowie.UpdateStatus()
 		return
 	end
-	WoWAI_SlotData = nil
+	Wowie_SlotData = nil
 	local loaded, reason = C_AddOns.LoadAddOn(name)
 	if not loaded then
 		run.slotError = reason
 		if reason == "MISSING" or reason == "DISABLED" then
 			run.slotsMissing = true
-			WoWAI.ArmAutoRefresh()
+			Wowie.ArmAutoRefresh()
 		end
-		WoWAI.UpdateStatus()
+		Wowie.UpdateStatus()
 		return
 	end
 	run.polls = (run.polls or 0) + 1
 	ScheduleNextPoll()
-	local data = WoWAI_SlotData
+	local data = Wowie_SlotData
 	if type(data) == "table" and type(data.now) == "number" then
 		-- The bridge's clock and ours are the same machine; translate to GetTime().
 		NotedBridge(GetTime() - (time() - data.now))
@@ -1389,7 +1450,7 @@ local function TryLoadSlot(why)
 	if why == "signal" and not matched then
 		run.signalUnreliable = true
 	end
-	WoWAI.Render()
+	Wowie.Render()
 end
 
 local function TransportTick()
@@ -1423,7 +1484,7 @@ local function TransportTick()
 		TryLoadSlot("calibration")
 	end
 	if tx.probe and now >= tx.probe.deadline then tx.Fail("Display check timed out; using Robust. Save again to retry.") end
-	WoWAI.CheckConnection()
+	Wowie.CheckConnection()
 	tx.MaybeCalibrate()
 	if not tx.probe and (not tx.nextFrameAt or now + 0.001 >= tx.nextFrameAt) then
 		for _, rec in pairs(run.outbound) do
@@ -1436,26 +1497,26 @@ local function Tick()
 	if not db then return end
 	local now = GetTime()
 	if db.settings.mode ~= "pixel" then
-		WoWAI.UpdateDot()
-		WoWAI.CheckConnection()
+		Wowie.UpdateDot()
+		Wowie.CheckConnection()
 		return
 	end
 	local changed = false
 	if run.helloPollAt and now >= run.helloPollAt then
 		run.helloPollAt = nil
 		TryLoadSlot("hello")
-		if run.connectingAt and not WoWAI.IsConnected() and now - run.connectingAt <= CONNECT_WAIT then
-			WoWAI.SayHello()
+		if run.connectingAt and not Wowie.IsConnected() and now - run.connectingAt <= CONNECT_WAIT then
+			Wowie.SayHello()
 		end
 		-- Whatever that slot held, the wait is over.
 		if run.restoring then
 			run.restoring = nil
-			WoWAI.Render()
+			Wowie.Render()
 		end
 	end
 	if run.restoring and now - run.restoring > 25 then
 		run.restoring = nil
-		WoWAI.Render()
+		Wowie.Render()
 	end
 	-- Only maintain established liveness, and never duplicate a hello/reply probe.
 	-- Failed or stale slot reads delay the next probe, but do not refresh bridgeSeen.
@@ -1463,9 +1524,9 @@ local function Tick()
 		and now - math.max(run.bridgeSeen, run.lastSlotPoll or run.bridgeSeen) >= IDLE_POLL_SECONDS then
 		TryLoadSlot("idle")
 	end
-	WoWAI.UpdateDot()
-	WoWAI.CheckConnection()
-	WoWAI.UpdateMini()
+	Wowie.UpdateDot()
+	Wowie.CheckConnection()
+	Wowie.UpdateMini()
 	for id, rec in pairs(run.outbound) do
 		-- Numeric sound files are only delivery hints for forget operations.
 		if not rec.acked and rec.forget and CheckSignal("ack", id) then
@@ -1499,20 +1560,20 @@ local function Tick()
 				run.outbound[id] = nil
 				run.pixelFailed = true
 				changed = true
-				WoWAI.ArmAutoRefresh()
+				Wowie.ArmAutoRefresh()
 			end
 		end
 	end
 	if changed then
 		RefreshStrip()
-		WoWAI.UpdateStatus()
+		Wowie.UpdateStatus()
 	end
 	if not AnyPending() then return end
 	local moved = false
 	for _, c in ipairs(db.chats) do
 		if c.pendingId and PollActivity(c) then moved = true end
 	end
-	if moved then WoWAI.Render() end
+	if moved then Wowie.Render() end
 	if run.nextPollAt and now >= run.nextPollAt then
 		TryLoadSlot("schedule")
 	end
@@ -1537,8 +1598,8 @@ Finish = function(chat, role, text, denied, agent, summary, macros)
 	if visible and ui.input and chat.draft and chat.draft ~= "" and ui.input:GetText() ~= chat.draft then
 		ui.input:SetText(chat.draft)
 	end
-	WoWAI.Render()
-	WoWAI.Notify(chat, text, agent, summary)
+	Wowie.Render()
+	Wowie.Notify(chat, text, agent, summary)
 end
 
 ---------------------------------------------------------------------------
@@ -1566,7 +1627,7 @@ end
 -- The character's skill lines as { name, isHeader, rank, maxRank, skillID }.
 -- Forever only has C_SkillInfo (one table per line); the classic globals
 -- (multiple returns) are the fallback for other clients.
-function WoWAI.SkillLines()
+function Wowie.SkillLines()
 	local out = {}
 	if C_SkillInfo and C_SkillInfo.GetNumSkillLines then
 		local n = Try(C_SkillInfo.GetNumSkillLines)
@@ -1595,28 +1656,28 @@ function WoWAI.SkillLines()
 	return out
 end
 
-function WoWAI.GameContext()
-	return WoWAIContext.Summary()
+function Wowie.GameContext()
+	return WowieContext.Summary()
 end
 
-function WoWAI.SetContextEnabled(enabled)
-	local checking = run.connectingAt ~= nil or WoWAI.IsConnected()
+function Wowie.SetContextEnabled(enabled)
+	local checking = run.connectingAt ~= nil or Wowie.IsConnected()
 	db.settings.context = enabled == true
 	run.contextSent, run.lastHelloAt = nil, nil
 	db.hello = nil -- changing Sharing creates a new hello, not a retry of its old context
 	if checking and db.settings.mode == "pixel" then
 		run.connectingAt = nil
-		WoWAI.Connect()
+		Wowie.Connect()
 	end
-	WoWAI.UpdateSharingSummary()
-	WoWAI.Render()
+	Wowie.UpdateSharingSummary()
+	Wowie.Render()
 end
 
 -- The context to put on the next record, or nil when the bridge already has
 -- it (or it wouldn't fit next to this message; it goes with a later one).
 -- "" when the setting is off, so the bridge drops what it had.
 local function ContextToSend(room, summary)
-	local ctx = db.settings.context and (summary or WoWAI.GameContext()) or ""
+	local ctx = db.settings.context and (summary or Wowie.GameContext()) or ""
 	if ctx == (run.contextSent or "") then return nil end
 	if room and #ctx > room then return nil end
 	return ctx
@@ -1626,15 +1687,15 @@ end
 local scanTip
 local function TooltipLines(payload)
 	if not scanTip then
-		scanTip = CreateFrame("GameTooltip", "WoWAIScanTip", UIParent, "GameTooltipTemplate")
+		scanTip = CreateFrame("GameTooltip", "WowieScanTip", UIParent, "GameTooltipTemplate")
 	end
 	scanTip:SetOwner(UIParent, "ANCHOR_NONE")
 	scanTip:ClearLines()
 	local lines = {}
 	if pcall(scanTip.SetHyperlink, scanTip, payload) then
 		for i = 1, math.min(scanTip:NumLines() or 0, LINK_LINES_MAX) do
-			local left = _G["WoWAIScanTipTextLeft" .. i]
-			local right = _G["WoWAIScanTipTextRight" .. i]
+			local left = _G["WowieScanTipTextLeft" .. i]
+			local right = _G["WowieScanTipTextRight" .. i]
 			local l = Trim(tostring((left and left:GetText()) or ""))
 			local r = Trim(tostring((right and right:IsShown() and right:GetText()) or ""))
 			if r ~= "" then l = l .. "  " .. r end
@@ -1661,7 +1722,7 @@ end
 -- Turn the links in a message into text the agent can use: each becomes [Name]
 -- in place, and a block at the end lists what the tooltip says about it.
 -- Returns the new text and the number of links found.
-function WoWAI.ExpandLinks(text)
+function Wowie.ExpandLinks(text)
 	local links, seen = {}, {}
 	local function Take(payload, name)
 		if not seen[payload] then
@@ -1690,14 +1751,14 @@ end
 ---------------------------------------------------------------------------
 
 -- allow: optional list of permission rules to grant before this message runs.
-function WoWAI.Send(text, allow)
+function Wowie.Send(text, allow)
 	local c = ActiveChat()
 	if not c then return end
 	text = Trim(text or "")
 	if c.pendingId then
 		-- Typing while waiting: keep the draft, and check for the reply.
 		if text ~= "" then c.draft = text end
-		if not WoWAI.IsConnected() and not run.connectingAt then WoWAI.Connect() end
+		if not Wowie.IsConnected() and not run.connectingAt then Wowie.Connect() end
 		if db.settings.mode == "pixel" and not (run.slotsExhausted or run.slotsMissing) then
 			TryLoadSlot("manual")
 		else
@@ -1706,18 +1767,18 @@ function WoWAI.Send(text, allow)
 		return
 	end
 	if text == "" then return end
-	if not WoWAI.IsConnected() then
+	if not Wowie.IsConnected() then
 		-- Keep the draft and intent until a fresh nonce round trip succeeds.
 		if ui.input then ui.input:SetText(text) end
 		run.sendOnConnect = { chat = c.id, text = text, allow = allow }
-		if not run.connectingAt then WoWAI.Connect() end
-		WoWAI.Toggle(true)
+		if not run.connectingAt then Wowie.Connect() end
+		Wowie.Toggle(true)
 		return
 	end
 	if run.requestProtocol ~= 1 then
 		AddHistory(c, "system", "The bridge needs updating/restarting before it can receive new questions safely.")
 		if ui.input then ui.input:SetText(text) end
-		WoWAI.Render()
+		Wowie.Render()
 		return
 	end
 	local profile, summary
@@ -1725,21 +1786,21 @@ function WoWAI.Send(text, allow)
 		if db.settings.mode == "pixel" and run.contextProtocol ~= 2 then
 			AddHistory(c, "system", "The bridge needs updating/restarting before it can receive the information selected in Sharing.")
 			if ui.input then ui.input:SetText(text) end
-			WoWAI.Render()
+			Wowie.Render()
 			return
 		end
-		profile, summary = WoWAIContext.Snapshot()
+		profile, summary = WowieContext.Snapshot()
 	end
 	-- Shift-clicked links become [Name] plus their tooltip, which is what the agent can read.
 	local links
-	text, links = WoWAI.ExpandLinks(text)
+	text, links = Wowie.ExpandLinks(text)
 	local agent = c.agent ~= "" and c.agent or db.settings.defaults.agent
 	local chosenModel, reasoning = ChatChoice(c, "model"), ChatChoice(c, "reasoning")
 	local model = chosenModel ~= "" and ToHex(chosenModel) or nil
 	local limit = Codec.MAX_PAYLOAD - 300 - #(model or "") - #reasoning
 	if #text > limit then
 		AddHistory(c, "system", "That message is too long for one send (" .. #text .. " chars, max ~" .. limit .. "). Split it up." .. (links > 0 and " Each linked item adds its tooltip to the message." or ""))
-		WoWAI.Render()
+		Wowie.Render()
 		return
 	end
 	-- The game context rides along when the bridge doesn't have this version yet.
@@ -1785,7 +1846,7 @@ function WoWAI.Send(text, allow)
 	c.snapshotAcked, c.queryReply = nil, nil
 	AddHistory(c, "user", text, id)
 	-- A chat still carrying its default name takes its title from the first message
-	-- you send (system notes like "/wow-ai cd" before it don't count).
+	-- you send (system notes like "/wowie cd" before it don't count).
 	if c.name:match("^Chat %d+$") then
 		local first = true
 		for _, m in ipairs(c.history) do
@@ -1807,7 +1868,7 @@ function WoWAI.Send(text, allow)
 		StartActivity(c, id)
 		ScheduleNextPoll()
 		RefreshStrip(id)
-		WoWAI.Render()
+		Wowie.Render()
 	else
 		SafeReload()
 	end
@@ -1839,7 +1900,7 @@ end
 -- A hello is the connection challenge and also synchronizes selected context.
 -- A saved, unacknowledged hello may be retried after reload, but cached metadata
 -- cannot authenticate it: this UI attempt records a fresh start timestamp.
-function WoWAI.SayHello()
+function Wowie.SayHello()
 	if db.settings.mode ~= "pixel" then return end
 	local now = GetTime()
 	if run.lastHelloAt and now - run.lastHelloAt < 5 then return end
@@ -1850,7 +1911,7 @@ function WoWAI.SayHello()
 		local nonce = NewNonce()
 		db.hello = { id = db.lastSeq, nonce = nonce, chat = c and c.id or "", cwd = c and c.cwd or "",
 			flags = "h;nonce=" .. nonce, name = c and c.name or "", text = "",
-			ctx = db.settings.context and WoWAI.GameContext() or "", hello = true }
+			ctx = db.settings.context and Wowie.GameContext() or "", hello = true }
 	end
 	if not run.connectingAt then
 		run.connectingAt, run.connectFailed, run.verifiedAt = now, nil, nil
@@ -1873,11 +1934,11 @@ function WoWAI.SayHello()
 		if empty then run.restoring = now end
 	end
 	RefreshStrip(rec.id)
-	WoWAI.Render()
+	Wowie.Render()
 end
 
 -- Put the active chat's pending message back on the strip.
-function WoWAI.Resend()
+function Wowie.Resend()
 	local c = ActiveChat()
 	if not c or not c.pendingId then return end
 	if not c.request then return end
@@ -1890,34 +1951,34 @@ function WoWAI.Resend()
 	run.polls = 0
 	ScheduleNextPoll()
 	RefreshStrip(c.pendingId)
-	WoWAI.UpdateStatus()
+	Wowie.UpdateStatus()
 end
 
-function WoWAI.SendFromInput()
+function Wowie.SendFromInput()
 	if not ui.input then return end
 	local c = ActiveChat()
 	local text = ui.input:GetText()
 	local wasPending = c and c.pendingId
-	if wasPending then WoWAI.Send("") else WoWAI.Send(text) end
+	if wasPending then Wowie.Send("") else Wowie.Send(text) end
 	if c and c.pendingId and not wasPending then ui.input:SetText("") end
 	ui.input:ClearFocus() -- only an explicit send hands the keyboard back to the game
 end
 
 -- The Allow button: grant the rules a reply asked for, then tell the agent to carry on.
-function WoWAI.Allow(chatId, rules)
+function Wowie.Allow(chatId, rules)
 	local c = FindChat(chatId)
 	if not c or c.pendingId or not rules or #rules == 0 then return end
-	if db.activeChat ~= c.id then WoWAI.SwitchChat(c.id) end
+	if db.activeChat ~= c.id then Wowie.SwitchChat(c.id) end
 	for _, m in ipairs(c.history) do m.denied = nil end
 	AddHistory(c, "system", "Allowed: " .. table.concat(rules, ", "))
-	WoWAI.Send("Those actions are allowed now. Continue from where you left off.", rules)
+	Wowie.Send("Those actions are allowed now. Continue from where you left off.", rules)
 end
 
 ---------------------------------------------------------------------------
 -- Chats
 ---------------------------------------------------------------------------
 
-function WoWAI.SwitchChat(id)
+function Wowie.SwitchChat(id)
 	local c = FindChat(id)
 	if not c then return end
 	local prev = ActiveChat()
@@ -1932,26 +1993,26 @@ function WoWAI.SwitchChat(id)
 	if ui.input then
 		ui.input:SetText(c.draft or "")
 	end
-	WoWAI.Render()
-	WoWAI.RenderChatList()
+	Wowie.Render()
+	Wowie.RenderChatList()
 end
 
-function WoWAI.NewChat(name)
+function Wowie.NewChat(name)
 	local c = AddChat(name and name ~= "" and name or nil)
 	if not c then
 		local a = ActiveChat()
-		AddHistory(a, "system", "Chat limit reached (" .. MAX_CHATS .. "). Delete one first with /wow-ai delete.")
-		WoWAI.Render()
+		AddHistory(a, "system", "Chat limit reached (" .. MAX_CHATS .. "). Delete one first with /wowie delete.")
+		Wowie.Render()
 		return
 	end
 	if ui.chatSearch then ui.chatSearch:SetText("") end
-	WoWAI.SwitchChat(c.id)
-	WoWAI.Toggle(true)
+	Wowie.SwitchChat(c.id)
+	Wowie.Toggle(true)
 end
 
 -- Folder this chat's agent works in. Empty (or "-" / "default") = the bridge's
 -- default. Relative paths are resolved by the bridge against that default.
-function WoWAI.SetFolder(rest, c)
+function Wowie.SetFolder(rest, c)
 	c = c or ActiveChat()
 	if not c then return end
 	rest = Trim(rest or "")
@@ -1967,12 +2028,12 @@ function WoWAI.SetFolder(rest, c)
 		c.cwd = ""
 		AddHistory(c, "system", "cwd reset to the bridge's default: " .. base)
 	else
-		AddHistory(c, "system", "cwd is the bridge's default: " .. base .. " (/wow-ai cd <folder>, or right-click the chat and pick Folder, to change)")
+		AddHistory(c, "system", "cwd is the bridge's default: " .. base .. " (/wowie cd <folder>, or right-click the chat and pick Folder, to change)")
 	end
-	WoWAI.Render()
+	Wowie.Render()
 end
 
-StaticPopupDialogs["WOWAI_FOLDER"] = {
+StaticPopupDialogs["WOWIE_FOLDER"] = {
 	text = "Folder for this chat\n\nRelative to the bridge's folder (%s), ~, or a full path.\nEmpty = the bridge's default. Changing it starts a fresh agent session.",
 	button1 = OKAY,
 	button2 = CANCEL,
@@ -1993,11 +2054,11 @@ StaticPopupDialogs["WOWAI_FOLDER"] = {
 	OnAccept = function(dialog, data)
 		local box = dialog.GetEditBox and dialog:GetEditBox() or dialog.editBox
 		local chat = data and FindChat(data.id)
-		if chat and box then WoWAI.SetFolder(box:GetText(), chat) end
+		if chat and box then Wowie.SetFolder(box:GetText(), chat) end
 	end,
 	EditBoxOnEnterPressed = function(box)
 		local dialog = box:GetParent()
-		StaticPopupDialogs["WOWAI_FOLDER"].OnAccept(dialog, dialog.data)
+		StaticPopupDialogs["WOWIE_FOLDER"].OnAccept(dialog, dialog.data)
 		dialog:Hide()
 	end,
 	EditBoxOnEscapePressed = function(box)
@@ -2006,10 +2067,10 @@ StaticPopupDialogs["WOWAI_FOLDER"] = {
 }
 
 -- Folder dialog for a chat (the active one when no id is given).
-function WoWAI.FolderPrompt(id)
+function Wowie.FolderPrompt(id)
 	local c = (id and FindChat(id)) or ActiveChat()
 	if not c then return end
-	StaticPopup_Show("WOWAI_FOLDER", run.bridgeCwd or "unknown until connected", nil, { id = c.id, cwd = c.cwd })
+	StaticPopup_Show("WOWIE_FOLDER", run.bridgeCwd or "unknown until connected", nil, { id = c.id, cwd = c.cwd })
 end
 
 -- Empty (or "-" / "default") uses the saved addon agent, then the bridge's.
@@ -2018,14 +2079,14 @@ local function AgentList()
 	return run.bridgeAgents and table.concat(run.bridgeAgents, ", ") or "claude, codex, grok, agy, hermes"
 end
 
-function WoWAI.SetAgent(rest, c)
+function Wowie.SetAgent(rest, c)
 	c = c or ActiveChat()
 	if not c then return end
 	rest = Trim(rest or ""):lower()
 	if rest == "-" or rest == "default" then rest = "" end
 	if rest ~= "" and run.bridgeAgents and not Contains(run.bridgeAgents, rest) then
 		AddHistory(c, "system", "Unknown agent \"" .. rest .. "\". The bridge knows: " .. AgentList())
-		WoWAI.Render()
+		Wowie.Render()
 		return
 	end
 	local changed = rest ~= (c.agent or "")
@@ -2038,27 +2099,27 @@ function WoWAI.SetAgent(rest, c)
 	elseif changed then
 		AddHistory(c, "system", "agent reset to the " .. defaultSource .. defaultName)
 	else
-		AddHistory(c, "system", "agent is the " .. defaultSource .. defaultName .. " (/wow-ai agent <name>, or use the Agent selector, to change; agents: " .. AgentList() .. ")")
+		AddHistory(c, "system", "agent is the " .. defaultSource .. defaultName .. " (/wowie agent <name>, or use the Agent selector, to change; agents: " .. AgentList() .. ")")
 	end
-	WoWAI.Render()
+	Wowie.Render()
 end
 
 -- The direct Agent selector and the chat menu use the same picker.
-function WoWAI.AgentPrompt(id)
-	WoWAI.ShowSelection("agent", ui.agentSelector, id)
+function Wowie.AgentPrompt(id)
+	Wowie.ShowSelection("agent", ui.agentSelector, id)
 end
 
-function WoWAI.SetModel(value, c)
+function Wowie.SetModel(value, c)
 	c = c or ActiveChat()
 	if not c then return end
 	value = Trim(value or "")
 	if value == "-" or value == "default" then value = "" end
 	if value == "" and c.model ~= "" then c.resetNext = true end
 	c.model = value
-	WoWAI.Render()
+	Wowie.Render()
 end
 
-function WoWAI.SetReasoning(value, c)
+function Wowie.SetReasoning(value, c)
 	c = c or ActiveChat()
 	if not c then return end
 	value = Trim(value or ""):lower()
@@ -2066,10 +2127,10 @@ function WoWAI.SetReasoning(value, c)
 	if value ~= "" and not Contains(ChatOptions(c).reasoningLevels, value) then return end
 	if value == "" and c.reasoning ~= "" then c.resetNext = true end
 	c.reasoning = value
-	WoWAI.Render()
+	Wowie.Render()
 end
 
-function WoWAI.SaveDefaults()
+function Wowie.SaveDefaults()
 	local draft = ui.defaultsDraft
 	if not draft then return end
 	local nextDefaults = { agent = draft.agent, model = draft.model, reasoning = draft.reasoning }
@@ -2088,10 +2149,10 @@ function WoWAI.SaveDefaults()
 	db.settings.defaults = nextDefaults
 	ui.defaultsPanel:Hide()
 	tx.SetPreference(draft.pixelDisplay)
-	WoWAI.Render()
+	Wowie.Render()
 end
 
-StaticPopupDialogs["WOWAI_MODEL"] = {
+StaticPopupDialogs["WOWIE_MODEL"] = {
 	text = "Model selection\n\nEnter a model ID or alias accepted by the selected agent.\nEmpty inherits the default. Applies to future messages.",
 	button1 = OKAY,
 	button2 = CANCEL,
@@ -2112,26 +2173,26 @@ StaticPopupDialogs["WOWAI_MODEL"] = {
 	OnAccept = function(dialog, data)
 		local box = dialog.GetEditBox and dialog:GetEditBox() or dialog.editBox
 		if data and data.defaults then
-			if ui.defaultsDraft and box then WoWAI.SetDefaultChoice("model", box:GetText()) end
+			if ui.defaultsDraft and box then Wowie.SetDefaultChoice("model", box:GetText()) end
 		else
 			local chat = data and FindChat(data.id)
-			if chat and box then WoWAI.SetModel(box:GetText(), chat) end
+			if chat and box then Wowie.SetModel(box:GetText(), chat) end
 		end
 	end,
 	EditBoxOnEnterPressed = function(box)
 		local dialog = box:GetParent()
-		StaticPopupDialogs["WOWAI_MODEL"].OnAccept(dialog, dialog.data)
+		StaticPopupDialogs["WOWIE_MODEL"].OnAccept(dialog, dialog.data)
 		dialog:Hide()
 	end,
 	EditBoxOnEscapePressed = function(box) box:GetParent():Hide() end,
 }
 
-function WoWAI.ModelPrompt(id, defaults)
+function Wowie.ModelPrompt(id, defaults)
 	local c = defaults and ui.defaultsDraft or ((id and FindChat(id)) or ActiveChat())
-	if c then StaticPopup_Show("WOWAI_MODEL", nil, nil, { id = c.id, model = c.model, defaults = defaults }) end
+	if c then StaticPopup_Show("WOWIE_MODEL", nil, nil, { id = c.id, model = c.model, defaults = defaults }) end
 end
 
-StaticPopupDialogs["WOWAI_RENAME"] = {
+StaticPopupDialogs["WOWIE_RENAME"] = {
 	text = "Rename this chat",
 	button1 = OKAY,
 	button2 = CANCEL,
@@ -2154,12 +2215,12 @@ StaticPopupDialogs["WOWAI_RENAME"] = {
 		local name = box and Trim(box:GetText() or "") or ""
 		if chat and name ~= "" then
 			chat.name = name:sub(1, 24)
-			WoWAI.Render()
+			Wowie.Render()
 		end
 	end,
 	EditBoxOnEnterPressed = function(box)
 		local dialog = box:GetParent()
-		StaticPopupDialogs["WOWAI_RENAME"].OnAccept(dialog, dialog.data)
+		StaticPopupDialogs["WOWIE_RENAME"].OnAccept(dialog, dialog.data)
 		dialog:Hide()
 	end,
 	EditBoxOnEscapePressed = function(box)
@@ -2168,17 +2229,17 @@ StaticPopupDialogs["WOWAI_RENAME"] = {
 }
 
 -- Rename dialog for a chat (the active one when no id is given).
-function WoWAI.RenamePrompt(id)
+function Wowie.RenamePrompt(id)
 	local c = (id and FindChat(id)) or ActiveChat()
 	if not c then return end
-	StaticPopup_Show("WOWAI_RENAME", nil, nil, { id = c.id, name = c.name })
+	StaticPopup_Show("WOWIE_RENAME", nil, nil, { id = c.id, name = c.name })
 end
-WoWAI.RenameActive = WoWAI.RenamePrompt
+Wowie.RenameActive = Wowie.RenamePrompt
 
 -- Delete a chat (the active one when no id is given). The last chat is cleared
 -- and renamed instead of removed, so there is always one to type into. Either
 -- way the bridge is told to forget it, so a restore won't bring it back.
-function WoWAI.DeleteChat(id)
+function Wowie.DeleteChat(id)
 	local c, idx = nil, nil
 	if id then c, idx = FindChat(id) end
 	if not c then c, idx = ActiveChat() end
@@ -2189,20 +2250,20 @@ function WoWAI.DeleteChat(id)
 		c.pendingId, c.progress, c.unread, c.draft = nil, nil, 0, nil
 		c.name = "Chat 1"
 		if ui.input then ui.input:SetText("") end
-		WoWAI.Render()
-		WoWAI.RenderChatList()
+		Wowie.Render()
+		Wowie.RenderChatList()
 		return
 	end
 	table.remove(db.chats, idx)
 	if db.activeChat == c.id then
-		WoWAI.SwitchChat(db.chats[math.min(idx, #db.chats)].id)
+		Wowie.SwitchChat(db.chats[math.min(idx, #db.chats)].id)
 	else
-		WoWAI.RenderChatList()
+		Wowie.RenderChatList()
 	end
 end
 
--- The conversation menu asks before deleting; /wow-ai delete does not.
-StaticPopupDialogs["WOWAI_DELETE"] = {
+-- The conversation menu asks before deleting; /wowie delete does not.
+StaticPopupDialogs["WOWIE_DELETE"] = {
 	text = "Delete chat \"%s\"?\n\nIts transcript goes away (the last chat is cleared instead of removed).",
 	button1 = OKAY,
 	button2 = CANCEL,
@@ -2210,14 +2271,14 @@ StaticPopupDialogs["WOWAI_DELETE"] = {
 	whileDead = true,
 	hideOnEscape = true,
 	OnAccept = function(dialog, data)
-		if data then WoWAI.DeleteChat(data.id) end
+		if data then Wowie.DeleteChat(data.id) end
 	end,
 }
 
-function WoWAI.ConfirmDelete(id)
+function Wowie.ConfirmDelete(id)
 	local c = (id and FindChat(id)) or ActiveChat()
 	if not c then return end
-	StaticPopup_Show("WOWAI_DELETE", Display(c.name), nil, { id = c.id })
+	StaticPopup_Show("WOWIE_DELETE", Display(c.name), nil, { id = c.id })
 end
 
 ---------------------------------------------------------------------------
@@ -2234,11 +2295,11 @@ local MACRO_CHAR_MAX = (Constants and Constants.MacroConsts and Constants.MacroC
 local MACRO_DEFAULT_ICON = 134400 -- question mark: with #showtooltip the game shows the spell's icon
 
 local function MacroSay(msg)
-	print("|cff66ccff[WoW AI]|r " .. msg)
+	print("|cff66ccff[Wowie]|r " .. msg)
 end
 
 -- Only well-formed entries survive (the slot file is trusted, but not blindly).
-function WoWAI.CleanMacros(list)
+function Wowie.CleanMacros(list)
 	if type(list) ~= "table" then return nil end
 	local out = {}
 	for _, m in ipairs(list) do
@@ -2273,12 +2334,12 @@ local function MacroIcon(icon)
 	return MACRO_DEFAULT_ICON
 end
 
-function WoWAI.MacroLabel(m)
+function Wowie.MacroLabel(m)
 	local verb = FindMacro(m.name, m.char) and "Update" or "Create"
 	return verb .. " macro: " .. Display(m.name) .. (m.char and " (character)" or "") .. (m.risky and "  |cffff6060(runs code)|r" or "")
 end
 
-StaticPopupDialogs["WOWAI_MACRO"] = {
+StaticPopupDialogs["WOWIE_MACRO"] = {
 	text = "%s",
 	button1 = OKAY,
 	button2 = CANCEL,
@@ -2286,13 +2347,13 @@ StaticPopupDialogs["WOWAI_MACRO"] = {
 	whileDead = true,
 	hideOnEscape = true,
 	OnAccept = function(dialog, data)
-		if data then WoWAI.InstallMacro(data, true) end
+		if data then Wowie.InstallMacro(data, true) end
 	end,
 }
 
 -- Create or update macro `m` ({ name, body, icon, char, risky }). Asks first when it
 -- would replace a different macro of yours, or when it runs code (/run, /click...).
-function WoWAI.InstallMacro(m, confirmed)
+function Wowie.InstallMacro(m, confirmed)
 	if type(m) ~= "table" then return end
 	if InCombatLockdown() then
 		MacroSay("macros can't be changed in combat; click the button again afterwards.")
@@ -2302,9 +2363,9 @@ function WoWAI.InstallMacro(m, confirmed)
 	if not confirmed then
 		local why = {}
 		if m.risky then table.insert(why, "This macro runs code or clicks buttons (/run, /script, /click). Only keep it if you trust what it does.") end
-		if index and oldBody ~= m.body then table.insert(why, "It replaces your existing macro \"" .. m.name .. "\" (/wow-ai macro undo brings the old one back).") end
+		if index and oldBody ~= m.body then table.insert(why, "It replaces your existing macro \"" .. m.name .. "\" (/wowie macro undo brings the old one back).") end
 		if #why > 0 then
-			StaticPopup_Show("WOWAI_MACRO", table.concat(why, "\n\n") .. "\n\n" .. Display(m.body), nil, m)
+			StaticPopup_Show("WOWIE_MACRO", table.concat(why, "\n\n") .. "\n\n" .. Display(m.body), nil, m)
 			return
 		end
 	end
@@ -2345,10 +2406,10 @@ function WoWAI.InstallMacro(m, confirmed)
 	-- EditMacro may move the macro (names are sorted): pick up the index it returned.
 	Try(PickupMacro, newIndex)
 	MacroSay("macro \"" .. m.name .. "\" " .. (index and "updated" or "created") .. " and on your cursor: click an action bar slot to place it (it is also in /macro).")
-	WoWAI.Render()
+	Wowie.Render()
 end
 
-function WoWAI.UndoMacro()
+function Wowie.UndoMacro()
 	local u = db.macroUndo
 	if not u then MacroSay("nothing to undo."); return end
 	if InCombatLockdown() then MacroSay("macros can't be changed in combat."); return end
@@ -2363,14 +2424,14 @@ function WoWAI.UndoMacro()
 		MacroSay("macro \"" .. u.name .. "\" is back to what it was.")
 	end
 	db.macroUndo = nil
-	WoWAI.Render()
+	Wowie.Render()
 end
 
 ---------------------------------------------------------------------------
 -- Rendering
 ---------------------------------------------------------------------------
 
-function WoWAI.UpdateStatus()
+function Wowie.UpdateStatus()
 	if not ui.status then return end
 	local c = ActiveChat()
 	local mode = db.settings.mode
@@ -2392,12 +2453,12 @@ function WoWAI.UpdateStatus()
 				s = ChatAgentName(c) .. " is working on #" .. id .. " - " .. ActivityLine(c)
 			elseif rec and not rec.acked then
 				s = "Sending #" .. id .. (rec.tries and rec.tries > 1 and (" (try " .. rec.tries .. "/" .. STRIP_TRIES .. ")") or "") .. "..."
-				local state = WoWAI.BridgeState()
+				local state = Wowie.BridgeState()
 				if state == "down" then s = s .. " - bridge not seen lately, is the bridge running?" end
 			else
 				s = "Waiting for #" .. id .. " (checked " .. (run.polls or 0) .. "x)"
 				if elapsed > 45 then
-					s = s .. " - no sign of the bridge. Is the bridge running? /wow-ai resend"
+					s = s .. " - no sign of the bridge. Is the bridge running? /wowie resend"
 				end
 			end
 		else
@@ -2406,7 +2467,7 @@ function WoWAI.UpdateStatus()
 				s = s .. "; auto on next keypress after " .. db.settings.interval .. "s"
 			end
 		end
-	elseif not WoWAI.IsConnected() then
+	elseif not Wowie.IsConnected() then
 		if run.connectingAt and run.sendOnConnect then
 			s = "Checking bridge... your message goes out after verification"
 		elseif run.connectingAt then
@@ -2425,8 +2486,8 @@ function WoWAI.UpdateStatus()
 	end
 	ui.status:SetText(s)
 	run.statusText = s
-	WoWAI.UpdateDot()
-	WoWAI.UpdateConnect()
+	Wowie.UpdateDot()
+	Wowie.UpdateConnect()
 	if ui.title then ui.title:SetText(c and Display(c.name) or "Conversation") end
 	local cwdText
 	if c and c.cwd ~= "" then
@@ -2447,8 +2508,8 @@ function WoWAI.UpdateStatus()
 		agentText = "(bridge default)"
 	end
 	ui.cwd:SetText(cwdText .. " · " .. agentText)
-	WoWAI.UpdateSelectors()
-	WoWAI.UpdateMini()
+	Wowie.UpdateSelectors()
+	Wowie.UpdateMini()
 end
 
 -- Message bodies are selectable in place; readonly guards never change history.
@@ -2461,24 +2522,27 @@ local function GetBubble(i)
 	b.accent = b:CreateTexture(nil, "BORDER")
 	b.accent:SetPoint("TOPLEFT", b, "TOPLEFT", 0, 0)
 	b.accent:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 0, 0)
-	b.accent:SetWidth(3)
+	b.accent:SetWidth(1)
+	b.rule = UI.Rule(b, "border", 0.30)
+	b.rule:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 10, 0)
+	b.rule:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -10, 0)
 	b.who = UI.Label(b, "", 12)
 	b.who:SetPoint("TOPLEFT", b, "TOPLEFT", 10, -8)
 	b.who:SetPoint("RIGHT", b, "RIGHT", -64, 0)
 	b.who:SetWordWrap(false)
 	b.when = UI.Label(b, "", 10, "muted")
 	b.when:SetPoint("TOPRIGHT", b, "TOPRIGHT", -10, -10)
-	b.body = CreateFrame("EditBox", "WoWAIMessageText" .. i, b)
+	b.body = CreateFrame("EditBox", "WowieMessageText" .. i, b)
 	b.body:SetMultiLine(true)
 	b.body:SetAutoFocus(false)
-	b.body:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF", 14, "")
+	b.body:SetFont(UI.font, 15, "")
 	b.body:SetTextInsets(0, 0, 0, 0)
 	b.body:SetSpacing(2)
 	b.body:SetMaxLetters(0)
 	b.body:SetJustifyH("LEFT")
 	b.body:SetJustifyV("TOP")
 	b.body:SetPoint("TOPLEFT", b.who, "BOTTOMLEFT", 0, -6)
-	b.body:SetHighlightColor(0.30, 0.66, 0.98, 0.45)
+	b.body:SetHighlightColor(unpack(UI.colors.highlight))
 	b.body.messageText = ""
 	b.body:SetScript("OnTextChanged", function(self)
 		if self:GetText() == self.messageText then return end
@@ -2488,7 +2552,7 @@ local function GetBubble(i)
 	end)
 	b.body:SetScript("OnEscapePressed", function(self) self:ClearFocus(); self:ClearHighlightText() end)
 	b.body:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
-	b.allow = UI.Button(b, "", 180, function(self) WoWAI.Allow(self.chatId, self.rules) end, "primary")
+	b.allow = UI.Button(b, "", 180, function(self) Wowie.Allow(self.chatId, self.rules) end, "primary")
 	b.allow:SetPoint("TOPLEFT", b.body, "BOTTOMLEFT", 0, -10)
 	b.allow:Hide()
 	b.macroBtns = {}
@@ -2497,7 +2561,7 @@ local function GetBubble(i)
 	return b
 end
 
-function WoWAI.Render()
+function Wowie.Render()
 	local c = ActiveChat()
 	if ui.content and c then
 		local oldChat = ui.renderedChat
@@ -2520,7 +2584,7 @@ function WoWAI.Render()
 			local st = ROLE_STYLE[role] or ROLE_STYLE.system
 			b:SetWidth(width)
 			b.bg:SetColorTexture(st.bg[1], st.bg[2], st.bg[3], st.bg[4])
-			b.accent:SetColorTexture(st.color[1], st.color[2], st.color[3], 0.9)
+			b.accent:SetColorTexture(st.color[1], st.color[2], st.color[3], 0.40)
 			b.who:SetText(st == ROLE_STYLE.assistant and ReplyAgentName(c, agent) or st.label)
 			b.who:SetTextColor(st.color[1], st.color[2], st.color[3])
 			b.when:SetText(when or "")
@@ -2536,9 +2600,9 @@ function WoWAI.Render()
 			-- A no-op redraw must preserve the native selection and caret.
 			if b.text ~= text then b.body:SetText(text); b.body:SetCursorPosition(0) end
 			if dim then
-				b.body:SetTextColor(0.72, 0.72, 0.72)
+				b.body:SetTextColor(unpack(UI.colors.muted))
 			else
-				b.body:SetTextColor(0.93, 0.93, 0.93)
+				b.body:SetTextColor(unpack(UI.colors.text))
 			end
 			if layoutChanged then
 				-- Point size times EditBox line count is not the painted extent.
@@ -2569,7 +2633,7 @@ function WoWAI.Render()
 			for k, m in ipairs(macros or {}) do
 				local mb = b.macroBtns[k]
 				if not mb then
-					mb = UI.Button(b, "", 180, function(self) WoWAI.InstallMacro(self.macro) end, "secondary")
+					mb = UI.Button(b, "", 180, function(self) Wowie.InstallMacro(self.macro) end, "secondary")
 					mb:SetScript("OnEnter", function(self)
 						GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
 						GameTooltip:AddLine(Display(self.macro.name))
@@ -2580,7 +2644,7 @@ function WoWAI.Render()
 					b.macroBtns[k] = mb
 				end
 				mb.macro = m
-				mb:SetText(WoWAI.MacroLabel(m))
+				mb:SetText(Wowie.MacroLabel(m))
 				mb:SetWidth(math.min(width - 24, math.max(160, mb:GetFontString():GetStringWidth() + 30)))
 				mb:ClearAllPoints()
 				mb:SetPoint("TOPLEFT", b.body, "BOTTOMLEFT", 0, -10 - extra)
@@ -2623,14 +2687,14 @@ function WoWAI.Render()
 		ui.scroll:SetVerticalScroll(targetScroll and math.min(targetScroll, range) or range)
 		ui.latest:SetShown(range - ui.scroll:GetVerticalScroll() > 32)
 	end
-	WoWAI.UpdateStatus()
-	WoWAI.RenderChatList()
+	Wowie.UpdateStatus()
+	Wowie.RenderChatList()
 end
 
--- Copy box (/wow-ai copy): a selectable EditBox with the last reply pre-highlighted for Ctrl+C.
-function WoWAI.ShowCopy(text)
+-- Copy box (/wowie copy): a selectable EditBox with the last reply pre-highlighted for Ctrl+C.
+function Wowie.ShowCopy(text)
 	if not ui.copy then
-		local cf = CreateFrame("Frame", "WoWAICopy", UIParent, "BackdropTemplate")
+		local cf = CreateFrame("Frame", "WowieCopy", UIParent, "BackdropTemplate")
 		cf:SetSize(560, 320)
 		cf:SetPoint("CENTER")
 		cf:SetFrameStrata("FULLSCREEN_DIALOG")
@@ -2640,19 +2704,19 @@ function WoWAI.ShowCopy(text)
 		cf:RegisterForDrag("LeftButton")
 		cf:SetScript("OnDragStart", cf.StartMoving)
 		cf:SetScript("OnDragStop", cf.StopMovingOrSizing)
-		UI.Surface(cf)
-		tinsert(UISpecialFrames, "WoWAICopy")
+		UI.Window(cf, 44)
+		tinsert(UISpecialFrames, "WowieCopy")
 
-		local t = UI.Label(cf, "Copy message · Ctrl+C, then Esc", 14)
+		local t = UI.Title(cf, "Copy message · Ctrl+C, then Esc", 14)
 		t:SetPoint("TOPLEFT", cf, "TOPLEFT", 16, -16)
 
-		local x = UI.Button(cf, "Close", 66, function() cf:Hide() end, "quiet", "WoWAICopyClose")
+		local x = UI.Button(cf, "Close", 66, function() cf:Hide() end, "quiet", "WowieCopyClose")
 		x:SetPoint("TOPRIGHT", cf, "TOPRIGHT", -8, -8)
 
-		local sc = UI.ScrollFrame(cf, "WoWAICopyScroll")
+		local sc = UI.ScrollFrame(cf, "WowieCopyScroll")
 		sc:SetPoint("TOPLEFT", cf, "TOPLEFT", 16, -52)
 		sc:SetPoint("BOTTOMRIGHT", cf, "BOTTOMRIGHT", -32, 14)
-		local eb = CreateFrame("EditBox", "WoWAICopyBox", sc)
+		local eb = CreateFrame("EditBox", "WowieCopyBox", sc)
 		eb:SetMultiLine(true)
 		eb:SetAutoFocus(false)
 		eb:SetFontObject(ChatFontNormal)
@@ -2670,7 +2734,7 @@ function WoWAI.ShowCopy(text)
 	ui.copyBox:HighlightText()
 end
 
-function WoWAI.RenderChatList()
+function Wowie.RenderChatList()
 	if not ui.chatButtons then return end
 	local query = ui.chatSearch:GetText():lower()
 	local n = 0
@@ -2688,6 +2752,8 @@ function WoWAI.RenderChatList()
 			btn.detail:SetTextColor(unpack(UI.colors[c.pendingId and "warning" or ((c.unread or 0) > 0 and "success" or "muted")]))
 			btn.chatId = c.id
 			btn.selected:SetShown(c.id == db.activeChat)
+			btn.selectedLine:SetShown(c.id == db.activeChat)
+			btn.label:SetTextColor(unpack(UI.colors[c.id == db.activeChat and "accent" or "text"]))
 			btn:ClearAllPoints()
 			btn:SetPoint("TOPLEFT", ui.chatContent, "TOPLEFT", 0, -(n - 1) * 56)
 			btn:Show()
@@ -2700,7 +2766,7 @@ function WoWAI.RenderChatList()
 	ui.newChat:SetEnabled(#db.chats < MAX_CHATS)
 end
 
-function WoWAI.UpdateMini()
+function Wowie.UpdateMini()
 	if not ui.miniBadge then return end
 	local unread, working = 0, 0
 	for _, c in ipairs(db.chats) do
@@ -2720,10 +2786,10 @@ function WoWAI.UpdateMini()
 	ui.miniBadge:SetText(t)
 end
 
-local ECHO_DEFAULT = 4000 -- characters of a reply to print into the game chat ("/wow-ai echo <n>")
+local ECHO_DEFAULT = 4000 -- characters of a reply to print into the game chat ("/wowie echo <n>")
 
 local function ChatLinks(chat)
-	return "  |Hwowai:reply:" .. chat.id .. "|h|cff55ff55[reply]|r|h |Hwowai:open:" .. chat.id .. "|h|cff7ec8ff[open]|r|h"
+	return "  |Hwowie:reply:" .. chat.id .. "|h|cff55ff55[reply]|r|h |Hwowie:open:" .. chat.id .. "|h|cff7ec8ff[open]|r|h"
 end
 
 local SUMMARY_LINES = 3 -- lines of the agent's TL;DR block printed in "summary" mode
@@ -2782,9 +2848,9 @@ end
 
 -- A reply landed. Always play the sound and echo it to the game chat; if that
 -- chat isn't on screen, also flash the screen text and light up the mini bar.
-function WoWAI.Notify(chat, text, agent, summary)
+function Wowie.Notify(chat, text, agent, summary)
 	pcall(PlaySound, 3081)
-	WoWAI.UpdateMini()
+	Wowie.UpdateMini()
 	-- Until a real whisper arrives, /r replies to this chat.
 	run.lastMessenger = "agent"
 	run.lastReplyChat = chat.id
@@ -2824,11 +2890,11 @@ local function SendBoxToAgent(eb)
 	local text = Trim(eb:GetText() or "")
 	eb.agentTarget = nil
 	eb:ClearChat()
-	if chat and db.activeChat ~= chat.id then WoWAI.SwitchChat(chat.id) end
+	if chat and db.activeChat ~= chat.id then Wowie.SwitchChat(chat.id) end
 	if text ~= "" then
-		WoWAI.Send(text)
+		Wowie.Send(text)
 	else
-		WoWAI.Toggle(true)
+		Wowie.Toggle(true)
 		if ui.input then ui.input:SetFocus() end
 	end
 end
@@ -2888,10 +2954,10 @@ end
 
 -- Clicks on our [reply] / [open] links in the chat frame.
 hooksecurefunc("SetItemRef", function(link)
-	local action, chatId = tostring(link):match("^wowai:(%a+):(%w+)")
+	local action, chatId = tostring(link):match("^wowie:(%a+):(%w+)")
 	if not action or not db then return end
-	if FindChat(chatId) then WoWAI.SwitchChat(chatId) end
-	WoWAI.Toggle(true)
+	if FindChat(chatId) then Wowie.SwitchChat(chatId) end
+	Wowie.Toggle(true)
 	if action == "reply" and ui.input then ui.input:SetFocus() end
 end)
 
@@ -2921,11 +2987,12 @@ end
 local PANEL_W = 180
 
 local function EditField(parent, name, placeholder)
-	local bg = UI.Surface(CreateFrame("Frame", nil, parent, "BackdropTemplate"), "background")
+	local bg = CreateFrame("Frame", nil, parent, "BackdropTemplate")
 	bg:SetHeight(30)
 	local field = CreateFrame("EditBox", name, bg)
+	UI.Input(bg, field)
 	field:SetAutoFocus(false)
-	field:SetFontObject(ChatFontNormal)
+	field:SetFont(UI.font, 13, "")
 	field:SetPoint("TOPLEFT", bg, "TOPLEFT", 9, -6)
 	field:SetPoint("BOTTOMRIGHT", bg, "BOTTOMRIGHT", -9, 6)
 	field:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
@@ -2948,7 +3015,7 @@ local function MakeSelectorRow(parent, name, defaults, compact)
 		{ "reasoning", "Reasoning", "Available levels come from the selected agent. Unsupported agents have no reasoning switch." },
 	}) do
 		local key = spec[1]
-		local b = UI.Button(row, "", 120, function(self) WoWAI.ShowSelection(key, self, nil, defaults) end, "secondary", name .. spec[2])
+		local b = UI.Button(row, "", 120, function(self) Wowie.ShowSelection(key, self, nil, defaults) end, "secondary", name .. spec[2])
 		b.fieldLabel = spec[2]
 		b:SetHeight(compact and 28 or 30)
 		b:SetPoint("TOPLEFT", row, "TOPLEFT", 0, compact and 0 or -18)
@@ -2994,22 +3061,22 @@ local function SelectorDefault(c, key, options, defaults)
 end
 
 local function MakeSelectors(parent)
-	local row = MakeSelectorRow(parent, "WoWAISelectors", false, true)
+	local row = MakeSelectorRow(parent, "WowieSelectors", false, true)
 	ui.selectorRow = row
 	for _, key in ipairs({ "agent", "model", "reasoning" }) do ui[key .. "Selector"] = row.buttons[key] end
-	local menu = UI.Surface(CreateFrame("Frame", "WoWAISelectionMenu", parent, "BackdropTemplate"))
+	local menu = UI.Window(CreateFrame("Frame", "WowieSelectionMenu", parent, "BackdropTemplate"), 36)
 	menu:SetFrameStrata("FULLSCREEN_DIALOG")
 	menu:SetClampedToScreen(true)
 	menu:EnableMouse(true)
-	tinsert(UISpecialFrames, "WoWAISelectionMenu")
-	menu.title = UI.Label(menu, "Choose", 13)
+	tinsert(UISpecialFrames, "WowieSelectionMenu")
+	menu.title = UI.Title(menu, "Choose", 14)
 	menu.title:SetPoint("TOPLEFT", menu, "TOPLEFT", 12, -12)
-	local close = UI.Button(menu, "X", 28, function() menu:Hide() end, "quiet", "WoWAISelectionClose")
+	local close = UI.Button(menu, "X", 28, function() menu:Hide() end, "quiet", "WowieSelectionClose")
 	close:SetPoint("TOPRIGHT", menu, "TOPRIGHT", -6, -5)
-	local searchBg, search = EditField(menu, "WoWAISelectionSearch", "Search choices...")
+	local searchBg, search = EditField(menu, "WowieSelectionSearch", "Search choices...")
 	searchBg:SetPoint("TOPLEFT", menu, "TOPLEFT", 10, -42)
 	searchBg:SetPoint("TOPRIGHT", menu, "TOPRIGHT", -10, -42)
-	local scroll = UI.ScrollFrame(menu, "WoWAISelectionScroll")
+	local scroll = UI.ScrollFrame(menu, "WowieSelectionScroll")
 	scroll:SetPoint("TOPLEFT", searchBg, "BOTTOMLEFT", 0, -8)
 	scroll:SetPoint("BOTTOMRIGHT", menu, "BOTTOMRIGHT", -30, 12)
 	local content = CreateFrame("Frame", nil, scroll)
@@ -3033,17 +3100,18 @@ local function MakeSelectors(parent)
 				b:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -(n - 1) * 32)
 				b:SetWidth(menu:GetWidth() - 42)
 				b.value = choice.value
-				b:SetText((choice.value == menu.selected and "• " or "   ") .. Display(choice.label))
+				b:SetText(Display(choice.label))
+				UI.SetSelected(b, not choice.action and choice.value == menu.selected)
 				b:SetScript("OnClick", function()
 					menu:Hide()
 					if choice.action then choice.action()
-					elseif menu.defaults then WoWAI.SetDefaultChoice(menu.key, choice.value)
+					elseif menu.defaults then Wowie.SetDefaultChoice(menu.key, choice.value)
 					else
 						local c = FindChat(menu.chatId)
 						if not c then return end
-						if menu.key == "agent" then WoWAI.SetAgent(choice.value, c)
-						elseif menu.key == "model" then WoWAI.SetModel(choice.value, c)
-						else WoWAI.SetReasoning(choice.value, c) end
+						if menu.key == "agent" then Wowie.SetAgent(choice.value, c)
+						elseif menu.key == "model" then Wowie.SetModel(choice.value, c)
+						else Wowie.SetReasoning(choice.value, c) end
 					end
 				end)
 				b:Show()
@@ -3063,7 +3131,7 @@ local function MakeSelectors(parent)
 	menu:Hide()
 	ui.selectionMenu = menu
 
-	function WoWAI.ShowSelection(key, anchor, id, defaults)
+	function Wowie.ShowSelection(key, anchor, id, defaults)
 		local c
 		if defaults then c = ui.defaultsDraft else c = (id and FindChat(id)) or ActiveChat() end
 		if not c or (defaults and key ~= "agent" and c.agent == "") then return end
@@ -3085,7 +3153,7 @@ local function MakeSelectors(parent)
 			if inherited ~= "" and not Contains(models, inherited) then table.insert(models, inherited) end
 			for _, value in ipairs(o.models or {}) do if not Contains(models, value) then table.insert(models, value) end end
 			for _, value in ipairs(models) do Choice(value, value) end
-			Choice(nil, "Custom model ID...", function() WoWAI.ModelPrompt(c.id, defaults) end)
+			Choice(nil, "Custom model ID...", function() Wowie.ModelPrompt(c.id, defaults) end)
 		elseif key == "reasoning" then
 			if not o.reasoningLevels or #o.reasoningLevels == 0 then return end
 			local inherited = SelectorDefault(c, key, o, defaults)
@@ -3124,14 +3192,14 @@ local function UpdateSelectorRow(row, c, defaults)
 	Set(row.buttons.reasoning, chooseAgent and "Choose agent" or (supported and (c.reasoning ~= "" and AgentName(c.reasoning) or (reasoning ~= "" and ("Default (" .. reasoning .. ")") or "Default")) or (run.agentOptions and "Not supported" or "Connect first")), supported and AgentName(c.reasoning ~= "" and c.reasoning or (reasoning ~= "" and reasoning or "Automatic")) or "Unavailable")
 end
 
-function WoWAI.UpdateSelectors()
+function Wowie.UpdateSelectors()
 	local c = ActiveChat()
 	if c and ui.selectorRow then UpdateSelectorRow(ui.selectorRow, c) end
 	if ui.defaultsDraft and ui.defaultsRow then UpdateSelectorRow(ui.defaultsRow, ui.defaultsDraft, true) end
 end
 
 local function MakeDefaultsPanel(parent)
-	local panel = UI.Surface(CreateFrame("Frame", "WoWAIDefaults", parent, "BackdropTemplate"))
+	local panel = UI.Window(CreateFrame("Frame", "WowieDefaults", parent, "BackdropTemplate"), 44)
 	panel:SetSize(590, 430)
 	panel:SetPoint("CENTER")
 	panel:SetFrameStrata("DIALOG")
@@ -3142,13 +3210,13 @@ local function MakeDefaultsPanel(parent)
 	panel:RegisterForDrag("LeftButton")
 	panel:SetScript("OnDragStart", panel.StartMoving)
 	panel:SetScript("OnDragStop", panel.StopMovingOrSizing)
-	tinsert(UISpecialFrames, "WoWAIDefaults")
-	local title = UI.Label(panel, "Settings", 17)
+	tinsert(UISpecialFrames, "WowieDefaults")
+	local title = UI.Title(panel, "Settings", 17)
 	title:SetPoint("TOPLEFT", panel, "TOPLEFT", 18, -18)
 	local description = UI.Label(panel, "Chats set to Default inherit these choices, then the bridge / CLI defaults.\nChoose an explicit agent before setting its model or reasoning.", 12, "muted")
 	description:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -14)
 	description:SetWidth(550)
-	local row = MakeSelectorRow(panel, "WoWAIDefaultSelectors", true)
+	local row = MakeSelectorRow(panel, "WowieDefaultSelectors", true)
 	row:SetPoint("TOPLEFT", panel, "TOPLEFT", 18, -100)
 	row:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -18, -100)
 	local note = UI.Label(panel, "Applies to future messages only. Pending requests keep their original settings.\nNew chats inherit the current chat's choices. Bridge configuration is unchanged.", 11, "muted")
@@ -3160,7 +3228,7 @@ local function MakeDefaultsPanel(parent)
 	for i, display in ipairs({ "robust", "compact", "quiet" }) do
 		local button = UI.Button(panel, Codec.DISPLAYS[display].label, 174, function()
 			if ui.defaultsDraft then ui.defaultsDraft.pixelDisplay = display; tx.UpdateSettings() end
-		end, "secondary", "WoWAIPixelDisplay" .. Codec.DISPLAYS[display].label)
+		end, "secondary", "WowiePixelDisplay" .. Codec.DISPLAYS[display].label)
 		button:SetPoint("TOPLEFT", panel, "TOPLEFT", 18 + (i - 1) * 182, -238)
 		ui.pixelButtons[display] = button
 	end
@@ -3175,12 +3243,12 @@ local function MakeDefaultsPanel(parent)
 	local reset = UI.Button(panel, "Use bridge defaults", 156, function()
 		ui.defaultsDraft = { agent = "", model = "", reasoning = "", pixelDisplay = ui.defaultsDraft.pixelDisplay }
 		if ui.selectionMenu then ui.selectionMenu:Hide() end
-		WoWAI.UpdateSelectors()
-	end, "secondary", "WoWAIDefaultsReset")
+		Wowie.UpdateSelectors()
+	end, "secondary", "WowieDefaultsReset")
 	reset:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 18, 16)
-	local save = UI.Button(panel, "Save", 80, WoWAI.SaveDefaults, "primary", "WoWAIDefaultsSave")
+	local save = UI.Button(panel, "Save", 80, Wowie.SaveDefaults, "primary", "WowieDefaultsSave")
 	save:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -18, 16)
-	local cancel = UI.Button(panel, "Cancel", 80, function() panel:Hide() end, "secondary", "WoWAIDefaultsCancel")
+	local cancel = UI.Button(panel, "Cancel", 80, function() panel:Hide() end, "secondary", "WowieDefaultsCancel")
 	cancel:SetPoint("RIGHT", save, "LEFT", -8, 0)
 	panel:Hide()
 	panel:SetScript("OnHide", function()
@@ -3189,17 +3257,17 @@ local function MakeDefaultsPanel(parent)
 	end)
 	ui.defaultsPanel, ui.defaultsRow = panel, row
 
-	function WoWAI.ShowDefaults()
+	function Wowie.ShowDefaults()
 		local d = db.settings.defaults
 		ui.defaultsDraft = { agent = d.agent, model = d.model, reasoning = d.reasoning, pixelDisplay = db.settings.pixelDisplay }
 		if ui.selectionMenu then ui.selectionMenu:Hide() end
-		WoWAI.Toggle(true)
+		Wowie.Toggle(true)
 		panel:Show()
-		WoWAI.UpdateSelectors()
+		Wowie.UpdateSelectors()
 		tx.UpdateSettings()
 	end
 
-	function WoWAI.SetDefaultChoice(key, value)
+	function Wowie.SetDefaultChoice(key, value)
 		local d = ui.defaultsDraft
 		if not d then return end
 		value = Trim(value or "")
@@ -3213,26 +3281,26 @@ local function MakeDefaultsPanel(parent)
 			if value ~= "" and not Contains(o.reasoningLevels, value) then return end
 			d.reasoning = value
 		end
-		WoWAI.UpdateSelectors()
+		Wowie.UpdateSelectors()
 	end
 end
 
 
-function WoWAI.UpdateSharingSummary()
+function Wowie.UpdateSharingSummary()
 	if not ui.sharingSummary then return end
-	local summary = WoWAIContextUI and WoWAIContextUI.Summary and WoWAIContextUI.Summary()
+	local summary = WowieContextUI and WowieContextUI.Summary and WowieContextUI.Summary()
 	if summary then
 		ui.sharingSummary:SetText((summary.enabled and "Sharing on" or "Sharing paused") .. " · " .. summary.selected .. " selected")
 		ui.sharingSummary:SetTextColor(unpack(UI.colors[summary.enabled and "muted" or "warning"]))
 	else ui.sharingSummary:SetText("Choose what the AI may read") end
 end
 
-StaticPopupDialogs["WOWAI_CLEAR"] = {
+StaticPopupDialogs["WOWIE_CLEAR"] = {
 	text = "Clear the visible transcript for \"%s\"? This does not reset the agent session.",
 	button1 = "Clear", button2 = CANCEL, timeout = 0, whileDead = true, hideOnEscape = true,
 	OnAccept = function(_, data)
 		local c = FindChat(data.id)
-		if c then wipe(c.history); WoWAI.Render() end
+		if c then wipe(c.history); Wowie.Render() end
 	end,
 }
 
@@ -3244,7 +3312,7 @@ local function BuildUI()
 	local minW, minH = 720, 500
 	local maxW, maxH = screenW / scale, screenH / scale
 	s.width, s.height = math.min(maxW, math.max(minW, s.width)), math.min(maxH, math.max(minH, s.height))
-	local f = UI.Surface(CreateFrame("Frame", "WoWAIFrame", UIParent, "BackdropTemplate"), "background")
+	local f = UI.Window(CreateFrame("Frame", "WowieFrame", UIParent, "BackdropTemplate"), 44)
 	ui.frame = f
 	f:SetScale(scale)
 	f:SetSize(s.width, s.height)
@@ -3255,7 +3323,7 @@ local function BuildUI()
 	f:SetClampedToScreen(true)
 	f:SetResizeBounds(minW, minH, maxW, maxH)
 	f:EnableMouse(true)
-	local drag = CreateFrame("Frame", "WoWAIDragHeader", f)
+	local drag = CreateFrame("Frame", "WowieDragHeader", f)
 	drag:SetPoint("TOPLEFT", f, "TOPLEFT", 0, 0)
 	-- The right edge is anchored to Navigation once the header actions exist.
 	drag:SetHeight(42)
@@ -3268,9 +3336,9 @@ local function BuildUI()
 		s.point, s.relPoint, s.x, s.y = point, relPoint, x, y
 	end)
 	f:Hide()
-	tinsert(UISpecialFrames, "WoWAIFrame")
+	tinsert(UISpecialFrames, "WowieFrame")
 
-	local identity = UI.Label(f, "WoW AI", 19)
+	local identity = UI.Title(f, "Wowie", 19)
 	identity:SetPoint("TOPLEFT", f, "TOPLEFT", 18, -16)
 	local function MakeDot(parent)
 		local holder = CreateFrame("Frame", nil, parent)
@@ -3292,24 +3360,24 @@ local function BuildUI()
 	ui.connection = UI.Label(f, "Idle / not verified", 12, "muted")
 	ui.connection:SetPoint("LEFT", dotHolder, "RIGHT", 5, 0)
 	ui.connection:SetWordWrap(false)
-	local close = UI.Button(f, "X", 30, function() WoWAI.Toggle(false) end, "quiet", "WoWAIClose")
+	local close = UI.Button(f, "X", 30, function() Wowie.Toggle(false) end, "quiet", "WowieClose")
 	close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -10, -10)
-	UI.Tooltip(close, "Close", "Hide the workspace and compact bar. /wow-ai opens it again.")
-	local minimize = UI.Button(f, "—", 30, function() WoWAI.Minimize(true) end, "quiet", "WoWAIMinimize")
+	UI.Tooltip(close, "Close", "Hide the workspace and compact bar. /wowie opens it again.")
+	local minimize = UI.Button(f, "—", 30, function() Wowie.Minimize(true) end, "quiet", "WowieMinimize")
 	minimize:SetPoint("RIGHT", close, "LEFT", -6, 0)
 	UI.Tooltip(minimize, "Minimize · Esc", "Keep waiting in the compact bar without taking keyboard focus.")
-	local settings = UI.Button(f, "Settings", 80, function() WoWAI.ShowDefaults() end, "secondary", "WoWAISettings")
+	local settings = UI.Button(f, "Settings", 80, function() Wowie.ShowDefaults() end, "quiet", "WowieSettings")
 	settings:SetPoint("RIGHT", minimize, "LEFT", -12, 0)
 	local sharing = UI.Button(f, "Sharing", 80, function()
-		if WoWAIContextUI then WoWAIContextUI.Show() end
-	end, "secondary", "WoWAISharing")
+		if WowieContextUI then WowieContextUI.Show() end
+	end, "quiet", "WowieSharing")
 	sharing:SetPoint("RIGHT", settings, "LEFT", -6, 0)
 	local navigation = UI.Button(f, "Navigation", 160, function()
-		local map = WoWAIMap
+		local map = WowieMap
 		if map and type(map.ShowNavigation) == "function" and type(map.GetNavigationState) == "function" then
 			map.ShowNavigation()
 		end
-	end, "secondary", "WoWAINavigation")
+	end, "quiet", "WowieNavigation")
 	navigation:SetPoint("RIGHT", sharing, "LEFT", -6, 0)
 	navigation:SetMotionScriptsWhileDisabled(true)
 	ui.navigation = navigation
@@ -3322,7 +3390,7 @@ local function BuildUI()
 	navigation:SetScript("OnLeave", function() GameTooltip:Hide() end)
 	drag:SetPoint("TOPRIGHT", navigation, "TOPLEFT", -6, 10)
 	ui.connection:SetPoint("RIGHT", navigation, "LEFT", -8, 0)
-	WoWAI.UpdateNavigation()
+	Wowie.UpdateNavigation()
 
 	f:SetScript("OnHide", function()
 		if ui.input then ui.input:ClearFocus() end
@@ -3334,42 +3402,48 @@ local function BuildUI()
 		if not db or not db.settings.shown or not UIParent:IsShown() then return end
 		s.minimized = true
 		if ui.mini then ui.mini:Show() end
-		WoWAI.UpdateMini()
+		Wowie.UpdateMini()
 	end)
 
-	local panel = UI.Surface(CreateFrame("Frame", "WoWAIConversations", f, "BackdropTemplate"))
+	local panel = UI.Surface(CreateFrame("Frame", "WowieConversations", f, "BackdropTemplate"))
 	panel:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -54)
 	panel:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, 12)
 	panel:SetWidth(PANEL_W)
+	panel:SetBackdropBorderColor(0, 0, 0, 0)
+	local sidebarRule = UI.Rule(panel, "border", 0.55, true)
+	sidebarRule:ClearAllPoints()
+	sidebarRule:SetPoint("TOPRIGHT", panel, "TOPRIGHT", 0, 0)
+	sidebarRule:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 0)
+	sidebarRule:SetWidth(1)
 	local heading = UI.Label(panel, "Conversations", 13)
 	heading:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -14)
 	ui.chatCount = UI.Label(panel, "", 11, "muted")
 	ui.chatCount:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -12, -15)
-	local newChat = UI.Button(panel, "+ New chat", PANEL_W - 20, function() WoWAI.NewChat() end, "primary", "WoWAINewChat")
+	local newChat = UI.Button(panel, "+ New chat", PANEL_W - 20, function() Wowie.NewChat() end, "primary", "WowieNewChat")
 	newChat:SetPoint("TOPLEFT", panel, "TOPLEFT", 10, -38)
 	ui.newChat = newChat
-	local searchBg, search = EditField(panel, "WoWAIChatSearch", "Search conversations...")
+	local searchBg, search = EditField(panel, "WowieChatSearch", "Search conversations...")
 	searchBg:SetPoint("TOPLEFT", newChat, "BOTTOMLEFT", 0, -10)
 	searchBg:SetPoint("TOPRIGHT", newChat, "BOTTOMRIGHT", 0, -10)
 	ui.chatSearch = search
-	local chatScroll = UI.ScrollFrame(panel, "WoWAIChatScroll")
+	local chatScroll = UI.ScrollFrame(panel, "WowieChatScroll")
 	chatScroll:SetPoint("TOPLEFT", searchBg, "BOTTOMLEFT", 0, -10)
 	chatScroll:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -28, 54)
-	local chatContent = CreateFrame("Frame", "WoWAIChatList", chatScroll)
+	local chatContent = CreateFrame("Frame", "WowieChatList", chatScroll)
 	chatContent:SetSize(PANEL_W - 38, 1)
 	chatScroll:SetScrollChild(chatContent)
 	ui.chatContent, ui.chatScroll = chatContent, chatScroll
 	ui.chatEmpty = UI.Label(chatContent, "No conversations match.", 12, "muted")
 	ui.chatEmpty:SetPoint("TOPLEFT", chatContent, "TOPLEFT", 4, -8)
 	ui.chatEmpty:SetWidth(PANEL_W - 48)
-	search:HookScript("OnTextChanged", function() chatScroll:SetVerticalScroll(0); WoWAI.RenderChatList() end)
+	search:HookScript("OnTextChanged", function() chatScroll:SetVerticalScroll(0); Wowie.RenderChatList() end)
 	ui.sharingSummary = UI.Label(panel, "", 11, "muted")
 	ui.sharingSummary:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 12, 18)
 	ui.sharingSummary:SetWidth(PANEL_W - 24)
 	ui.sharingSummary:SetWordWrap(true)
-	WoWAI.UpdateSharingSummary()
+	Wowie.UpdateSharingSummary()
 
-	local menu = UI.Surface(CreateFrame("Frame", "WoWAIChatMenu", f, "BackdropTemplate"))
+	local menu = UI.Window(CreateFrame("Frame", "WowieChatMenu", f, "BackdropTemplate"), 26)
 	menu:SetSize(220, 292)
 	menu:SetFrameStrata("FULLSCREEN_DIALOG")
 	menu:SetClampedToScreen(true)
@@ -3379,22 +3453,22 @@ local function BuildUI()
 	menu.title:SetWidth(196)
 	menu.title:SetWordWrap(false)
 	local actions = {
-		{ "Rename...", WoWAI.RenamePrompt }, { "Working folder...", WoWAI.FolderPrompt },
-		{ "Choose agent...", WoWAI.AgentPrompt },
+		{ "Rename...", Wowie.RenamePrompt }, { "Working folder...", Wowie.FolderPrompt },
+		{ "Choose agent...", Wowie.AgentPrompt },
 		{ "Copy latest reply", function(id)
 			local c = FindChat(id)
 			if not c then return end
-			for i = #c.history, 1, -1 do if c.history[i].role == "assistant" then WoWAI.ShowCopy(c.history[i].text); return end end
+			for i = #c.history, 1, -1 do if c.history[i].role == "assistant" then Wowie.ShowCopy(c.history[i].text); return end end
 		end },
 		{ "Reset next session", function(id)
 			local c = FindChat(id)
-			if c then c.resetNext = true; AddHistory(c, "system", "Next message starts a fresh agent session."); WoWAI.Render() end
+			if c then c.resetNext = true; AddHistory(c, "system", "Next message starts a fresh agent session."); Wowie.Render() end
 		end },
 		{ "Clear transcript...", function(id)
 			local c = FindChat(id)
-			if c then StaticPopup_Show("WOWAI_CLEAR", Display(c.name), nil, { id = id }) end
+			if c then StaticPopup_Show("WOWIE_CLEAR", Display(c.name), nil, { id = id }) end
 		end },
-		{ "Delete conversation...", WoWAI.ConfirmDelete, "danger" },
+		{ "Delete conversation...", Wowie.ConfirmDelete, "danger" },
 		{ "Close menu", function() end },
 	}
 	for i, action in ipairs(actions) do
@@ -3402,9 +3476,9 @@ local function BuildUI()
 		item:SetPoint("TOPLEFT", menu, "TOPLEFT", 8, -30 - (i - 1) * 32)
 	end
 	menu:Hide()
-	tinsert(UISpecialFrames, "WoWAIChatMenu")
+	tinsert(UISpecialFrames, "WowieChatMenu")
 	ui.chatMenu = menu
-	function WoWAI.ShowChatMenu(id, anchor)
+	function Wowie.ShowChatMenu(id, anchor)
 		local c = FindChat(id)
 		if not c then return end
 		if menu:IsShown() and menu.chatId == id then menu:Hide(); return end
@@ -3418,14 +3492,18 @@ local function BuildUI()
 
 	ui.chatButtons = {}
 	for i = 1, MAX_CHATS do
-		local b = CreateFrame("Button", "WoWAIChatRow" .. i, chatContent)
+		local b = CreateFrame("Button", "WowieChatRow" .. i, chatContent)
 		b:SetSize(PANEL_W - 38, 54)
 		b.selected = b:CreateTexture(nil, "BACKGROUND")
 		b.selected:SetAllPoints()
-		b.selected:SetColorTexture(unpack(UI.colors.raised))
+		b.selected:SetColorTexture(unpack(UI.colors.primary))
+		b.selectedLine = UI.Rule(b, "accent", 0.85, true)
+		b.selectedLine:SetPoint("TOPLEFT", b, "TOPLEFT", 0, -4)
+		b.selectedLine:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 0, 4)
+		b.selectedLine:SetWidth(2)
 		local hover = b:CreateTexture(nil, "HIGHLIGHT")
 		hover:SetAllPoints()
-		hover:SetColorTexture(0.30, 0.66, 0.98, 0.08)
+		hover:SetColorTexture(UI.colors.accent[1], UI.colors.accent[2], UI.colors.accent[3], 0.055)
 		b.label = UI.Label(b, "", 12)
 		b.label:SetPoint("TOPLEFT", b, "TOPLEFT", 7, -8)
 		b.label:SetPoint("RIGHT", b, "RIGHT", -30, 0)
@@ -3434,15 +3512,15 @@ local function BuildUI()
 		b.detail:SetPoint("TOPLEFT", b.label, "BOTTOMLEFT", 0, -5)
 		b.detail:SetPoint("RIGHT", b, "RIGHT", -7, 0)
 		b.detail:SetWordWrap(false)
-		b.menu = UI.Button(b, "...", 27, function() WoWAI.ShowChatMenu(b.chatId, b) end, "quiet", "WoWAIChatRowMenu" .. i)
+		b.menu = UI.Button(b, "...", 27, function() Wowie.ShowChatMenu(b.chatId, b) end, "quiet", "WowieChatRowMenu" .. i)
 		b.menu:SetHeight(24)
 		b.menu:SetPoint("TOPRIGHT", b, "TOPRIGHT", -1, -2)
 		UI.Tooltip(b.menu, "Conversation actions", "Rename, folder, agent, copy, reset, clear or delete.")
 		b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 		b:SetScript("OnClick", function(self, button)
-			if button == "RightButton" then WoWAI.ShowChatMenu(self.chatId, self) else WoWAI.SwitchChat(self.chatId) end
+			if button == "RightButton" then Wowie.ShowChatMenu(self.chatId, self) else Wowie.SwitchChat(self.chatId) end
 		end)
-		b:SetScript("OnDoubleClick", function(self) WoWAI.SwitchChat(self.chatId); WoWAI.RenamePrompt(self.chatId) end)
+		b:SetScript("OnDoubleClick", function(self) Wowie.SwitchChat(self.chatId); Wowie.RenamePrompt(self.chatId) end)
 		b:Hide()
 		ui.chatButtons[i] = b
 	end
@@ -3452,8 +3530,8 @@ local function BuildUI()
 	ui.title:SetPoint("TOPRIGHT", f, "TOPRIGHT", -232, -56)
 	ui.title:SetWordWrap(false)
 	local chatActions = UI.Button(f, "Chat ...", 90, function(self)
-		local c = ActiveChat(); if c then WoWAI.ShowChatMenu(c.id, self) end
-	end, "quiet", "WoWAIChatActions")
+		local c = ActiveChat(); if c then Wowie.ShowChatMenu(c.id, self) end
+	end, "quiet", "WowieChatActions")
 	chatActions:SetPoint("TOPRIGHT", f, "TOPRIGHT", -16, -54)
 	ui.cwd = UI.Label(f, "", 11, "muted")
 	ui.cwd:SetPoint("TOPLEFT", panel, "TOPRIGHT", 16, -28)
@@ -3464,11 +3542,11 @@ local function BuildUI()
 	selectors:SetPoint("TOPRIGHT", f, "TOPRIGHT", -16, -98)
 	MakeDefaultsPanel(f)
 
-	local scroll = UI.ScrollFrame(f, "WoWAIScroll")
+	local scroll = UI.ScrollFrame(f, "WowieScroll")
 	scroll:SetPoint("TOPLEFT", panel, "TOPRIGHT", 16, -84)
 	scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -34, 110)
 	ui.scroll = scroll
-	local content = CreateFrame("Frame", "WoWAIContent", scroll)
+	local content = CreateFrame("Frame", "WowieContent", scroll)
 	content:SetSize(500, 1)
 	scroll:SetScrollChild(content)
 	ui.content, ui.bubbles, ui.chatScrollPositions = content, {}, {}
@@ -3476,49 +3554,50 @@ local function BuildUI()
 	ui.messageMeasure:SetWordWrap(true)
 	ui.messageMeasure:SetNonSpaceWrap(true)
 	ui.messageMeasure:Hide()
-	scroll:HookScript("OnSizeChanged", function() if f:IsShown() then WoWAI.Render() end end)
+	scroll:HookScript("OnSizeChanged", function() if f:IsShown() then Wowie.Render() end end)
 	local latest = UI.Button(f, "Latest ↓", 102, function()
 		scroll:SetVerticalScroll(scroll:GetVerticalScrollRange())
 		if ui.renderedChat then ui.chatScrollPositions[ui.renderedChat] = nil end
 		ui.latest:Hide()
-	end, "secondary", "WoWAILatest")
+	end, "secondary", "WowieLatest")
 	latest:SetHeight(26)
 	latest:SetPoint("RIGHT", chatActions, "LEFT", -8, 0)
 	latest:Hide()
 	latest:SetFrameLevel(scroll:GetFrameLevel() + 4)
 	ui.latest = latest
 	scroll:HookScript("OnVerticalScroll", function(self, value) ui.latest:SetShown(self:GetVerticalScrollRange() - value > 32) end)
-	local empty = CreateFrame("Frame", "WoWAIEmptyState", content)
+	local empty = CreateFrame("Frame", "WowieEmptyState", content)
 	empty:SetSize(460, 184)
 	empty:SetPoint("TOPLEFT", content, "TOPLEFT", 14, -18)
-	local welcome = UI.Label(empty, "What would you like to work on?", 18)
+	local welcome = UI.Title(empty, "What would you like to work on?", 18)
 	welcome:SetPoint("TOPLEFT", empty, "TOPLEFT")
 	welcome:SetPoint("RIGHT", empty, "RIGHT")
 	local explain = UI.Label(empty, "Ask about your character, plan a task, or work with your local agent.\nSharing controls what the AI may read. Prompts below only fill your draft.", 12, "muted")
 	explain:SetPoint("TOPLEFT", welcome, "BOTTOMLEFT", 0, -12)
 	explain:SetPoint("RIGHT", empty, "RIGHT")
 	for i, prompt in ipairs({ "Help me plan my next steps.", "Explain this item or quest.", "Help me write a macro." }) do
-		local b = UI.Button(empty, prompt, 330, function() ui.input:SetText(prompt); ui.input:SetFocus() end, "quiet", "WoWAIStarter" .. i)
+		local b = UI.Button(empty, prompt, 330, function() ui.input:SetText(prompt); ui.input:SetFocus() end, "quiet", "WowieStarter" .. i)
 		b:SetPoint("TOPLEFT", empty, "TOPLEFT", 0, -76 - (i - 1) * 34)
 		b:SetPoint("RIGHT", empty, "RIGHT", -8, 0)
 	end
 	ui.empty = empty
 
-	local inputBg = UI.Surface(CreateFrame("Frame", "WoWAIComposer", f, "BackdropTemplate"), "raised")
+	local inputBg = CreateFrame("Frame", "WowieComposer", f, "BackdropTemplate")
 	inputBg:SetPoint("BOTTOMLEFT", panel, "BOTTOMRIGHT", 16, 36)
 	inputBg:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -16, 48)
 	inputBg:SetHeight(50)
-	local inScroll = UI.ScrollFrame(inputBg, "WoWAIInputScroll")
+	local inScroll = UI.ScrollFrame(inputBg, "WowieInputScroll")
 	inScroll:SetPoint("TOPLEFT", inputBg, "TOPLEFT", 10, -6)
 	inScroll:SetPoint("BOTTOMRIGHT", inputBg, "BOTTOMRIGHT", -24, 6)
-	local input = CreateFrame("EditBox", "WoWAIInput", inScroll)
+	local input = CreateFrame("EditBox", "WowieInput", inScroll)
+	UI.Input(inputBg, input)
 	input:SetMultiLine(true)
 	input:SetAutoFocus(false)
-	input:SetFontObject(ChatFontNormal)
+	input:SetFont(UI.font, 14, "")
 	input:SetMaxLetters(0)
 	input:SetSize(500, 34)
 	input:SetScript("OnEnterPressed", function(self)
-		if IsShiftKeyDown() then self:Insert("\n") else WoWAI.SendFromInput() end
+		if IsShiftKeyDown() then self:Insert("\n") else Wowie.SendFromInput() end
 	end)
 	input:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
 	inScroll:SetScrollChild(input)
@@ -3545,31 +3624,31 @@ local function BuildUI()
 		ui.placeholder:SetShown(text == "")
 	end)
 	UI.Tooltip(inputBg, "Message composer", "Enter sends. Shift+Enter inserts a newline. Esc releases focus. While waiting, Enter checks the reply and keeps your next-message draft.")
-	local actionsRow = CreateFrame("Frame", "WoWAIActions", f)
+	local actionsRow = CreateFrame("Frame", "WowieActions", f)
 	actionsRow:SetPoint("BOTTOMLEFT", panel, "BOTTOMRIGHT", 16, 0)
 	actionsRow:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -16, 12)
 	actionsRow:SetHeight(28)
-	local send = UI.Button(actionsRow, "Send", 106, WoWAI.SendFromInput, "primary", "WoWAISend")
+	local send = UI.Button(actionsRow, "Send", 106, Wowie.SendFromInput, "primary", "WowieSend")
 	send:SetHeight(28)
 	send:SetPoint("RIGHT", actionsRow, "RIGHT", 0, 0)
 	ui.send = send
-	local cancel = UI.Button(actionsRow, "Cancel wait", 106, function() SlashCmdList.WOWAI("cancel") end, "secondary", "WoWAICancelWait")
+	local cancel = UI.Button(actionsRow, "Cancel wait", 106, function() SlashCmdList.WOWIE("cancel") end, "secondary", "WowieCancelWait")
 	cancel:SetHeight(28)
 	cancel:SetPoint("RIGHT", send, "LEFT", -8, 0)
 	UI.Tooltip(cancel, "Stop waiting for this reply", "This forgets the pending reply locally. It does not stop the external agent or undo actions already taken.")
 	ui.cancel = cancel
-	local reconnect = UI.Button(actionsRow, "Reconnect", 76, WoWAI.Connect, "secondary", "WoWAIReconnect")
+	local reconnect = UI.Button(actionsRow, "Reconnect", 76, Wowie.Connect, "secondary", "WowieReconnect")
 	reconnect:SetHeight(28)
 	reconnect:SetPoint("LEFT", actionsRow, "LEFT", 0, 0)
 	reconnect.label:SetPoint("LEFT", reconnect, "LEFT", 3, 0)
 	reconnect.label:SetPoint("RIGHT", reconnect, "RIGHT", -3, 0)
 	UI.Tooltip(reconnect, "Verify local bridge", "Send a fresh connection challenge. This does not send a question by itself.")
 	ui.reconnect = reconnect
-	local recovery = UI.Button(actionsRow, "...", 28, function() ui.recoveryMenu:SetShown(not ui.recoveryMenu:IsShown()) end, "quiet", "WoWAIRecovery")
+	local recovery = UI.Button(actionsRow, "...", 28, function() ui.recoveryMenu:SetShown(not ui.recoveryMenu:IsShown()) end, "quiet", "WowieRecovery")
 	recovery:SetHeight(28)
 	recovery:SetPoint("LEFT", reconnect, "RIGHT", 4, 0)
 	UI.Tooltip(recovery, "Connection recovery", "Check replies, retry delivery, reload or show diagnostics.")
-	local statusArea = CreateFrame("Frame", "WoWAIStatus", actionsRow)
+	local statusArea = CreateFrame("Frame", "WowieStatus", actionsRow)
 	statusArea:SetPoint("LEFT", recovery, "RIGHT", 8, 0)
 	statusArea:SetPoint("RIGHT", cancel, "LEFT", -8, 0)
 	statusArea:SetHeight(20)
@@ -3583,31 +3662,31 @@ local function BuildUI()
 		GameTooltip:Show()
 	end)
 	statusArea:SetScript("OnLeave", function() GameTooltip:Hide() end)
-	local recoveryMenu = UI.Surface(CreateFrame("Frame", "WoWAIRecoveryMenu", f, "BackdropTemplate"))
+	local recoveryMenu = UI.Window(CreateFrame("Frame", "WowieRecoveryMenu", f, "BackdropTemplate"), 0)
 	recoveryMenu:SetSize(226, 178)
 	recoveryMenu:SetPoint("BOTTOMRIGHT", recovery, "TOPRIGHT", 0, 6)
 	recoveryMenu:SetFrameStrata("FULLSCREEN_DIALOG")
 	recoveryMenu:EnableMouse(true)
 	ui.recoveryMenu = recoveryMenu
 	for i, action in ipairs({
-		{ "Check for reply", function() WoWAI.Send("") end },
-		{ "Retry pending delivery", WoWAI.Resend },
-		{ "Connect / reconnect", WoWAI.Connect },
+		{ "Check for reply", function() Wowie.Send("") end },
+		{ "Retry pending delivery", Wowie.Resend },
+		{ "Connect / reconnect", Wowie.Connect },
 		{ "Reload UI / free reply slots", SafeReload },
-		{ "Connection diagnostics", function() SlashCmdList.WOWAI("diag") end },
+		{ "Connection diagnostics", function() SlashCmdList.WOWIE("diag") end },
 	}) do
 		local b = UI.Button(recoveryMenu, action[1], 210, function() recoveryMenu:Hide(); action[2]() end, "quiet")
 		b:SetPoint("TOPLEFT", recoveryMenu, "TOPLEFT", 8, -8 - (i - 1) * 32)
 	end
 	recoveryMenu:Hide()
-	tinsert(UISpecialFrames, "WoWAIRecoveryMenu")
-	local hotkey = CreateFrame("Button", "WoWAIRefreshButton", UIParent)
+	tinsert(UISpecialFrames, "WowieRecoveryMenu")
+	local hotkey = CreateFrame("Button", "WowieRefreshButton", UIParent)
 	hotkey:SetSize(1, 1)
 	hotkey:SetPoint("TOPLEFT", UIParent, "TOPLEFT", -10, 10)
 	hotkey:SetScript("OnClick", function()
-		local c = ActiveChat(); if c and c.pendingId then WoWAI.Send("") else WoWAI.Toggle() end
+		local c = ActiveChat(); if c and c.pendingId then Wowie.Send("") else Wowie.Toggle() end
 	end)
-	local grip = CreateFrame("Button", "WoWAIResize", f)
+	local grip = CreateFrame("Button", "WowieResize", f)
 	grip:SetSize(14, 14)
 	grip:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -1, 1)
 	local gripLabel = UI.Label(grip, "◢", 13, "muted")
@@ -3615,7 +3694,7 @@ local function BuildUI()
 	grip:SetScript("OnMouseDown", function() f:StartSizing("BOTTOMRIGHT") end)
 	grip:SetScript("OnMouseUp", function() f:StopMovingOrSizing(); s.width, s.height = f:GetSize() end)
 
-	local m = UI.Surface(CreateFrame("Frame", "WoWAIMini", UIParent, "BackdropTemplate"))
+	local m = UI.Window(CreateFrame("Frame", "WowieMini", UIParent, "BackdropTemplate"), 0)
 	ui.mini = m
 	m:SetSize(370, 42)
 	if s.miniPoint then m:SetPoint(s.miniPoint, UIParent, s.miniRelPoint or s.miniPoint, s.miniX or 0, s.miniY or 0)
@@ -3632,24 +3711,24 @@ local function BuildUI()
 		s.miniPoint, s.miniRelPoint, s.miniX, s.miniY = point, relPoint, x, y
 		C_Timer.After(0, function() self.dragging = nil end)
 	end)
-	m:SetScript("OnMouseUp", function(self, button) if button == "LeftButton" and not self.dragging then WoWAI.Minimize(false) end end)
+	m:SetScript("OnMouseUp", function(self, button) if button == "LeftButton" and not self.dragging then Wowie.Minimize(false) end end)
 	local miniDotHolder, miniDot = MakeDot(m)
 	miniDotHolder:SetPoint("LEFT", m, "LEFT", 10, 0)
 	ui.miniDot = miniDot
-	local miniTitle = UI.Label(m, "WoW AI", 12)
+	local miniTitle = UI.Title(m, "Wowie", 12)
 	miniTitle:SetPoint("TOPLEFT", m, "TOPLEFT", 30, -7)
 	ui.miniBadge = UI.Label(m, "", 10, "muted")
 	ui.miniBadge:SetPoint("TOPLEFT", miniTitle, "BOTTOMLEFT", 0, -3)
 	ui.miniBadge:SetWidth(218)
 	ui.miniBadge:SetWordWrap(false)
-	local mclose = UI.Button(m, "X", 28, function() WoWAI.Toggle(false) end, "quiet", "WoWAIMiniClose")
+	local mclose = UI.Button(m, "X", 28, function() Wowie.Toggle(false) end, "quiet", "WowieMiniClose")
 	mclose:SetPoint("RIGHT", m, "RIGHT", -6, 0)
-	local open = UI.Button(m, "Open", 60, function() WoWAI.Minimize(false) end, "primary", "WoWAIMiniOpen")
+	local open = UI.Button(m, "Open", 60, function() Wowie.Minimize(false) end, "primary", "WowieMiniOpen")
 	open:SetPoint("RIGHT", mclose, "LEFT", -6, 0)
 	m:Hide()
 end
 
-function WoWAI.Toggle(show)
+function Wowie.Toggle(show)
 	if not ui.frame then return end
 	if show == nil then show = not ui.frame:IsShown() end
 	if show then
@@ -3663,16 +3742,16 @@ function WoWAI.Toggle(show)
 	ui.quitting = nil
 	db.settings.shown = show
 	if show then
-		WoWAI.Render()
-		WoWAI.UpdateNavigation()
+		Wowie.Render()
+		Wowie.UpdateNavigation()
 		-- No auto-focus: the game keeps the keyboard until you click the box.
 		-- Opening the panel alone does not send anything; Send checks the bridge
 		-- automatically, and the direct Reconnect action is always available.
 	end
-	WoWAI.UpdateMini()
+	Wowie.UpdateMini()
 end
 
-function WoWAI.Minimize(mini)
+function Wowie.Minimize(mini)
 	if not ui.frame then return end
 	if mini == nil then mini = not db.settings.minimized end
 	if mini then
@@ -3680,9 +3759,9 @@ function WoWAI.Minimize(mini)
 		db.settings.shown = true
 		ui.frame:Hide() -- OnHide shows the mini bar
 		if ui.mini and not ui.mini:IsShown() then ui.mini:Show() end
-		WoWAI.UpdateMini()
+		Wowie.UpdateMini()
 	else
-		WoWAI.Toggle(true)
+		Wowie.Toggle(true)
 	end
 end
 
@@ -3691,35 +3770,35 @@ end
 ---------------------------------------------------------------------------
 
 local HELP = table.concat({
-	"/wow-ai                        toggle the window (/ai, /wowai and the old /wow-claude are the same command)",
-	"/wow-ai mini                   collapse to the small bar (click the bar to expand)",
-	"/wow-ai hide                   hide the window completely",
-	"/ai <text>                         send <text> to the current chat straight from the game chat box (/wow-ai <text> too). A message that starts with a command word is still sent when the rest of the line doesn't fit that command",
+	"/wowie                        toggle the window (/ai and /ask are the same command)",
+	"/wowie mini                   collapse to the small bar (click the bar to expand)",
+	"/wowie hide                   hide the window completely",
+	"/ai <text>                         send <text> to the current chat straight from the game chat box (/wowie <text> too). A message that starts with a command word is still sent when the rest of the line doesn't fit that command",
 	"/r <text>                          replies to the agent when it was the last to message you (else normal whisper reply)",
-	"/wow-ai echo summary|full|short|off|<chars>   how much of each reply to print in the game chat (summary = the agent's closing TL;DR lines)",
-	"/wow-ai longchat on|off        let the game chat box take 4000 characters (for long /ai messages)",
-	"/wow-ai new [name]             start a new chat (its own agent session, like a new terminal)",
-	"/wow-ai chat <n|name>          switch chats (or click one in the left panel)",
-	"/wow-ai rename [name]          rename the current chat (no name = dialog; right-clicking the chat in the left panel offers it too)",
-	"/wow-ai delete                 delete the current chat",
-	"/wow-ai cd <folder>            folder this chat's agent works in (relative to the bridge's folder; no folder = back to default). Right-clicking the chat in the left panel and picking Folder does the same",
-	"/wow-ai agent [name]           which agent this chat talks to (no name = show; default = saved addon default, then the bridge's). Settings in the window sets addon-wide agent/model/reasoning",
-	"/wow-ai reset                  next message in this chat starts a fresh agent session",
-	"/wow-ai context [on|off]       what the agent is told about your character and where you are (no argument = show it)",
-	"/wow-ai map [...]              map layers the agent drew, the route navigator and herb/ore nodes (no argument = status and subcommands; /aimap is the same)",
-	"/wow-ai mode pixel             no-reload transport (default)",
-	"/wow-ai mode reload            fallback transport: a /reload per step",
-	"/wow-ai resend                 show the strip again if the bridge missed it",
-	"/wow-ai reload                 reload now (also frees the slot pool)",
-	"/wow-ai cancel                 stop waiting on this chat's reply",
-	"/wow-ai copy                   open the last reply in a selectable box for Ctrl+C",
-	"/wow-ai macro undo             undo the last macro the agent's button created or changed",
-	"/wow-ai bind <key>             hotkey: checks for a reply while waiting, else toggles the window",
-	"/wow-ai auto on|off            reload-mode only: auto-reload on your next keypress after the interval",
-	"/wow-ai signal on|off          the cheap sound-file readiness check (off if it spams errors)",
-	"/wow-ai slots                  how many reply slots are still free this session",
-	"/wow-ai diag                   transport diagnostics (is the cheap sound-file channel working?)",
-	"/wow-ai clear                  clear this chat's transcript",
+	"/wowie echo summary|full|short|off|<chars>   how much of each reply to print in the game chat (summary = the agent's closing TL;DR lines)",
+	"/wowie longchat on|off        let the game chat box take 4000 characters (for long /ai messages)",
+	"/wowie new [name]             start a new chat (its own agent session, like a new terminal)",
+	"/wowie chat <n|name>          switch chats (or click one in the left panel)",
+	"/wowie rename [name]          rename the current chat (no name = dialog; right-clicking the chat in the left panel offers it too)",
+	"/wowie delete                 delete the current chat",
+	"/wowie cd <folder>            folder this chat's agent works in (relative to the bridge's folder; no folder = back to default). Right-clicking the chat in the left panel and picking Folder does the same",
+	"/wowie agent [name]           which agent this chat talks to (no name = show; default = saved addon default, then the bridge's). Settings in the window sets addon-wide agent/model/reasoning",
+	"/wowie reset                  next message in this chat starts a fresh agent session",
+	"/wowie context [on|off]       what the agent is told about your character and where you are (no argument = show it)",
+	"/wowie map [...]              map layers the agent drew, the route navigator and herb/ore nodes (no argument = status and subcommands; /aimap is the same)",
+	"/wowie mode pixel             no-reload transport (default)",
+	"/wowie mode reload            fallback transport: a /reload per step",
+	"/wowie resend                 show the strip again if the bridge missed it",
+	"/wowie reload                 reload now (also frees the slot pool)",
+	"/wowie cancel                 stop waiting on this chat's reply",
+	"/wowie copy                   open the last reply in a selectable box for Ctrl+C",
+	"/wowie macro undo             undo the last macro the agent's button created or changed",
+	"/wowie bind <key>             hotkey: checks for a reply while waiting, else toggles the window",
+	"/wowie auto on|off            reload-mode only: auto-reload on your next keypress after the interval",
+	"/wowie signal on|off          the cheap sound-file readiness check (off if it spams errors)",
+	"/wowie slots                  how many reply slots are still free this session",
+	"/wowie diag                   transport diagnostics (is the cheap sound-file channel working?)",
+	"/wowie clear                  clear this chat's transcript",
 }, "\n")
 
 -- What each subcommand accepts, so that free text which happens to start with
@@ -3749,8 +3828,8 @@ local COMMAND_ARGS = {
 	bind = 1, agent = 1,
 	chat = ChatArgument, chats = ChatArgument,
 	cd = true, new = true, rename = true,
-	map = true, -- /wow-ai map ...: Map.lua (layers, navigator, herb/ore nodes)
-	macro = { undo = true }, -- /wow-ai macro undo; "/ai macro for my warrior" still goes to the agent
+	map = true, -- /wowie map ...: Map.lua (layers, navigator, herb/ore nodes)
+	macro = { undo = true }, -- /wowie macro undo; "/ai macro for my warrior" still goes to the agent
 }
 
 local function IsCommand(cmd, rest)
@@ -3769,12 +3848,10 @@ local function ApplyLongChat()
 	box:SetMaxLetters(db.settings.longchat and 4000 or 255)
 end
 
-SLASH_WOWAI1 = "/wow-ai"
-SLASH_WOWAI2 = "/wowai"
-SLASH_WOWAI3 = "/wow-claude" -- the project's old name, kept so old habits and macros still work
-SLASH_WOWAI4 = "/ai" -- the short form: /ai <text> sends, /ai agent codex and the rest work too
-SLASH_WOWAI5 = "/ask"
-SlashCmdList["WOWAI"] = function(msg)
+SLASH_WOWIE1 = "/wowie"
+SLASH_WOWIE2 = "/ai"
+SLASH_WOWIE3 = "/ask"
+SlashCmdList["WOWIE"] = function(msg)
 	msg = Trim(msg or "")
 	local cmd, rest = msg:match("^(%S+)%s*(.-)$")
 	cmd = cmd and cmd:lower() or ""
@@ -3784,15 +3861,15 @@ SlashCmdList["WOWAI"] = function(msg)
 	-- Anything that isn't a command, or a command word followed by something it
 	-- doesn't take, is a message for the agent.
 	if cmd ~= "" and not IsCommand(cmd, rest) then
-		WoWAI.Send(msg)
+		Wowie.Send(msg)
 		return
 	end
 	if cmd == "" then
-		WoWAI.Toggle()
+		Wowie.Toggle()
 	elseif cmd == "mini" or cmd == "min" then
-		WoWAI.Minimize(true)
+		Wowie.Minimize(true)
 	elseif cmd == "new" then
-		WoWAI.NewChat(rest)
+		Wowie.NewChat(rest)
 	elseif cmd == "chat" or cmd == "chats" then
 		local n = tonumber(rest)
 		local target = n and db.chats[n]
@@ -3802,52 +3879,52 @@ SlashCmdList["WOWAI"] = function(msg)
 			end
 		end
 		if target then
-			WoWAI.SwitchChat(target.id)
+			Wowie.SwitchChat(target.id)
 		else
 			local lines = {}
 			for i, ch in ipairs(db.chats) do
 				table.insert(lines, i .. ". " .. ch.name .. (ch.id == db.activeChat and "  (current)" or "") .. (ch.pendingId and "  working" or "") .. ((ch.unread or 0) > 0 and ("  " .. ch.unread .. " new") or ""))
 			end
 			AddHistory(c, "system", "Chats:\n" .. table.concat(lines, "\n"))
-			WoWAI.Render()
+			Wowie.Render()
 		end
-		WoWAI.Toggle(true)
+		Wowie.Toggle(true)
 	elseif cmd == "rename" then
 		if rest ~= "" then
 			c.name = rest:sub(1, 24)
-			WoWAI.Render()
+			Wowie.Render()
 		else
-			WoWAI.RenameActive()
+			Wowie.RenameActive()
 		end
-		WoWAI.Toggle(true)
+		Wowie.Toggle(true)
 	elseif cmd == "delete" then
-		WoWAI.DeleteChat()
+		Wowie.DeleteChat()
 	elseif cmd == "cd" then
-		WoWAI.SetFolder(rest, c)
-		WoWAI.Toggle(true)
+		Wowie.SetFolder(rest, c)
+		Wowie.Toggle(true)
 	elseif cmd == "map" then
-		if WoWAIMap then WoWAIMap.Command(rest) else print("|cff66ccff[WoW AI]|r the map module did not load") end
+		if WowieMap then WowieMap.Command(rest) else print("|cff66ccff[Wowie]|r the map module did not load") end
 	elseif cmd == "agent" then
-		WoWAI.SetAgent(rest, c)
-		WoWAI.Toggle(true)
+		Wowie.SetAgent(rest, c)
+		Wowie.Toggle(true)
 	elseif cmd == "reset" then
 		c.resetNext = true
 		local where = ChatFolder(c)
 		AddHistory(c, "system", "Next message starts a fresh " .. ChatAgentName(c) .. " session" .. (where ~= "" and (" in " .. where) or ""))
-		WoWAI.Render()
-		WoWAI.Toggle(true)
+		Wowie.Render()
+		Wowie.Toggle(true)
 	elseif cmd == "context" or cmd == "ctx" then
 		rest = rest:lower()
 		if rest == "on" or rest == "off" then
-			WoWAI.SetContextEnabled(rest == "on")
+			Wowie.SetContextEnabled(rest == "on")
 		end
-		local ctx = WoWAI.GameContext()
+		local ctx = Wowie.GameContext()
 		AddHistory(c, "system", (s.context
 			and "Game context is ON. Sharing... in the window selects which information the AI may read. Changes affect future snapshots and current queries.\n\n"
 			or "Game context is OFF. No new character snapshot or read-only query data is shared.\n\n") .. ctx
 			.. "\n\nOpen Sharing... to select individual data categories and native API permissions. Shift-clicked item, spell and quest links still include their tooltip.")
-		WoWAI.Render()
-		WoWAI.Toggle(true)
+		Wowie.Render()
+		Wowie.Toggle(true)
 	elseif cmd == "mode" then
 		if rest == "pixel" or rest == "reload" then
 			s.mode = rest
@@ -3855,10 +3932,10 @@ SlashCmdList["WOWAI"] = function(msg)
 		else
 			AddHistory(c, "system", "mode is " .. s.mode .. " (pixel or reload)")
 		end
-		WoWAI.Render()
-		WoWAI.Toggle(true)
+		Wowie.Render()
+		Wowie.Toggle(true)
 	elseif cmd == "resend" then
-		WoWAI.Resend()
+		Wowie.Resend()
 	elseif cmd == "auto" then
 		local n = tonumber(rest)
 		if n then
@@ -3869,16 +3946,16 @@ SlashCmdList["WOWAI"] = function(msg)
 		elseif rest == "off" then
 			s.autoRefresh = false
 		end
-		WoWAI.UpdateStatus()
-		WoWAI.ArmAutoRefresh()
+		Wowie.UpdateStatus()
+		Wowie.ArmAutoRefresh()
 	elseif cmd == "hide" or cmd == "quit" then
-		WoWAI.Toggle(false)
+		Wowie.Toggle(false)
 	elseif cmd == "macro" and rest == "undo" then
-		WoWAI.UndoMacro()
+		Wowie.UndoMacro()
 	elseif cmd == "copy" then
 		for i = #c.history, 1, -1 do
 			if c.history[i].role == "assistant" then
-				WoWAI.ShowCopy(c.history[i].text)
+				Wowie.ShowCopy(c.history[i].text)
 				break
 			end
 		end
@@ -3889,35 +3966,35 @@ SlashCmdList["WOWAI"] = function(msg)
 			s.echo = tostring(math.max(200, math.floor(tonumber(rest))))
 		end
 		AddHistory(c, "system", "replies in game chat: " .. s.echo .. " (summary = the agent's TL;DR lines, full = " .. ECHO_DEFAULT .. " chars, short, off, or a number of characters)")
-		WoWAI.Render()
+		Wowie.Render()
 	elseif cmd == "longchat" then
 		if rest == "on" then s.longchat = true elseif rest == "off" then s.longchat = false end
 		ApplyLongChat()
 		AddHistory(c, "system", "game chat box limit: " .. (s.longchat and "4000 characters (fine for /ai; real chat over 255 may be rejected by the server)" or "255 (default)"))
-		WoWAI.Render()
+		Wowie.Render()
 	elseif cmd == "signal" then
 		if rest == "on" then s.signal = true elseif rest == "off" then s.signal = false end
 		AddHistory(c, "system", "signal check is " .. (s.signal and "on" or "off"))
-		WoWAI.Render()
+		Wowie.Render()
 	elseif cmd == "slots" then
 		local free = 0
 		for i = 1, SLOT_COUNT do
 			if not C_AddOns.IsAddOnLoaded(SlotName(i)) then free = free + 1 end
 		end
 		AddHistory(c, "system", free .. " of " .. SLOT_COUNT .. " reply slots free this session (a reload frees all)")
-		WoWAI.Render()
-		WoWAI.Toggle(true)
+		Wowie.Render()
+		Wowie.Toggle(true)
 	elseif cmd == "refresh" or cmd == "reload" then
 		SafeReload()
 	elseif cmd == "bind" then
 		local key = rest:upper()
 		if key ~= "" and not InCombatLockdown() then
-			SetBinding(key, "CLICK WoWAIRefreshButton:LeftButton")
+			SetBinding(key, "CLICK WowieRefreshButton:LeftButton")
 			SaveBindings(GetCurrentBindingSet())
 			AddHistory(c, "system", key .. " is now bound: checks for a reply while waiting, otherwise toggles this window")
 		end
-		WoWAI.Render()
-		WoWAI.Toggle(true)
+		Wowie.Render()
+		Wowie.Toggle(true)
 	elseif cmd == "diag" then
 		local free = 0
 		for i = 1, SLOT_COUNT do
@@ -3930,7 +4007,7 @@ SlashCmdList["WOWAI"] = function(msg)
 			"slot polls this session: " .. (run.polls or 0) .. ", free slots: " .. free .. "/" .. SLOT_COUNT,
 			"presence: head at " .. tostring(run.presence and run.presence.last or "?") .. ", beats seen: " .. tostring(run.presence and run.presence.beats or 0),
 			PresenceStatus(),
-			select(5, WoWAI.BridgeState()),
+			select(5, Wowie.BridgeState()),
 			"mode: " .. s.mode .. ", session token: " .. tostring(db.session),
 		}
 		for _, ch in ipairs(db.chats) do
@@ -3940,8 +4017,8 @@ SlashCmdList["WOWAI"] = function(msg)
 			end
 		end
 		AddHistory(c, "system", "Diagnostics:\n" .. table.concat(lines, "\n"))
-		WoWAI.Render()
-		WoWAI.Toggle(true)
+		Wowie.Render()
+		Wowie.Toggle(true)
 	elseif cmd == "cancel" then
 		if run.sendOnConnect and run.sendOnConnect.chat == c.id then run.sendOnConnect = nil end
 		if c.pendingId then
@@ -3957,14 +4034,14 @@ SlashCmdList["WOWAI"] = function(msg)
 			RefreshStrip()
 			if not AnyPending() then keyCatcher:Hide() end
 		end
-		WoWAI.Render()
+		Wowie.Render()
 	elseif cmd == "clear" then
 		wipe(c.history)
-		WoWAI.Render()
+		Wowie.Render()
 	elseif cmd == "help" then
 		AddHistory(c, "system", HELP)
-		WoWAI.Render()
-		WoWAI.Toggle(true)
+		Wowie.Render()
+		Wowie.Toggle(true)
 	end
 end
 
@@ -4004,7 +4081,7 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 		tx.active, tx.probe, tx.failed, tx.retryDisplay, tx.reason = "robust", nil, nil, nil, ""
 		tx.interval, tx.displays, tx.captureInterval, tx.nextFrameAt, tx.lastSignalCheck = 0.5, nil, nil, nil, nil
 		SelfTestSignals()
-		ApplyBridgeData(WoWAI_Inbox)
+		ApplyBridgeData(Wowie_Inbox)
 		if AnyPending() then
 			-- Still waiting after a reload: resume polling with a fresh slot pool.
 			run.sentAt = GetTime()
@@ -4036,30 +4113,30 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 		if c and c.draft and c.draft ~= "" then
 			ui.input:SetText(c.draft)
 		end
-		WoWAI.Render()
+		Wowie.Render()
 		if db.settings.shown then
 			if db.settings.minimized then
-				WoWAI.Minimize(true)
+				Wowie.Minimize(true)
 			else
-				WoWAI.Toggle(true)
+				Wowie.Toggle(true)
 			end
 		end
-		WoWAI.ArmAutoRefresh()
-		WoWAI.UpdateDot()
+		Wowie.ArmAutoRefresh()
+		Wowie.UpdateDot()
 		if db.settings.longchat then ApplyLongChat() end
 		HookReplyCommand()
 		C_Timer.NewTicker(TICK_SECONDS, Tick)
 		C_Timer.NewTicker(TRANSPORT_SECONDS, TransportTick)
-		C_Timer.After(3, WoWAI.SayHello)
+		C_Timer.After(3, Wowie.SayHello)
 	elseif event == "UPDATE_MACROS" then
 		-- "Create" / "Update" on the macro buttons follows what exists now.
-		if ui.frame and ui.frame:IsShown() then WoWAI.Render() end
+		if ui.frame and ui.frame:IsShown() then Wowie.Render() end
 	elseif event == "PLAYER_REGEN_ENABLED" then
-		if WoWAI.reloadAfterCombat then
-			WoWAI.reloadAfterCombat = nil
+		if Wowie.reloadAfterCombat then
+			Wowie.reloadAfterCombat = nil
 			ReloadUI()
 		elseif db then
-			WoWAI.ArmAutoRefresh()
+			Wowie.ArmAutoRefresh()
 		end
 	end
 end)

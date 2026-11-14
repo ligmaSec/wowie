@@ -75,15 +75,14 @@ test('systemPrompt always asks for the TL;DR block, and wraps the game context a
   // Without a context the prompt is only the reply-format rule.
   for (const empty of ['', '  \n ', undefined]) {
     const s = P.systemPrompt(empty);
-    assert.ok(s.includes('wow-ai addon'));
     assert.ok(s.includes('"TL;DR:"'), 'asks for the summary marker');
     assert.ok(!s.includes('in-game situation'), 'no context section without a context');
     assert.ok(!s.includes('Reference for writing addons'), 'no primer section without a context');
   }
   const s = P.systemPrompt('Game: World of Warcraft: Forever\nCharacter: Testchar, level 23 Hunter');
   assert.ok(s.includes('"TL;DR:"'));
-  assert.ok(s.includes('WOW_AI_MAP_FILE') && s.includes('wowmap') && s.includes('"op":"set"'), 'explains how to mark the map');
-  assert.ok(!P.systemPrompt('').includes('WOW_AI_MAP_FILE'), 'map hint only with the game context');
+  assert.ok(s.includes('WOWIE_MAP_FILE') && s.includes('wowmap') && s.includes('"op":"set"'), 'explains how to mark the map');
+  assert.ok(!P.systemPrompt('').includes('WOWIE_MAP_FILE'), 'map hint only with the game context');
   assert.ok(s.includes('\nGame: World of Warcraft: Forever\nCharacter: Testchar, level 23 Hunter\n'));
   assert.ok(s.includes('Linked from the game'));
   assert.ok(!s.includes('Reference for writing addons'), 'no primer section without a primer');
@@ -107,7 +106,7 @@ test('splitSummary takes the last TL;DR block for the game chat and keeps the wh
   assert.equal(P.splitSummary('a TL;DR: inline\nmore').summary, '');
   assert.equal(P.splitSummary('first TL;DR: x\n\nbody\n\nTL;DR: last one').summary, 'last one');
   // The slot file carries the summary only when there is one.
-  const lua = P.luaTable('WoWAI_SlotData', [{ chat: 'c', id: 1, nonce: 'turn-000001', status: 'done', text: 'body\nTL;DR: short', summary: 'short' }, { chat: 'c', id: 2, nonce: 'turn-000002', status: 'done', text: 'plain' }]);
+  const lua = P.luaTable('Wowie_SlotData', [{ chat: 'c', id: 1, nonce: 'turn-000001', status: 'done', text: 'body\nTL;DR: short', summary: 'short' }, { chat: 'c', id: 2, nonce: 'turn-000002', status: 'done', text: 'plain' }]);
   assert.ok(lua.includes('summary = "short"'));
   assert.equal((lua.match(/summary = /g) || []).length, 1);
 });
@@ -133,7 +132,7 @@ test('jobsFromStrip handles several records per frame and older formats', () => 
 
 test('parseOutbox decodes the SavedVariables fallback', () => {
   const hex = s => Buffer.from(s, 'utf8').toString('hex');
-  const src = `WoWAIDB = {\n["outbox"] = {\n["id"] = 7,\n["session"] = "abc123",\n["chat"] = "c1",\n["nonce"] = "turn-000007",\n["text"] = "${hex('héllo')}",\n["cwd"] = "${hex('realms')}",\n["newSession"] = true,\n},\n["settings"] = {},\n}`;
+  const src = `WowieDB = {\n["outbox"] = {\n["id"] = 7,\n["session"] = "abc123",\n["chat"] = "c1",\n["nonce"] = "turn-000007",\n["text"] = "${hex('héllo')}",\n["cwd"] = "${hex('realms')}",\n["newSession"] = true,\n},\n["settings"] = {},\n}`;
   assert.deepEqual(P.parseOutbox(src), { id: 7, session: 'abc123', chat: 'c1', nonce: 'turn-000007', text: 'héllo', cwd: 'realms', newSession: true, via: 'reload' });
   const withAllow = src.replace('["newSession"]', `["allow"] = "${hex('WebSearch\x1fBash(git:*)')}",\n["newSession"]`);
   assert.deepEqual(P.parseOutbox(withAllow).allow, ['WebSearch', 'Bash(git:*)']);
@@ -142,7 +141,7 @@ test('parseOutbox decodes the SavedVariables fallback', () => {
   const withAgent = src.replace('["newSession"]', '["agent"] = "codex",\n["newSession"]');
   assert.equal(P.parseOutbox(withAgent).agent, 'codex');
   assert.equal(P.parseOutbox(src).agent, undefined);
-  assert.equal(P.parseOutbox('WoWAIDB = {}'), null);
+  assert.equal(P.parseOutbox('WowieDB = {}'), null);
   assert.equal(P.parseOutbox('["outbox"] = { ["text"] = "" }'), null);
 });
 

@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { lua, lauxlib, lualib, to_luastring, to_jsstring } = require('fengari');
-const source = fs.readFileSync(path.join(__dirname, '../addon/WoWAI/Context.lua'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../addon/Wowie/Context.lua'), 'utf8');
 
 function vm(setup = '') {
   const L = lauxlib.luaL_newstate();
@@ -36,7 +36,7 @@ function vm(setup = '') {
       return frame
     end
     function Fire(event) if EVENTS[event] then EVENTS[event].script(EVENTS[event], event) end end
-    WoWAI = {}
+    Wowie = {}
     ${setup}
   `);
   run(source);
@@ -45,11 +45,11 @@ function vm(setup = '') {
   return {
     run, evaluate,
     json: expression => JSON.parse(evaluate(expression)),
-    query: request => JSON.parse(evaluate(`WoWAIContext.Query(${request})`)),
-    snapshot: () => JSON.parse(evaluate('WoWAIContext.Snapshot()')),
+    query: request => JSON.parse(evaluate(`WowieContext.Query(${request})`)),
+    snapshot: () => JSON.parse(evaluate('WowieContext.Snapshot()')),
     only: (...ids) => run(`
-      for _, category in ipairs(WoWAIContext.Categories()) do WoWAIContext.SetEnabled(category.id, false) end
-      ${ids.map(id => `WoWAIContext.SetEnabled(${JSON.stringify(id)}, true)`).join('\n')}
+      for _, category in ipairs(WowieContext.Categories()) do WowieContext.SetEnabled(category.id, false) end
+      ${ids.map(id => `WowieContext.SetEnabled(${JSON.stringify(id)}, true)`).join('\n')}
     `),
   };
 }
@@ -113,35 +113,35 @@ const API_SETUP = `
 
 test('conservative persistent choices and independent master switch', () => {
   const v = vm(API_SETUP);
-  const categories = v.json('WoWAIContext.Encode(WoWAIContext.Categories())');
+  const categories = v.json('WowieContext.Encode(WowieContext.Categories())');
   const defaults = categories.filter(c => c.enabled).map(c => c.id);
   assert.deepEqual(defaults, ['identity', 'location', 'money', 'equipment', 'inventory', 'spells', 'professions', 'talents', 'quests']);
   for (const id of ['bank', 'mail', 'mail_body', 'chat', 'guild', 'friends', 'group', 'target', 'ui', 'addons', 'api:C_Item', 'api:PlayerInfo']) {
     const c = categories.find(c => c.id === id);
     assert.ok(c, id); assert.equal(c.enabled, false); assert.equal(c.sensitive, true);
   }
-  v.run(`WoWAIContext.SetEnabled('inventory', false); WoWAIContext.SetEnabled('mail', true); WoWAIDB.settings.context = false`);
-  assert.equal(v.evaluate("tostring(WoWAIContext.IsEnabled('mail'))"), 'false');
-  assert.equal(v.json('WoWAIContext.Encode(WoWAIContext.Categories())').find(c => c.id === 'mail').enabled, true);
+  v.run(`WowieContext.SetEnabled('inventory', false); WowieContext.SetEnabled('mail', true); WowieDB.settings.context = false`);
+  assert.equal(v.evaluate("tostring(WowieContext.IsEnabled('mail'))"), 'false');
+  assert.equal(v.json('WowieContext.Encode(WowieContext.Categories())').find(c => c.id === 'mail').enabled, true);
   assert.deepEqual(v.snapshot().enabled, []);
   assert.deepEqual(v.snapshot().data, {});
-  assert.equal(v.evaluate('WoWAIContext.Summary()'), '');
-  v.run('WoWAIDB.settings.context = true');
-  assert.equal(v.evaluate("tostring(WoWAIContext.IsEnabled('inventory'))"), 'false');
+  assert.equal(v.evaluate('WowieContext.Summary()'), '');
+  v.run('WowieDB.settings.context = true');
+  assert.equal(v.evaluate("tostring(WowieContext.IsEnabled('inventory'))"), 'false');
   assert.equal(v.query("{op='api',name='C_Item.GetCount'}").ok, false);
-  v.run('WoWAIContext.ResetDefaults()');
-  assert.equal(v.evaluate("tostring(WoWAIContext.IsEnabled('inventory'))"), 'true');
-  assert.equal(v.evaluate("tostring(WoWAIContext.IsEnabled('mail'))"), 'false');
+  v.run('WowieContext.ResetDefaults()');
+  assert.equal(v.evaluate("tostring(WowieContext.IsEnabled('inventory'))"), 'true');
+  assert.equal(v.evaluate("tostring(WowieContext.IsEnabled('mail'))"), 'false');
 });
 
 test('disabled snapshots, summaries and queries never call data providers', () => {
   const v = vm(`CALLS=0; function GetMoney() CALLS=CALLS+1; return 10 end; function UnitName() error('identity must not run') end`);
   v.only();
   assert.deepEqual(v.snapshot().data, {});
-  assert.equal(v.evaluate('WoWAIContext.Summary()'), '');
+  assert.equal(v.evaluate('WowieContext.Summary()'), '');
   assert.equal(v.query("{op='snapshot',category='money'}").ok, false);
   assert.equal(v.evaluate('tostring(CALLS)'), '0');
-  v.run("WoWAIContext.SetEnabled('money',true)");
+  v.run("WowieContext.SetEnabled('money',true)");
   const profile = v.snapshot();
   assert.deepEqual(profile.enabled, ['money']);
   assert.equal(profile.data.money.copper, 10);
@@ -150,15 +150,15 @@ test('disabled snapshots, summaries and queries never call data providers', () =
 test('a snapshot and its short summary describe the same captured values, without stale reuse next turn', () => {
   const v = vm('BALANCE=10000; function GetMoney() BALANCE=BALANCE+1; return BALANCE end');
   v.only('money');
-  v.run('PROFILE, SUMMARY = WoWAIContext.Snapshot()');
+  v.run('PROFILE, SUMMARY = WowieContext.Snapshot()');
   const first = v.json('PROFILE').data.money.copper;
   assert.ok(v.evaluate('SUMMARY').includes(String(first)));
-  v.run('PROFILE, SUMMARY = WoWAIContext.Snapshot()');
+  v.run('PROFILE, SUMMARY = WowieContext.Snapshot()');
   const next = v.json('PROFILE').data.money.copper;
   assert.ok(next > first);
   assert.ok(v.evaluate('SUMMARY').includes(String(next)));
   v.only();
-  v.run('PROFILE, SUMMARY = WoWAIContext.Snapshot()');
+  v.run('PROFILE, SUMMARY = WowieContext.Snapshot()');
   assert.deepEqual(v.json('PROFILE').data, {});
   assert.equal(v.evaluate('SUMMARY'), '');
 });
@@ -251,7 +251,7 @@ test('legacy bag and spell APIs retain counts, ranks and future distinction', ()
 
 test('skills preserve normalized professions plus detailed secondary/weapon/child lines', () => {
   const v = vm(`
-    function WoWAI.SkillLines() return {{name='Alchemy',rank=125,maxRank=150},{name='Fishing',rank=20,maxRank=75},{name='Swords',rank=80,maxRank=100}} end
+    function Wowie.SkillLines() return {{name='Alchemy',rank=125,maxRank=150},{name='Fishing',rank=20,maxRank=75},{name='Swords',rank=80,maxRank=100}} end
     C_SkillInfo={GetNumSkillLines=function() return 4 end,GetSkillLineInfo=function(i) return {name=({'Alchemy','Fishing','Swords','Child'})[i],skillID=i,rank=i*20,maxRank=150,parentSkillLineID=i==4 and 1 or 0} end}
     TradeSkillFrame={IsShown=function() return false end}
     C_TradeSkillUI={GetAllRecipeIDs=function() error('closed recipe provider invoked') end}
@@ -261,7 +261,7 @@ test('skills preserve normalized professions plus detailed secondary/weapon/chil
   assert.equal(d.skills.length, 3); assert.equal(d.skills[2].name, 'Swords');
   assert.equal(d.skillDetails.length, 4); assert.equal(d.skillDetails[3].parentSkillLineID, 1);
   assert.equal(d.recipes.status, 'closed');
-  assert.match(v.evaluate('WoWAIContext.Summary()'), /Fishing 20\/75/);
+  assert.match(v.evaluate('WowieContext.Summary()'), /Fishing 20\/75/);
 });
 
 test('unknown or closed windows are explicit and never read cached bank/mail contents', () => {
@@ -293,7 +293,7 @@ test('missing optional APIs and restricted providers report unavailable data wit
   assert.equal(d.identity.status, 'partial');
   assert.ok(d.identity.unavailable.includes('GetBuildInfo unavailable'));
   v.run("function GetMoney() error('PRIVATE-ERROR') end");
-  assert.doesNotMatch(v.evaluate('WoWAIContext.Snapshot()'), /PRIVATE-ERROR/);
+  assert.doesNotMatch(v.evaluate('WowieContext.Snapshot()'), /PRIVATE-ERROR/);
 });
 
 test('documented native namespace and global-system getters are discoverable, never eagerly invoked', () => {
@@ -308,7 +308,7 @@ test('documented native namespace and global-system getters are discoverable, ne
   assert.equal(scalar(v.query("{op='api',name='C_Item.GetCount',path={'returns',1,'value'}}")), 7);
   assert.equal(scalar(v.query("{op='api',name='GetGlobalCount',path={'returns',1,'value'}}")), 42);
   assert.equal(scalar(v.query("{op='api',name='C_Item.GetItemInfo',args={13},path={'returns',1,'value','id'}}")), 13);
-  v.run("WoWAIContext.SetEnabled('api:C_Item',false)");
+  v.run("WowieContext.SetEnabled('api:C_Item',false)");
   assert.equal(v.query("{op='api',name='C_Item.GetCount',category='api:PlayerInfo'}").ok, false);
   assert.equal(v.evaluate('tostring(CALLS)'), '3');
 });
@@ -347,7 +347,7 @@ test('typed arguments, nullable holes, enum defaults and structures validate bef
     "{op='api',name='C_Item.GetCount',args={function() end}}",
   ]) assert.equal(v.query(request).ok, false, request);
   assert.equal(v.evaluate('tostring(CALLS)'), calls);
-  v.run("WoWAIContext.SetEnabled('api:C_Item',false)");
+  v.run("WowieContext.SetEnabled('api:C_Item',false)");
   const constructors = v.evaluate('tostring(CONSTRUCTORS)');
   assert.equal(v.query("{op='api',name='C_Item.GetLocation',args={{type='ItemLocation',bag=0,slot=2}}}").ok, false);
   assert.equal(v.evaluate('tostring(CONSTRUCTORS)'), constructors);
@@ -359,14 +359,14 @@ test('secret values, inaccessible tables, cycles, userdata and metamethods canno
     VALUE={public='fine',secret={SECRET=true,text='NEVER-LEAK'},cycle=cyclic,unsupported=function() end}
     setmetatable(VALUE,{__pairs=function() error('must not run') end,__tostring=function() error('must not run') end})
   `);
-  const text = v.evaluate('WoWAIContext.Encode(VALUE)');
+  const text = v.evaluate('WowieContext.Encode(VALUE)');
   assert.doesNotMatch(text, /NEVER-LEAK/);
   const value = JSON.parse(text);
   assert.equal(value.public, 'fine'); assert.equal(value.secret.status, 'unavailable');
   assert.equal(value.cycle.self.reason, 'cycle'); assert.equal(value.unsupported.status, 'unavailable');
-  assert.equal(v.json('WoWAIContext.Encode(OPAQUE)').status, 'unavailable');
+  assert.equal(v.json('WowieContext.Encode(OPAQUE)').status, 'unavailable');
   v.run("function canaccesstable(t) return t ~= VALUE end");
-  assert.equal(v.json('WoWAIContext.Encode(VALUE)').reason, 'inaccessible table');
+  assert.equal(v.json('WowieContext.Encode(VALUE)').reason, 'inaccessible table');
 });
 
 test('API returns preserve nil positions, redact secrets and hide exception text', () => {
@@ -405,7 +405,7 @@ test('addon tables and frame getters require separate sensitive permissions and 
   assert.equal(v.query("{op='table',path={'SavedPrivate'}}").ok, false);
   assert.equal(v.query("{op='frame',frame='WorldMapFrame',method='GetMapID'}").ok, false);
   assert.equal(v.evaluate('tostring(FRAME_CALLS)'), '0');
-  v.run("WoWAIContext.SetEnabled('addons',true);WoWAIContext.SetEnabled('ui',true)");
+  v.run("WowieContext.SetEnabled('addons',true);WowieContext.SetEnabled('ui',true)");
   assert.equal(scalar(v.query("{op='table',path={'SavedPrivate','nested','value'}}")), 8);
   assert.equal(v.query("{op='table',path={'SavedPrivate','missing'}}").ok, false);
   assert.equal(v.evaluate('tostring(TABLE_CALLS)'), '0');
@@ -429,14 +429,14 @@ test('summary respects every category, never leaks social fields and stays withi
     function GetSubZoneText() return 'Trade District' end
     function GetMoney() return 999 end
     function GetGuildInfo() error('unselected guild must not run') end
-    function WoWAI.SkillLines() local t={};for i=1,100 do t[i]={name=string.rep('é',15)..i,rank=20,maxRank=75} end;return t end
+    function Wowie.SkillLines() local t={};for i=1,100 do t[i]={name=string.rep('é',15)..i,rank=20,maxRank=75} end;return t end
   `);
   v.only('identity', 'location', 'money', 'professions');
-  const text = v.evaluate('WoWAIContext.Summary()');
+  const text = v.evaluate('WowieContext.Summary()');
   assert.match(text, /World of Warcraft: Forever/); assert.match(text, /Hero/); assert.match(text, /Stormwind/);
   assert.ok(Buffer.byteLength(text) <= 900);
   v.only('money');
-  assert.equal(v.evaluate('WoWAIContext.Summary()'), 'Copper: 999');
+  assert.equal(v.evaluate('WowieContext.Summary()'), 'Copper: 999');
   v.run('CLOCK=123457');
   assert.equal(v.snapshot().capturedAt, 123457);
 });
@@ -446,7 +446,7 @@ test('missing native documentation is explicit and late-loaded documentation is 
   assert.equal(v.query("{op='catalog'}").documentationStatus, 'unavailable');
   assert.match(v.query("{op='catalog',category='api:C_Item'}").error, /documentation unavailable/);
   v.run(API_SETUP);
-  v.run("WoWAIContext.SetEnabled('api:C_Item',true)");
+  v.run("WowieContext.SetEnabled('api:C_Item',true)");
   assert.equal(v.query("{op='catalog',category='api:C_Item'}").documentationStatus, 'available');
   assert.equal(scalar(v.query("{op='api',name='C_Item.GetCount',path={'returns',1,'value'}}")), 7);
 });
@@ -468,7 +468,7 @@ test('mail bodies require their explicit opt-in and open mailbox; snapshots reta
   assert.equal(v.evaluate('tostring(BODY_READS)'), '0');
   assert.equal(v.query("{op='snapshot',category='mail_body'}").ok, false);
   v.only('mail_body');
-  assert.equal(v.evaluate('WoWAIContext.Summary()'), '');
+  assert.equal(v.evaluate('WowieContext.Summary()'), '');
   v.run("Fire('MAIL_CLOSED')");
   assert.equal(v.snapshot().data.mail_body.status, 'closed');
   assert.equal(v.evaluate('tostring(BODY_READS)'), '0');
@@ -485,7 +485,7 @@ test('mail bodies require their explicit opt-in and open mailbox; snapshots reta
   assert.equal(page.nextOffset, 600);
   assert.equal(page.value.items[0].text, 'PRIVATE BODY 501');
   const reads = v.evaluate('tostring(BODY_READS)');
-  v.run("WoWAIContext.SetEnabled('mail_body',false)");
+  v.run("WowieContext.SetEnabled('mail_body',false)");
   assert.equal(v.query("{op='snapshot',category='mail_body'}").ok, false);
   assert.equal(v.snapshot().data.mail_body, undefined);
   assert.equal(v.evaluate('tostring(BODY_READS)'), reads);
@@ -511,17 +511,17 @@ test('native mail-body getter needs namespace plus current explicit mail_body pe
   const catalog = entries(v.query("{op='catalog',category='api:PlayerInfo',search='GetInboxText'}"));
   assert.equal(catalog[0].requiredPermission, 'mail_body');
   assert.match(catalog[0].sideEffect, /marks messages as read/);
-  v.run("WoWAIContext.SetEnabled('mail_body',true)");
+  v.run("WowieContext.SetEnabled('mail_body',true)");
   assert.equal(scalar(v.query("{op='api',name='GetInboxText',args={1},path={'returns',1,'value'}}")), 'PRIVATE BODY 1');
-  v.run("WoWAIContext.SetEnabled('mail_body',false)");
+  v.run("WowieContext.SetEnabled('mail_body',false)");
   assert.equal(v.query("{op='api',name='GetInboxText',args={1}}").ok, false);
-  v.run("WoWAIContext.SetEnabled('mail_body',true);Fire('MAIL_CLOSED')");
+  v.run("WowieContext.SetEnabled('mail_body',true);Fire('MAIL_CLOSED')");
   assert.equal(v.query("{op='api',name='GetInboxText',args={1}}").ok, false);
-  v.run("Fire('MAIL_SHOW');WoWAIDB.settings.context=false");
+  v.run("Fire('MAIL_SHOW');WowieDB.settings.context=false");
   assert.equal(v.query("{op='api',name='GetInboxText',args={1}}").ok, false);
-  v.run("WoWAIDB.settings.context=true;WoWAIContext.SetEnabled('api:PlayerInfo',false)");
+  v.run("WowieDB.settings.context=true;WowieContext.SetEnabled('api:PlayerInfo',false)");
   assert.equal(v.query("{op='api',name='GetInboxText',args={1}}").ok, false);
-  v.run("WoWAIContext.SetEnabled('api:PlayerInfo',true)");
+  v.run("WowieContext.SetEnabled('api:PlayerInfo',true)");
   for (const name of ['SendMail', 'DeleteInboxItem', 'TakeInboxMoney']) {
     assert.equal(v.query(`{op='api',name='${name}'}`).ok, false);
   }
@@ -550,7 +550,7 @@ test('advanced Unit namespace exposes documented non-player data getters but nev
       {Name='UnitUnapprovedAction',Returns={ret('result','bool')}},
     }}}}
   `);
-  const choices = v.json('WoWAIContext.Encode(WoWAIContext.Categories())');
+  const choices = v.json('WowieContext.Encode(WowieContext.Categories())');
   assert.equal(choices.find(c => c.id === 'api:Unit').enabled, false);
   assert.equal(v.query("{op='api',name='UnitName',args={'mouseover'}}").ok, false);
   assert.equal(v.evaluate('tostring(UNIT_READS)'), '0');
@@ -569,7 +569,7 @@ test('advanced Unit namespace exposes documented non-player data getters but nev
   }
   assert.equal(v.evaluate('tostring(UNIT_ACTIONS)'), '0');
   assert.equal(v.evaluate('tostring(UNIT_READS)'), '4');
-  v.run("WoWAIContext.SetEnabled('api:Unit',false)");
+  v.run("WowieContext.SetEnabled('api:Unit',false)");
   assert.equal(v.query("{op='api',name='UnitName',args={'focus'}}").ok, false);
   assert.equal(v.evaluate('tostring(UNIT_READS)'), '4');
 });
@@ -590,11 +590,11 @@ test('location snapshot identifies normalized map coordinates and gates summary 
   assert.equal(position.coordinateUnits, 'normalized 0..1');
   assert.equal(position.mapID, 1453);
   assert.equal(position.x, .251); assert.equal(position.y, .502);
-  const text = v.evaluate('WoWAIContext.Summary()');
+  const text = v.evaluate('WowieContext.Summary()');
   assert.ok(Buffer.byteLength(text) <= 900);
-  v.run("WoWAIContext.SetEnabled('location',false)");
+  v.run("WowieContext.SetEnabled('location',false)");
   const reads = v.evaluate('tostring(LOCATION_READS)');
-  assert.equal(v.evaluate('WoWAIContext.Summary()'), '');
+  assert.equal(v.evaluate('WowieContext.Summary()'), '');
   assert.equal(v.snapshot().data.location, undefined);
   assert.equal(v.evaluate('tostring(LOCATION_READS)'), reads);
 });
@@ -634,7 +634,7 @@ test('native item identifiers and item-location predicates work under their decl
   const calls = v.evaluate('tostring(CALLS)');
   assert.equal(v.query("{op='api',name='C_Item.GetItemInfo',args={{}}}").ok, false);
   assert.equal(v.evaluate('tostring(CALLS)'), calls, 'invalid identifier objects must not invoke the getter');
-  v.run("WoWAIContext.SetEnabled('api:C_Item',false)");
+  v.run("WowieContext.SetEnabled('api:C_Item',false)");
   assert.equal(v.query("{op='api',name='C_Item.GetItemInfo',args={2140}}").ok, false);
   assert.equal(v.evaluate('tostring(CALLS)'), calls, 'revoked item access must not invoke the getter');
 });

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 // Keeps bridge.js running: restarts it 3 s after any exit. Ctrl+C stops both.
-// This is also the `wow-ai` command (package.json "bin"): arguments and the
-// current folder pass straight through to bridge.js, so `cd proj && wow-ai`
+// This is also the `wowie` command (package.json "bin"): arguments and the
+// current folder pass straight through to bridge.js, so `cd proj && wowie`
 // makes proj the default folder for chats.
 const { spawn } = require('child_process');
 const path = require('path');

@@ -21,11 +21,11 @@ assignees: ''
 - Display mode (windowed / borderless / exclusive fullscreen):
 - Node.js version (`node -v`):
 - Agent and its version (`claude --version`, `codex --version` or `grok --version`):
-- wow-ai version or commit:
+- Wowie version or commit:
 
 **Diagnostics**
 
-Output of `/wow-ai diag` in game:
+Output of `/wowie diag` in game:
 
 ```
 ```

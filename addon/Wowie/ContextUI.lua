@@ -1,25 +1,25 @@
 -- Permission editing is local: the bridge need not be connected.
-WoWAIContextUI = WoWAIContextUI or {}
+WowieContextUI = WowieContextUI or {}
 
-local UI = WoWAI.UI
+local UI = Wowie.UI
 local unpack = unpack or table.unpack
 local panel
 local catalog
 local ROW_HEIGHT = 64
 local views = {
-	{ id = "character", label = "Character", control = "WoWAIContextTabCharacter", width = 150 },
-	{ id = "private", label = "Private / Social", control = "WoWAIContextTabPrivate", width = 192 },
-	{ id = "advanced", label = "Advanced API", control = "WoWAIContextTabAdvanced", width = 176 },
-	{ id = "selected", label = "Selected", control = "WoWAIContextTabSelected", width = 144 },
+	{ id = "character", label = "Character", control = "WowieContextTabCharacter", width = 150 },
+	{ id = "private", label = "Private / Social", control = "WowieContextTabPrivate", width = 192 },
+	{ id = "advanced", label = "Advanced API", control = "WowieContextTabAdvanced", width = 176 },
+	{ id = "selected", label = "Selected", control = "WowieContextTabSelected", width = 144 },
 }
 
 local function MasterEnabled()
-	return not WoWAIDB or not WoWAIDB.settings or WoWAIDB.settings.context ~= false
+	return not WowieDB or not WowieDB.settings or WowieDB.settings.context ~= false
 end
 
 local function LoadCatalog()
 	catalog = {}
-	for _, category in ipairs(WoWAIContext.Categories()) do
+	for _, category in ipairs(WowieContext.Categories()) do
 		local view = category.id:sub(1, 4) == "api:" and "advanced" or (category.sensitive and "private" or "character")
 		catalog[#catalog + 1] = {
 			category = category,
@@ -31,14 +31,14 @@ local function LoadCatalog()
 end
 
 local function Selected(category)
-	local sharing = WoWAIDB and WoWAIDB.settings and WoWAIDB.settings.sharing
+	local sharing = WowieDB and WowieDB.settings and WowieDB.settings.sharing
 	if sharing and sharing[category.id] ~= nil then return sharing[category.id] == true end
 	return category.enabled == true
 end
 
 -- Categories reads metadata only. Discover once before the panel is opened,
 -- then refresh on Show, not whenever the workspace refreshes its status badge.
-function WoWAIContextUI.Summary()
+function WowieContextUI.Summary()
 	if not catalog then LoadCatalog() end
 	local selected = 0
 	for _, entry in ipairs(catalog) do
@@ -48,7 +48,7 @@ function WoWAIContextUI.Summary()
 end
 
 local function NotifyChanged()
-	if WoWAI.UpdateSharingSummary then WoWAI.UpdateSharingSummary() end
+	if Wowie.UpdateSharingSummary then Wowie.UpdateSharingSummary() end
 end
 
 local function HideTooltip()
@@ -99,11 +99,21 @@ local function MakeRow()
 	row.description:SetPoint("TOPLEFT", row, "TOPLEFT", 42, -28)
 	row.description:SetPoint("TOPRIGHT", row, "TOPRIGHT", -12, -28)
 	row.description:SetHeight(28)
+	row.rule = UI.Rule(row, "border", 0.32)
+	row.rule:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 10, 0)
+	row.rule:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -10, 0)
+	function row:Paint()
+		local selected = self.category and Selected(self.category)
+		local fill = UI.colors[selected and "primary" or (self.hover and "hover" or "surface")]
+		self:SetBackdropColor(unpack(fill))
+		self:SetBackdropBorderColor(0, 0, 0, 0)
+		self.check:SetBackdropBorderColor(unpack(UI.colors[selected and "accent" or "border"]))
+	end
 	row.description:SetJustifyV("TOP")
 	local function Toggle()
 		-- Resolve from the reused row at click time, never a former slot/index.
 		if not row.category then return end
-		if WoWAIContext.SetEnabled(row.category.id, not Selected(row.category)) then
+		if WowieContext.SetEnabled(row.category.id, not Selected(row.category)) then
 			FilterCategories(false)
 			NotifyChanged()
 		end
@@ -114,6 +124,12 @@ local function MakeRow()
 	row.check:SetScript("OnEnter", function() CategoryTooltip(row) end)
 	row:SetScript("OnLeave", HideTooltip)
 	row.check:SetScript("OnLeave", HideTooltip)
+	local function Enter() row.hover = true; row:Paint() end
+	local function Leave() row.hover = nil; row:Paint() end
+	row:HookScript("OnEnter", Enter)
+	row.check:HookScript("OnEnter", Enter)
+	row:HookScript("OnLeave", Leave)
+	row.check:HookScript("OnLeave", Leave)
 	return row
 end
 
@@ -139,8 +155,9 @@ RenderRows = function()
 			local label = category.label or category.id
 			if category.sensitive then label = label .. "  [Sensitive]" end
 			row.label:SetText(label)
-			row.label:SetTextColor(unpack(UI.colors[category.sensitive and "warning" or "text"]))
+			row.label:SetTextColor(unpack(UI.colors[category.sensitive and "warning" or (Selected(category) and "accent" or "text")]))
 			row.description:SetText(category.description or category.id)
+			row:Paint()
 			row:Show()
 		elseif row then
 			row.category = nil
@@ -181,6 +198,7 @@ FilterCategories = function(resetScroll)
 	panel.empty:SetShown(#panel.filtered == 0)
 	local enabled = MasterEnabled()
 	panel.master:SetChecked(enabled)
+	panel.master:SetBackdropBorderColor(unpack(UI.colors[enabled and "accent" or "border"]))
 	panel.masterTitle:SetText(enabled and "Sharing on" or "Sharing paused")
 	panel.masterTitle:SetTextColor(unpack(UI.colors[enabled and "success" or "warning"]))
 	panel.masterStatus:SetText(enabled and "Only checked permissions allow access. Unchecked categories remain private."
@@ -198,7 +216,7 @@ local function RefreshCategories(resetScroll)
 end
 
 local function CreatePanel()
-	panel = CreateFrame("Frame", "WoWAIContextPermissions", UIParent, "BackdropTemplate")
+	panel = CreateFrame("Frame", "WowieContextPermissions", UIParent, "BackdropTemplate")
 	panel:SetSize(780, 720)
 	panel:SetScale(math.min(1, math.max(1, UIParent:GetWidth() - 24) / 780, math.max(1, UIParent:GetHeight() - 24) / 720))
 	panel:SetPoint("CENTER")
@@ -210,12 +228,12 @@ local function CreatePanel()
 	panel:RegisterForDrag("LeftButton")
 	panel:SetScript("OnDragStart", panel.StartMoving)
 	panel:SetScript("OnDragStop", panel.StopMovingOrSizing)
-	UI.Surface(panel, "background")
-	table.insert(UISpecialFrames, "WoWAIContextPermissions")
+	UI.Window(panel, 48)
+	table.insert(UISpecialFrames, "WowieContextPermissions")
 	panel.rows, panel.filtered, panel.tabs = {}, {}, {}
 	panel.view = "character"
 
-	local title = UI.Label(panel, "Sharing", 20)
+	local title = UI.Title(panel, "Sharing", 20)
 	title:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -18)
 	local close = UI.Button(panel, "Close", 72, function() panel:Hide() end, "quiet")
 	close:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, -14)
@@ -229,13 +247,13 @@ local function CreatePanel()
 	masterCard:SetPoint("TOPLEFT", panel, "TOPLEFT", 16, -86)
 	masterCard:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, -86)
 	masterCard:SetHeight(68)
-	panel.master = CreateFrame("CheckButton", "WoWAIContextMaster", masterCard, "BackdropTemplate")
+	panel.master = CreateFrame("CheckButton", "WowieContextMaster", masterCard, "BackdropTemplate")
 	UI.Surface(panel.master, "raised")
 	panel.master:SetSize(26, 26)
 	panel.master:SetPoint("TOPLEFT", masterCard, "TOPLEFT", 12, -14)
 	panel.master:SetCheckedTexture("Interface\\Buttons\\UI-CheckBox-Check")
 	panel.master:SetScript("OnClick", function(self)
-		WoWAI.SetContextEnabled(self:GetChecked() and true or false)
+		Wowie.SetContextEnabled(self:GetChecked() and true or false)
 		FilterCategories(false)
 		NotifyChanged()
 	end)
@@ -261,11 +279,7 @@ local function CreatePanel()
 			FilterCategories(true)
 		end, "secondary", view.control)
 		panel.tabs[viewID] = tab
-		tab.restoreAppearance = function()
-			local selected = panel.view == viewID
-			UI.Surface(tab, selected and "raised" or "surface")
-			tab:GetFontString():SetTextColor(unpack(UI.colors[selected and "accent" or "text"]))
-		end
+		tab.restoreAppearance = function() UI.SetSelected(tab, panel.view == viewID) end
 		tab:HookScript("OnEnter", tab.restoreAppearance)
 		tab:HookScript("OnLeave", tab.restoreAppearance)
 		tab:HookScript("OnMouseUp", tab.restoreAppearance)
@@ -276,12 +290,12 @@ local function CreatePanel()
 
 	local searchLabel = UI.Label(panel, "Filter this view", 12, "muted")
 	searchLabel:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -273)
-	panel.search = CreateFrame("EditBox", "WoWAIContextSearch", panel, "BackdropTemplate")
-	UI.Surface(panel.search, "raised")
+	panel.search = CreateFrame("EditBox", "WowieContextSearch", panel, "BackdropTemplate")
+	UI.Input(panel.search)
 	panel.search:SetPoint("TOPLEFT", panel, "TOPLEFT", 120, -264)
 	panel.search:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -84, -264)
 	panel.search:SetHeight(32)
-	panel.search:SetFontObject(ChatFontNormal)
+	panel.search:SetFont(UI.font, 13, "")
 	panel.search:SetTextInsets(9, 9, 0, 0)
 	panel.search:SetAutoFocus(false)
 	panel.search:SetMaxLetters(160)
@@ -290,12 +304,12 @@ local function CreatePanel()
 	panel.search:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
 	local clearSearch = UI.Button(panel, "Clear", 60, function()
 		panel.search:SetText("")
-	end, "quiet", "WoWAIContextClearSearch")
+	end, "quiet", "WowieContextClearSearch")
 	clearSearch:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, -264)
 	panel.count = UI.Label(panel, "", 12, "muted")
 	panel.count:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -308)
 
-	panel.scroll = UI.ScrollFrame(panel, "WoWAIContextScroll")
+	panel.scroll = UI.ScrollFrame(panel, "WowieContextScroll")
 	panel.scroll:SetPoint("TOPLEFT", panel, "TOPLEFT", 16, -334)
 	panel.scroll:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -34, 130)
 	panel.content = CreateFrame("Frame", nil, panel.scroll)
@@ -318,22 +332,22 @@ local function CreatePanel()
 	note:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -20, 60)
 	note:SetHeight(56)
 	local defaults = UI.Button(panel, "Common defaults", 150, function()
-		WoWAIContext.ResetDefaults()
+		WowieContext.ResetDefaults()
 		RefreshCategories(false)
 		NotifyChanged()
-	end, "secondary", "WoWAIContextDefaults")
+	end, "secondary", "WowieContextDefaults")
 	defaults:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 16, 18)
 	local clear = UI.Button(panel, "Clear choices", 128, function()
 		-- Reset first to discard scopes whose documentation is unavailable.
-		WoWAIContext.ResetDefaults()
-		for _, category in ipairs(WoWAIContext.Categories()) do
-			WoWAIContext.SetEnabled(category.id, false)
+		WowieContext.ResetDefaults()
+		for _, category in ipairs(WowieContext.Categories()) do
+			WowieContext.SetEnabled(category.id, false)
 		end
 		RefreshCategories(false)
 		NotifyChanged()
-	end, "danger", "WoWAIContextClear")
+	end, "danger", "WowieContextClear")
 	clear:SetPoint("LEFT", defaults, "RIGHT", 8, 0)
-	local done = UI.Button(panel, "Close", 88, function() panel:Hide() end, "secondary", "WoWAIContextClose")
+	local done = UI.Button(panel, "Close", 88, function() panel:Hide() end, "secondary", "WowieContextClose")
 	done:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -16, 18)
 	panel:SetScript("OnHide", function()
 		panel.search:ClearFocus()
@@ -342,7 +356,7 @@ local function CreatePanel()
 	panel:Hide()
 end
 
-function WoWAIContextUI.Show()
+function WowieContextUI.Show()
 	if not panel then CreatePanel() end
 	RefreshCategories(false)
 	panel:Show()

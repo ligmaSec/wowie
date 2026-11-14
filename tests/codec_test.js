@@ -6,7 +6,7 @@ const { lua, lauxlib, lualib, to_luastring, to_jsstring } = fengari;
 const fs = require('fs'), os = require('os'), path = require('path'), zlib = require('zlib');
 const { execFileSync } = require('child_process');
 
-const CODEC = path.join(__dirname, '..', 'addon', 'WoWAI', 'Codec.lua');
+const CODEC = path.join(__dirname, '..', 'addon', 'Wowie', 'Codec.lua');
 const BRIDGE = path.join(__dirname, '..', 'bridge');
 const CELLS = 200, MAXROWS = 48;
 const decoders = [];
@@ -44,11 +44,11 @@ function encodeWithLua(id, payload, display) {
   lualib.luaL_openlibs(L);
   try {
     const code = fs.readFileSync(CODEC, 'utf8') +
-      `\nlocal cells = WoWAI_Codec.Encode(${id}, ${lit})\n` +
+      `\nlocal cells = Wowie_Codec.Encode(${id}, ${lit})\n` +
       `local t = {}\nfor i = 1, #cells do t[i] = tostring(cells[i]) end\n` +
       `CELLS_RESULT = table.concat(t, ",")\n` +
       `local colors = {}\nfor v = 0, 7 do\n` +
-      `  local r, g, b = WoWAI_Codec.CellColor(v, "${display}")\n` +
+      `  local r, g, b = Wowie_Codec.CellColor(v, "${display}")\n` +
       `  colors[#colors + 1] = string.format("%.12f,%.12f,%.12f", r, g, b)\nend\n` +
       `COLORS_RESULT = table.concat(colors, ";")\n`;
     if (lauxlib.luaL_dostring(L, to_luastring(code)) !== 0) {
@@ -160,7 +160,7 @@ cases.push(
   { name: 'quiet4/spatial-filter-readable', display: 'quiet4', id: 65000, payload: utf8, filtered: true, small: true }
 );
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wowai-codec-'));
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wowie-codec-'));
 let pass = 0, total = 0;
 try {
   const groups = new Map();

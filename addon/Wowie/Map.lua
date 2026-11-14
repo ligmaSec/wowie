@@ -1,5 +1,5 @@
--- WoWAI map: layers the agent draws (routes, quest stops, marks), synced from the
--- bridge, plus herb and ore locations from the optional WoWAI_Nodes addon.
+-- Wowie map: layers the agent draws (routes, quest stops, marks), synced from the
+-- bridge, plus herb and ore locations from the optional Wowie_Nodes addon.
 --
 -- Layers arrive in slot files as { epoch, version, layers = { { name, title,
 -- ordered, loop, points = { { uiMapID, x, y, label, kind }, ... } } } }; x/y are
@@ -9,7 +9,8 @@
 
 local ADDON_NAME = ...
 local M = {}
-WoWAIMap = M
+WowieMap = M
+local unpack = unpack or table.unpack
 
 local ARRIVE_YARDS = 12
 local NODE_SIZE, PIN_SIZE = 9, 16
@@ -24,7 +25,7 @@ local KIND_COLOR = {
 	flight = { 0.55, 0.75, 1 }, poi = { 1, 1, 1 },
 }
 
-local mdb -- WoWAIMapDB: source map, local edits, visibility/nodes, navigation and owned waypoint
+local mdb -- WowieMapDB: source map, local edits, visibility/nodes, navigation and owned waypoint
 
 local function Try(fn, ...)
 	if type(fn) ~= "function" then return nil end
@@ -33,13 +34,13 @@ local function Try(fn, ...)
 end
 
 local function Print(msg)
-	print("|cff66ccff[WoW AI map]|r " .. msg)
+	print("|cff66ccff[Wowie map]|r " .. msg)
 end
 
 local function DB()
 	if not mdb then
-		WoWAIMapDB = WoWAIMapDB or {}
-		mdb = WoWAIMapDB
+		WowieMapDB = WowieMapDB or {}
+		mdb = WowieMapDB
 		mdb.hidden = mdb.hidden or {}
 		mdb.nodes = mdb.nodes or { ore = false, herb = false, filter = "skill" }
 		mdb.navPos = nil -- the standalone compass was replaced by map tracking
@@ -58,7 +59,7 @@ local function NavigationChanged()
 	navigationSnapshot = nil
 	if RefreshNavigation then RefreshNavigation() end
 	M.Refresh()
-	if WoWAI and WoWAI.UpdateNavigation then WoWAI.UpdateNavigation() end
+	if Wowie and Wowie.UpdateNavigation then Wowie.UpdateNavigation() end
 end
 
 -- Include occurrence numbers so removing a repeated route stop removes just that stop.
@@ -268,7 +269,7 @@ end
 local SKILL_IDS = { mining = 186, herbalism = 182 }
 local SKILL_NAMES = { mining = MINING or "Mining", herbalism = HERBALISM or "Herbalism" }
 local function SkillRank(prof)
-	local lines = WoWAI and WoWAI.SkillLines and WoWAI.SkillLines() or {}
+	local lines = Wowie and Wowie.SkillLines and Wowie.SkillLines() or {}
 	for _, sk in ipairs(lines) do
 		if not sk.isHeader and (sk.skillID == SKILL_IDS[prof] or sk.name == SKILL_NAMES[prof]) then return sk.rank end
 	end
@@ -283,7 +284,7 @@ local function NodeFilter()
 end
 
 local function DrawNodes(mapID, scale)
-	local data = WoWAINodes
+	local data = WowieNodes
 	local want, filter = NodeFilter()
 	if not data or not next(want) then return end
 	local perMap = data.maps and data.maps[mapID]
@@ -387,7 +388,7 @@ end
 -- Map tracking: native waypoints, with dotted routes through ShortestPathForever
 ---------------------------------------------------------------------------
 
-local ROUTE_OWNER = "WoWAI"
+local ROUTE_OWNER = "Wowie"
 local tracking, navigatorTicker
 
 local function Router()
@@ -727,7 +728,7 @@ local function PointLocation(p)
 	return string.format("%s · %.1f, %.1f", info and info.name or "Unknown zone", p[2], p[3])
 end
 
-StaticPopupDialogs["WOWAI_MAP_DELETE"] = {
+StaticPopupDialogs["WOWIE_MAP_DELETE"] = {
 	text = "Delete navigation point \"%s\"?\n\nThis removes the saved point locally, including from its route. Bridge refreshes will not restore it.",
 	button1 = OKAY, button2 = CANCEL,
 	timeout = 0, whileDead = true, hideOnEscape = true,
@@ -754,9 +755,16 @@ local function ShowPointOnMap(layer, index)
 end
 
 local function NewNavigationRow(slot)
-	local panel, UI = navigationPanel, WoWAI.UI
+	local panel, UI = navigationPanel, Wowie.UI
 	local row = CreateFrame("Frame", nil, panel.content, "BackdropTemplate")
 	UI.Surface(row)
+	row.rule = UI.Rule(row, "border", 0.32)
+	row.rule:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 10, 0)
+	row.rule:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -10, 0)
+	row.marker = UI.Rule(row, "accent", 0.85, true)
+	row.marker:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -6)
+	row.marker:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 0, 6)
+	row.marker:SetWidth(2)
 	row:SetHeight(NAV_ROW_HEIGHT - 4)
 	row.label = UI.Label(row, "", 13)
 	row.label:SetPoint("TOPLEFT", row, "TOPLEFT", 10, -9)
@@ -771,28 +779,28 @@ local function NewNavigationRow(slot)
 	-- Each closure resolves the current binding, never the row's former stop.
 	row.navigate = UI.Button(row, "Navigate", 92, function()
 		if row.entry then M.Navigate(row.entry.layer, row.entry.index) end
-	end, "primary", "WoWAINavigationRow" .. slot .. "Navigate")
+	end, "primary", "WowieNavigationRow" .. slot .. "Navigate")
 	row.navigate:SetPoint("RIGHT", row, "RIGHT", -8, 0)
 	row.map = UI.Button(row, "On map", 76, function()
 		if row.entry then ShowPointOnMap(row.entry.layer, row.entry.index) end
-	end, "secondary", "WoWAINavigationRow" .. slot .. "Map")
+	end, "secondary", "WowieNavigationRow" .. slot .. "Map")
 	row.map:SetPoint("RIGHT", row.navigate, "LEFT", -6, 0)
 	row.visibility = UI.Button(row, "Hide", 70, function()
 		if row.entry then M.SetLayerVisible(row.entry.layer, DB().hidden[row.entry.layer] == true) end
-	end, "quiet", "WoWAINavigationRow" .. slot .. "Visibility")
+	end, "quiet", "WowieNavigationRow" .. slot .. "Visibility")
 	row.visibility:SetPoint("RIGHT", row.map, "LEFT", -6, 0)
 	row.delete = UI.Button(row, "Delete", 70, function()
 		local entry = row.entry
 		if entry then
-			StaticPopup_Show("WOWAI_MAP_DELETE", entry.label, nil, { layer = entry.layer, index = entry.index, point = entry.point })
+			StaticPopup_Show("WOWIE_MAP_DELETE", entry.label, nil, { layer = entry.layer, index = entry.index, point = entry.point })
 		end
-	end, "danger", "WoWAINavigationRow" .. slot .. "Delete")
+	end, "danger", "WowieNavigationRow" .. slot .. "Delete")
 	row.delete:SetPoint("RIGHT", row.visibility, "LEFT", -6, 0)
 	return row
 end
 
 RenderNavigationRows = function()
-	local panel = navigationPanel
+	local panel, UI = navigationPanel, Wowie.UI
 	if not panel or not panel.filtered then return end
 	local first = math.floor(panel.scroll:GetVerticalScroll() / NAV_ROW_HEIGHT) + 1
 	local visible = math.ceil(math.max(1, panel.scroll:GetHeight()) / NAV_ROW_HEIGHT) + 1
@@ -807,6 +815,11 @@ RenderNavigationRows = function()
 			row:SetPoint("TOPLEFT", panel.content, "TOPLEFT", 0, -(first + slot - 2) * NAV_ROW_HEIGHT)
 			row:SetWidth(math.max(1, panel.scroll:GetWidth() - 4))
 			local current = active and active.layer == entry.layer and active.index == entry.index
+			local fill = UI.colors[current and "primary" or "surface"]
+			row:SetBackdropColor(unpack(fill))
+			row:SetBackdropBorderColor(0, 0, 0, 0)
+			row.marker:SetShown(current and true or false)
+			row.label:SetTextColor(unpack(UI.colors[current and "accent" or "text"]))
 			row.label:SetText((current and "To: " or "") .. entry.label)
 			row.detail:SetText(entry.detail)
 			row.navigate:SetText(entry.ordered and entry.index == 1 and "Start route" or "Navigate")
@@ -878,8 +891,8 @@ RefreshNavigation = function()
 end
 
 local function CreatePointEditor()
-	local panel, UI = navigationPanel, WoWAI.UI
-	local editor = UI.Surface(CreateFrame("Frame", "WoWAINavigationPointEditor", panel, "BackdropTemplate"), "background")
+	local panel, UI = navigationPanel, Wowie.UI
+	local editor = UI.Window(CreateFrame("Frame", "WowieNavigationPointEditor", panel, "BackdropTemplate"), 44)
 	panel.editor = editor
 	editor:SetSize(600, 420)
 	editor:SetPoint("CENTER", panel, "CENTER")
@@ -887,8 +900,8 @@ local function CreatePointEditor()
 	editor:SetToplevel(true)
 	editor:SetClampedToScreen(true)
 	editor:EnableMouse(true)
-	table.insert(UISpecialFrames, "WoWAINavigationPointEditor")
-	local title = UI.Label(editor, "Add navigation point", 18)
+	table.insert(UISpecialFrames, "WowieNavigationPointEditor")
+	local title = UI.Title(editor, "Add navigation point", 18)
 	title:SetPoint("TOPLEFT", editor, "TOPLEFT", 20, -18)
 	local note = UI.Label(editor, "Saved locally. Bridge refreshes keep your changes.", 12, "muted")
 	note:SetPoint("TOPLEFT", editor, "TOPLEFT", 20, -50)
@@ -896,10 +909,10 @@ local function CreatePointEditor()
 	local function Field(name, label, x, y, width, maximum)
 		local heading = UI.Label(editor, label, 12, "muted")
 		heading:SetPoint("TOPLEFT", editor, "TOPLEFT", x, -y)
-		local field = UI.Surface(CreateFrame("EditBox", name, editor, "BackdropTemplate"), "raised")
+		local field = UI.Input(CreateFrame("EditBox", name, editor, "BackdropTemplate"))
 		field:SetPoint("TOPLEFT", editor, "TOPLEFT", x, -y - 22)
 		field:SetSize(width, 30)
-		field:SetFontObject(ChatFontNormal)
+		field:SetFont(UI.font, 13, "")
 		field:SetTextInsets(8, 8, 0, 0)
 		field:SetAutoFocus(false)
 		field:SetMaxLetters(maximum)
@@ -908,10 +921,10 @@ local function CreatePointEditor()
 		editor.fields[#editor.fields + 1] = field
 		return field
 	end
-	editor.name = Field("WoWAINavigationPointName", "Name", 20, 84, 560, 80)
-	editor.map = Field("WoWAINavigationPointMap", "Map ID", 294, 150, 286, 10)
-	editor.x = Field("WoWAINavigationPointX", "X % (0–100)", 294, 220, 134, 16)
-	editor.y = Field("WoWAINavigationPointY", "Y % (0–100)", 444, 220, 136, 16)
+	editor.name = Field("WowieNavigationPointName", "Name", 20, 84, 560, 80)
+	editor.map = Field("WowieNavigationPointMap", "Map ID", 294, 150, 286, 10)
+	editor.x = Field("WowieNavigationPointX", "X % (0–100)", 294, 220, 134, 16)
+	editor.y = Field("WowieNavigationPointY", "Y % (0–100)", 444, 220, 136, 16)
 	for i, field in ipairs(editor.fields) do
 		field:SetScript("OnTabPressed", function(self)
 			local delta = IsShiftKeyDown() and -1 or 1
@@ -923,7 +936,7 @@ local function CreatePointEditor()
 	editor.targetLabel:SetPoint("TOPLEFT", editor, "TOPLEFT", 20, -150)
 	editor.targetLabel:SetWidth(252)
 	editor.targetLabel:SetWordWrap(false)
-	editor.targetScroll = UI.ScrollFrame(editor, "WoWAINavigationPointTargets")
+	editor.targetScroll = UI.ScrollFrame(editor, "WowieNavigationPointTargets")
 	editor.targetScroll:SetPoint("TOPLEFT", editor, "TOPLEFT", 20, -174)
 	editor.targetScroll:SetSize(244, 120)
 	editor.targetContent = CreateFrame("Frame", nil, editor.targetScroll)
@@ -947,14 +960,14 @@ local function CreatePointEditor()
 		if not pos or (pos.x == 0 and pos.y == 0) or not FillPosition(mapID, pos.x, pos.y) then
 			editor.error:SetText("Player coordinates unavailable. Enter coordinates or use a map pin.")
 		end
-	end, "secondary", "WoWAINavigationPointCurrent")
+	end, "secondary", "WowieNavigationPointCurrent")
 	editor.current:SetPoint("TOPLEFT", editor, "TOPLEFT", 20, -310)
 	editor.pin = UI.Button(editor, "Use map pin", 128, function()
 		local point = Try(C_Map.GetUserWaypoint)
 		if not point or not point.position or not FillPosition(point.uiMapID, point.position.x, point.position.y) then
 			editor.error:SetText("Place a pin on your world map first, then use it here.")
 		end
-	end, "secondary", "WoWAINavigationPointPin")
+	end, "secondary", "WowieNavigationPointPin")
 	editor.pin:SetPoint("LEFT", editor.current, "RIGHT", 8, 0)
 	editor.save = UI.Button(editor, "Add point", 112, function()
 		local ok, result = M.AddPoint(editor.target, editor.map:GetText(), editor.x:GetText(), editor.y:GetText(), editor.name:GetText())
@@ -969,9 +982,9 @@ local function CreatePointEditor()
 				break
 			end
 		end
-	end, "primary", "WoWAINavigationPointSave")
+	end, "primary", "WowieNavigationPointSave")
 	editor.save:SetPoint("BOTTOMRIGHT", editor, "BOTTOMRIGHT", -20, 16)
-	local cancel = UI.Button(editor, "Cancel", 88, function() editor:Hide() end, "quiet", "WoWAINavigationPointCancel")
+	local cancel = UI.Button(editor, "Cancel", 88, function() editor:Hide() end, "quiet", "WowieNavigationPointCancel")
 	cancel:SetPoint("RIGHT", editor.save, "LEFT", -8, 0)
 	editor:SetScript("OnHide", function()
 		for _, field in ipairs(editor.fields) do field:ClearFocus() end
@@ -982,7 +995,7 @@ end
 ShowPointEditor = function()
 	local panel = navigationPanel
 	if not panel.editor then CreatePointEditor() end
-	local editor, UI = panel.editor, WoWAI.UI
+	local editor, UI = panel.editor, Wowie.UI
 	local choices = { { name = LOCAL_LAYER, title = "My places" } }
 	for _, l in ipairs(Layers()) do if l.name ~= LOCAL_LAYER then choices[#choices + 1] = l end end
 	local function SelectTarget(name)
@@ -990,7 +1003,8 @@ ShowPointEditor = function()
 		for _, button in ipairs(editor.targets) do
 			if button.target then
 				local selected = button.target == name
-				button:SetText((selected and "> " or "") .. button.title)
+				button:SetText(button.title)
+				UI.SetSelected(button, selected)
 				if selected then editor.targetLabel:SetText("Save to: " .. button.title) end
 			end
 		end
@@ -998,7 +1012,7 @@ ShowPointEditor = function()
 	for i, l in ipairs(choices) do
 		local button = editor.targets[i]
 		if not button then
-			button = UI.Button(editor.targetContent, "", 240, function(self) SelectTarget(self.target) end, "quiet", "WoWAINavigationPointTarget" .. i)
+			button = UI.Button(editor.targetContent, "", 240, function(self) SelectTarget(self.target) end, "quiet", "WowieNavigationPointTarget" .. i)
 			editor.targets[i] = button
 		end
 		button.target, button.title = l.name, DisplayLabel(HumanTitle(l)) .. (l.ordered and " (route)" or "")
@@ -1025,8 +1039,8 @@ ShowPointEditor = function()
 end
 
 local function CreateNavigationPanel()
-	local UI = WoWAI.UI
-	local panel = CreateFrame("Frame", "WoWAINavigationPanel", UIParent, "BackdropTemplate")
+	local UI = Wowie.UI
+	local panel = CreateFrame("Frame", "WowieNavigationPanel", UIParent, "BackdropTemplate")
 	navigationPanel = panel
 	panel:SetSize(780, 680)
 	panel:SetScale(math.min(1, math.max(1, UIParent:GetWidth() - 24) / 780, math.max(1, UIParent:GetHeight() - 24) / 680))
@@ -1039,23 +1053,26 @@ local function CreateNavigationPanel()
 	panel:RegisterForDrag("LeftButton")
 	panel:SetScript("OnDragStart", panel.StartMoving)
 	panel:SetScript("OnDragStop", panel.StopMovingOrSizing)
-	UI.Surface(panel, "background")
-	table.insert(UISpecialFrames, "WoWAINavigationPanel")
+	UI.Window(panel, 48)
+	table.insert(UISpecialFrames, "WowieNavigationPanel")
 	panel.rows, panel.filtered = {}, {}
-	local title = UI.Label(panel, "Navigation", 20)
+	local title = UI.Title(panel, "Navigation", 20)
 	title:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -18)
-	local close = UI.Button(panel, "Close", 72, function() panel:Hide() end, "quiet", "WoWAINavigationClose")
+	local close = UI.Button(panel, "Close", 72, function() panel:Hide() end, "quiet", "WowieNavigationClose")
 	close:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, -14)
-	local add = UI.Button(panel, "Add point", 112, function() ShowPointEditor() end, "primary", "WoWAINavigationAdd")
+	local add = UI.Button(panel, "Add point", 112, function() ShowPointEditor() end, "primary", "WowieNavigationAdd")
 	add:SetPoint("RIGHT", close, "LEFT", -8, 0)
 	local note = UI.Label(panel, "Saved destinations and routes · available even while disconnected", 12, "muted")
 	note:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -52)
-	panel.active = CreateFrame("Frame", "WoWAINavigationActive", panel, "BackdropTemplate")
+	panel.active = CreateFrame("Frame", "WowieNavigationActive", panel, "BackdropTemplate")
 	UI.Surface(panel.active)
+	local activeRule = UI.Rule(panel.active, "border", 0.55)
+	activeRule:SetPoint("BOTTOMLEFT", panel.active, "BOTTOMLEFT", 10, 0)
+	activeRule:SetPoint("BOTTOMRIGHT", panel.active, "BOTTOMRIGHT", -10, 0)
 	panel.active:SetPoint("TOPLEFT", panel, "TOPLEFT", 16, -80)
 	panel.active:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, -80)
 	panel.active:SetHeight(142)
-	panel.active.destination = UI.Label(panel.active, "", 15)
+	panel.active.destination = UI.Label(panel.active, "", 15, "accent")
 	panel.active.destination:SetPoint("TOPLEFT", panel.active, "TOPLEFT", 12, -10)
 	panel.active.destination:SetPoint("TOPRIGHT", panel.active, "TOPRIGHT", -12, -10)
 	panel.active.destination:SetHeight(20)
@@ -1070,41 +1087,41 @@ local function CreateNavigationPanel()
 	panel.active.status:SetPoint("TOPRIGHT", panel.active, "TOPRIGHT", -12, -59)
 	panel.active.status:SetHeight(32)
 	panel.active.status:SetJustifyV("TOP")
-	panel.previous = UI.Button(panel.active, "Previous", 88, function() M.Step(-1) end, "secondary", "WoWAINavigationPrevious")
+	panel.previous = UI.Button(panel.active, "Previous", 88, function() M.Step(-1) end, "secondary", "WowieNavigationPrevious")
 	panel.previous:SetPoint("BOTTOMLEFT", panel.active, "BOTTOMLEFT", 12, 10)
-	panel.next = UI.Button(panel.active, "Next", 72, function() M.Step(1) end, "secondary", "WoWAINavigationNext")
+	panel.next = UI.Button(panel.active, "Next", 72, function() M.Step(1) end, "secondary", "WowieNavigationNext")
 	panel.next:SetPoint("LEFT", panel.previous, "RIGHT", 6, 0)
-	panel.stop = UI.Button(panel.active, "Stop", 72, M.Stop, "danger", "WoWAINavigationStop")
+	panel.stop = UI.Button(panel.active, "Stop", 72, M.Stop, "danger", "WowieNavigationStop")
 	panel.stop:SetPoint("LEFT", panel.next, "RIGHT", 6, 0)
 	panel.map = UI.Button(panel.active, "Show on map", 112, function()
 		local active = M.GetNavigationState().active
 		if active then ShowPointOnMap(active.layer, active.index) end
-	end, "secondary", "WoWAINavigationMap")
+	end, "secondary", "WowieNavigationMap")
 	panel.map:SetPoint("LEFT", panel.stop, "RIGHT", 18, 0)
 	panel.visibility = UI.Button(panel.active, "Hide layer", 100, function()
 		local active = M.GetNavigationState().active
 		if active then M.SetLayerVisible(active.layer, DB().hidden[active.layer] == true) end
-	end, "quiet", "WoWAINavigationVisibility")
+	end, "quiet", "WowieNavigationVisibility")
 	panel.visibility:SetPoint("LEFT", panel.map, "RIGHT", 6, 0)
 	local searchLabel = UI.Label(panel, "Search places", 12, "muted")
 	searchLabel:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -249)
-	panel.search = CreateFrame("EditBox", "WoWAINavigationSearch", panel, "BackdropTemplate")
-	UI.Surface(panel.search, "raised")
+	panel.search = CreateFrame("EditBox", "WowieNavigationSearch", panel, "BackdropTemplate")
+	UI.Input(panel.search)
 	panel.search:SetPoint("TOPLEFT", panel, "TOPLEFT", 120, -240)
 	panel.search:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -90, -240)
 	panel.search:SetHeight(32)
-	panel.search:SetFontObject(ChatFontNormal)
+	panel.search:SetFont(UI.font, 13, "")
 	panel.search:SetTextInsets(9, 9, 0, 0)
 	panel.search:SetAutoFocus(false)
 	panel.search:SetMaxLetters(160)
 	panel.search:SetScript("OnTextChanged", function() FilterNavigation(true) end)
 	panel.search:SetScript("OnEscapePressed", function() panel:Hide() end)
 	panel.search:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
-	local clear = UI.Button(panel, "Clear", 64, function() panel.search:SetText("") end, "quiet", "WoWAINavigationClear")
+	local clear = UI.Button(panel, "Clear", 64, function() panel.search:SetText("") end, "quiet", "WowieNavigationClear")
 	clear:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, -240)
 	panel.count = UI.Label(panel, "", 12, "muted")
 	panel.count:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -284)
-	panel.scroll = UI.ScrollFrame(panel, "WoWAINavigationScroll")
+	panel.scroll = UI.ScrollFrame(panel, "WowieNavigationScroll")
 	panel.scroll:SetPoint("TOPLEFT", panel, "TOPLEFT", 16, -308)
 	panel.scroll:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -34, 42)
 	panel.content = CreateFrame("Frame", nil, panel.scroll)
@@ -1201,7 +1218,7 @@ function M.Sync(m)
 end
 
 ---------------------------------------------------------------------------
--- /wow-ai map (and /aimap)
+-- /wowie map (and /aimap)
 ---------------------------------------------------------------------------
 
 local function Status()
@@ -1211,8 +1228,8 @@ local function Status()
 		Print(string.format("%s%s|r  %s (%d point(s))%s", mdb.hidden[l.name] and "|cff888888" or "|cffffffff", l.name, l.title or "", #l.points, (mdb.nav and mdb.nav.layer == l.name) and string.format("  navigating %d/%d", mdb.nav.index, #l.points) or ""))
 	end
 	local n = mdb.nodes
-	Print(string.format("nodes: ore %s, herb %s, filter %s%s", n.ore and "on" or "off", n.herb and "on" or "off", n.filter, WoWAINodes and "" or "  (WoWAI_Nodes data addon not installed)"))
-	Print("commands: /wow-ai map ore|herb [on|off], filter all|skill, show|hide <layer>, nav <layer> [n], next, prev, stop  (/aimap is the same)")
+	Print(string.format("nodes: ore %s, herb %s, filter %s%s", n.ore and "on" or "off", n.herb and "on" or "off", n.filter, WowieNodes and "" or "  (Wowie_Nodes data addon not installed)"))
+	Print("commands: /wowie map ore|herb [on|off], filter all|skill, show|hide <layer>, nav <layer> [n], next, prev, stop  (/aimap is the same)")
 end
 
 function M.Command(msg)
@@ -1240,8 +1257,8 @@ function M.Command(msg)
 	else Status() end
 end
 
-SLASH_WOWAIMAP1 = "/aimap"
-SlashCmdList["WOWAIMAP"] = M.Command
+SLASH_WOWIEMAP1 = "/aimap"
+SlashCmdList["WOWIEMAP"] = M.Command
 
 local ev = CreateFrame("Frame")
 ev:RegisterEvent("ADDON_LOADED")

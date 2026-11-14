@@ -1,7 +1,7 @@
 {
   "addonDir": "C:\\Program Files (x86)\\World of Warcraft\\_forever_\\Interface\\AddOns",
-  "savedVariablesFile": "C:\\Program Files (x86)\\World of Warcraft\\_forever_\\WTF\\Account\\YOUR_ACCOUNT\\SavedVariables\\WoWAI.lua",
-  "inboxFile": "C:\\Program Files (x86)\\World of Warcraft\\_forever_\\Interface\\AddOns\\WoWAI\\Inbox.lua",
+  "savedVariablesFile": "C:\\Program Files (x86)\\World of Warcraft\\_forever_\\WTF\\Account\\YOUR_ACCOUNT\\SavedVariables\\Wowie.lua",
+  "inboxFile": "C:\\Program Files (x86)\\World of Warcraft\\_forever_\\Interface\\AddOns\\Wowie\\Inbox.lua",
   "defaultCwd": "C:\\path\\to\\your\\project",
   "tocInterface": "16001",
   "slots": 200,

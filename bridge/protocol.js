@@ -223,15 +223,15 @@ function parseContextOutbox(src) {
 // reply goes to the addon's window and only its closing "TL;DR:" block is
 // printed in the game chat, so every reply must end with one. Then, while the
 // addon has sent a context (the player's character, location and so on; see
-// GameContext in WoWAI.lua), that context plus the addon/macro primer
+// GameContext in Wowie.lua), that context plus the addon/macro primer
 // (docs/WOW-ADDON-PRIMER.md) so it can write for this client whatever folder
 // the chat works in. Empty context = neither is appended, so a bridge used for
-// unrelated projects, or an addon with `/wow-ai context off`, only gets the
+// unrelated projects, or an addon with `/wowie context off`, only gets the
 // reply-format rule. Claude and Grok take this as a system prompt; for Codex,
 // agents.js puts it at the top of the prompt.
 const SUMMARY_MARKER = 'TL;DR:';
 const REPLY_FORMAT = [
-  'The user is talking to you from inside World of Warcraft through the wow-ai addon. They type in a small in-game window and your reply is shown there as plain text (markdown is not rendered), so keep replies compact and formatting simple.',
+  'The user is talking to you from inside World of Warcraft through the wowie addon. They type in a small in-game window and your reply is shown there as plain text (markdown is not rendered), so keep replies compact and formatting simple.',
   '',
   `Only a short summary of each reply is printed into the game chat, where the user actually sees it while playing; the full reply is only visible if they open the addon window. So end EVERY reply with a final block that starts with "${SUMMARY_MARKER}" on its own line and holds one or two short lines (under about 200 characters in total) saying what you did or what the answer is, and what you need from the user if anything. Write it as plain text. Do not repeat the summary elsewhere, and put nothing after it.`,
 ];
@@ -239,11 +239,11 @@ const REPLY_FORMAT = [
 // How the agent draws on the world map (see "Map layers" below and docs/MAP.md).
 // Sent with the game context, since marks only make sense in a game chat.
 const MAP_HINT = [
-  'You can mark the player\'s world map. Either append commands to the file named by the WOW_AI_MAP_FILE environment variable (one JSON object per line) or, for a few marks, end the reply with a fenced block whose language tag is wowmap containing them. Commands:',
+  'You can mark the player\'s world map. Either append commands to the file named by the WOWIE_MAP_FILE environment variable (one JSON object per line) or, for a few marks, end the reply with a fenced block whose language tag is wowmap containing them. Commands:',
   '{"op":"set","layer":"<name>","title":"<shown title>","ordered":true,"loop":false,"points":[{"m":<uiMapID>,"x":<0-100>,"y":<0-100>,"label":"<text>","kind":"quest"}]}  replaces that layer; "ordered" draws a numbered route with a navigator, "loop" closes it.',
   '{"op":"clear","layer":"<name>"} removes a layer; {"op":"clearall"} removes them all.',
   'x and y are map percent on the map with that uiMapID (the context gives the player\'s current one). kind is one of ore, herb, quest, turnin, kill, loot, object, explore, npc, trainer, vendor, dungeon, flight, poi. Only mark the map when asked for a route, marks or locations; say in the reply what you drew.',
-  'Use clear, human-readable layer titles and point labels. Saved marks appear in wow-ai\'s Navigation window, where the player can choose a destination, start a route, move between stops or stop navigation. Direct them to Navigation rather than asking them to type commands or internal layer names. Creating marks does not prove that guidance is active: another route may already own tracking.',
+  'Use clear, human-readable layer titles and point labels. Saved marks appear in wowie\'s Navigation window, where the player can choose a destination, start a route, move between stops or stop navigation. Direct them to Navigation rather than asking them to type commands or internal layer names. Creating marks does not prove that guidance is active: another route may already own tracking.',
 ];
 
 // How the agent hands the player a ready-made macro (see "Macros" below).
@@ -367,7 +367,7 @@ function luaTable(globalName, records, opts = {}) {
   const agents = Array.isArray(opts.agents) ? opts.agents : [];
   const captureIntervalMs = Number.isFinite(opts.captureIntervalMs) && opts.captureIntervalMs > 0 ? opts.captureIntervalMs : 50;
   const lines = [
-    '-- Written by the wow-ai bridge (bridge/bridge.js). Do not edit by hand.',
+    '-- Written by the wowie bridge (bridge/bridge.js). Do not edit by hand.',
     `${globalName} = {`,
     `\tts = ${luaStr(new Date(now).toISOString())},`,
     `\tnow = ${Math.floor(now / 1000)},`,
@@ -434,7 +434,7 @@ function luaTable(globalName, records, opts = {}) {
 // ---------------------------------------------------------------------------
 //
 // The agent marks the in-game map by writing commands, one JSON object per line,
-// to the file named by WOW_AI_MAP_FILE in its environment (a tool of its own can
+// to the file named by WOWIE_MAP_FILE in its environment (a tool of its own can
 // do that), or with a ```wowmap fenced block in its reply for a few hand-made marks.
 // The system prompt (MAP_HINT) tells it so.
 // The bridge owns the resulting layers (state.json) and ships the whole set,
@@ -533,7 +533,7 @@ function extractMapBlocks(text) {
   return { text: stripped, cmds, errors };
 }
 
-// Commands the agent's tools appended to WOW_AI_MAP_FILE (one JSON per line).
+// Commands the agent's tools appended to WOWIE_MAP_FILE (one JSON per line).
 function parseMapFile(src) {
   const cmds = [], errors = [];
   for (const line of String(src || '').split('\n')) {

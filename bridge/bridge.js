@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-// WoW AI bridge: the half of WoWAI that lives outside the game.
+// Wowie bridge: the half of Wowie that lives outside the game.
 //
 //   OUT  capture.ps1 screen-captures the addon's pixel strip -> one or more
 //        {session, chat, id, cwd, flags, text} records per frame
@@ -9,7 +9,7 @@
 //        in the chat's folder, streaming progress. Each chat is its own agent
 //        session; up to maxParallel run at once.
 //   IN   we write the latest reply/status of every chat into every
-//        WoWAI_S### slot addon (the game loads a fresh one from a timer),
+//        Wowie_S### slot addon (the game loads a fresh one from a timer),
 //        flip a signal .wav per message, and also write Inbox.lua for the
 //        reload path.
 //
@@ -20,8 +20,8 @@
 //   --project <dir>   default folder for chats that haven't picked one
 //
 // Like the agent CLIs themselves, the bridge works in the folder it was started
-// from: `cd my-project && wow-ai` makes my-project the default for every chat
-// that hasn't chosen its own with /wow-ai cd. Started from inside this repo (npm
+// from: `cd my-project && wowie` makes my-project the default for every chat
+// that hasn't chosen its own with /wowie cd. Started from inside this repo (npm
 // start), it falls back to defaultCwd in config.json.
 
 const fs = require('fs');
@@ -41,16 +41,16 @@ const TMP_DIR = path.join(HERE, 'tmp'); // prompt files for agents that read the
 
 const argv = process.argv.slice(2);
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log('wow-ai [--project <dir>] [--once] [--inject "text" [--agent <id>]]\n\n' +
-    'Runs the WoW AI bridge. Chats without a folder of their own work in <dir>,\n' +
+  console.log('wowie [--project <dir>] [--once] [--inject "text" [--agent <id>]]\n\n' +
+    'Runs the Wowie bridge. Chats without a folder of their own work in <dir>,\n' +
     'or in the folder you started it from, or in defaultCwd from bridge/config.json.\n' +
-    `Agents: ${A.agentIds().join(', ')} (the default is "agent" in config.json; chats pick with /wow-ai agent).`);
+    `Agents: ${A.agentIds().join(', ')} (the default is "agent" in config.json; chats pick with /wowie agent).`);
   process.exit(0);
 }
 let cfg;
 try { cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); }
 catch (e) {
-  console.error(`Cannot read ${CONFIG_FILE} (${e.message}).\nRun "node setup.js" in the wow-ai folder first.`);
+  console.error(`Cannot read ${CONFIG_FILE} (${e.message}).\nRun "node setup.js" in the wowie folder first.`);
   process.exit(2); // the supervisor doesn't restart on 2
 }
 const once = argv.includes('--once');
@@ -60,7 +60,7 @@ const agentIdx = argv.indexOf('--agent');
 const injectAgent = agentIdx >= 0 ? argv[agentIdx + 1] : '';
 const exitWhenIdle = once || inject !== null;
 
-// The agent chats use unless they pick their own (/wow-ai agent, "agent=" flag).
+// The agent chats use unless they pick their own (/wowie agent, "agent=" flag).
 const DEFAULT_AGENT = A.normalizeAgent(cfg.agent || A.DEFAULT_AGENT);
 if (!DEFAULT_AGENT) {
   console.error(`"agent": "${cfg.agent}" in ${CONFIG_FILE} is not one of ${A.agentIds().join(', ')}.`);
@@ -78,10 +78,10 @@ function insideRepo(dir) {
 const projectIdx = argv.indexOf('--project');
 const DEFAULT_CWD = path.resolve(
   projectIdx >= 0 && argv[projectIdx + 1] ? argv[projectIdx + 1]
-    : process.env.WOW_AI_PROJECT ? process.env.WOW_AI_PROJECT
+    : process.env.WOWIE_PROJECT ? process.env.WOWIE_PROJECT
     : !insideRepo(process.cwd()) ? process.cwd()
     : cfg.defaultCwd || process.cwd());
-const DEFAULT_CWD_SOURCE = projectIdx >= 0 ? '--project' : process.env.WOW_AI_PROJECT ? 'WOW_AI_PROJECT'
+const DEFAULT_CWD_SOURCE = projectIdx >= 0 ? '--project' : process.env.WOWIE_PROJECT ? 'WOWIE_PROJECT'
   : !insideRepo(process.cwd()) ? 'started here' : 'config.json';
 
 const resolveCwd = raw => P.resolveCwd(raw, DEFAULT_CWD);
@@ -100,10 +100,9 @@ const MAX_PARALLEL = cfg.maxParallel || 3;
 const cap = Object.assign({ enabled: true, processName: 'Wow', cellPx: 4, cellsPerRow: 200, maxRows: 48, intervalMs: 50 }, cfg.capture || {});
 cap.intervalMs = Number.isFinite(Number(cap.intervalMs)) && Number(cap.intervalMs) > 0 ? Number(cap.intervalMs) : 50;
 const CAPTURE_DISPLAYS = new Set(['robust', 'compact', 'quiet', 'quiet4']);
-// The game-side files. A config.json written for the addon's old name
-// (WoWClaude) still works: the paths are derived from addonDir instead.
-const INBOX_FILE = cfg.inboxFile && !/WoWClaude/.test(cfg.inboxFile) ? cfg.inboxFile : path.join(cfg.addonDir || '', 'WoWAI', 'Inbox.lua');
-let SAVED_VARS = String(cfg.savedVariablesFile || '').replace(/WoWClaude\.lua$/, 'WoWAI.lua');
+// The installer migrates legacy paths; honor the configured game-side files.
+const INBOX_FILE = cfg.inboxFile || path.join(cfg.addonDir || '', 'Wowie', 'Inbox.lua');
+let SAVED_VARS = String(cfg.savedVariablesFile || '');
 // The client folder holding the AddOns folder.
 const CLIENT_DIR = cfg.addonDir ? path.dirname(path.dirname(cfg.addonDir)) : '';
 
@@ -114,7 +113,7 @@ function findSavedVars() {
   const base = path.join(CLIENT_DIR, 'WTF', 'Account');
   try {
     const account = fs.readdirSync(base, { withFileTypes: true }).find(d => d.isDirectory() && d.name !== 'SavedVariables');
-    if (account) SAVED_VARS = path.join(base, account.name, 'SavedVariables', 'WoWAI.lua');
+    if (account) SAVED_VARS = path.join(base, account.name, 'SavedVariables', 'Wowie.lua');
   } catch {}
 }
 
@@ -302,11 +301,11 @@ function slotFile(globalName, records, urgent = true) {
 }
 
 function addonInstalled() {
-  return fs.existsSync(path.join(cfg.addonDir, 'WoWAI', 'WoWAI.toc'));
+  return fs.existsSync(path.join(cfg.addonDir, 'Wowie', 'Wowie.toc'));
 }
 
 function slotsInstalled() {
-  return fs.existsSync(path.join(cfg.addonDir, 'WoWAI_S001', 'Inbox.lua'));
+  return fs.existsSync(path.join(cfg.addonDir, 'Wowie_S001', 'Inbox.lua'));
 }
 
 // The game will load *some* unused slot next, so every slot gets the full picture.
@@ -318,7 +317,7 @@ function publishNow(urgent = true) {
   lastPublish = Date.now();
   const records = [...live.values()].slice(-30);
   try {
-    atomicWrite(INBOX_FILE, slotFile('WoWAI_Inbox', records, urgent));
+    atomicWrite(INBOX_FILE, slotFile('Wowie_Inbox', records, urgent));
   } catch (e) {
     if (!warnedNoAddon) {
       warnedNoAddon = true;
@@ -327,10 +326,10 @@ function publishNow(urgent = true) {
     return;
   }
   if (!slotsInstalled()) return;
-  const body = slotFile('WoWAI_SlotData', records, urgent);
+  const body = slotFile('Wowie_SlotData', records, urgent);
   let slotsWritten = true;
   for (let i = 1; i <= SLOTS; i++) {
-    try { atomicWrite(path.join(cfg.addonDir, 'WoWAI_S' + pad3(i), 'Inbox.lua'), body); } catch { slotsWritten = false; }
+    try { atomicWrite(path.join(cfg.addonDir, 'Wowie_S' + pad3(i), 'Inbox.lua'), body); } catch { slotsWritten = false; }
   }
   if (slotsWritten) notifyReady(records);
   // The restore bundle is large; it rides along once and is then dropped.
@@ -367,7 +366,7 @@ function publish(key, record, urgent) {
 }
 
 function signal(kind, id, on) {
-  const file = path.join(cfg.addonDir, 'WoWAI', kind, pad3(slotNumber(id)) + '.wav');
+  const file = path.join(cfg.addonDir, 'Wowie', kind, pad3(slotNumber(id)) + '.wav');
   try { atomicWrite(file, on ? SILENT_WAV : Buffer.alloc(0)); } catch {}
 }
 
@@ -376,7 +375,7 @@ function signal(kind, id, on) {
 // without spending a reply slot.
 const ACT_MAX = cfg.actMax || 60;
 function actFile(id, k) {
-  return path.join(cfg.addonDir, 'WoWAI', 'act', pad3(slotNumber(id)), String(k).padStart(2, '0') + '.wav');
+  return path.join(cfg.addonDir, 'Wowie', 'act', pad3(slotNumber(id)), String(k).padStart(2, '0') + '.wav');
 }
 function resetBeats(id) {
   for (let k = 1; k <= ACT_MAX; k++) { try { atomicWrite(actFile(id, k), Buffer.alloc(0)); } catch {} }
@@ -391,10 +390,10 @@ function beat(job) {
 // recycle a cached playable sound; exhausted clients retain bounded slot clocks.
 const PRESENCE_MAX = cfg.presenceMax || 2000;
 function presenceFile(k) {
-  return path.join(cfg.addonDir, 'WoWAI', 'presence', String(k).padStart(4, '0') + '.wav');
+  return path.join(cfg.addonDir, 'Wowie', 'presence', String(k).padStart(4, '0') + '.wav');
 }
 function presenceBeat() {
-  if (!fs.existsSync(path.join(cfg.addonDir, 'WoWAI', 'presence'))) return;
+  if (!fs.existsSync(path.join(cfg.addonDir, 'Wowie', 'presence'))) return;
   const previous = Number.isInteger(state.presence) && state.presence >= 0 ? state.presence : 0;
   if (previous >= PRESENCE_MAX) return;
   const k = previous + 1;
@@ -547,7 +546,7 @@ function submit(job) {
   if (!P.validNonce(job.nonce)) {
     if (!rejectedInput) {
       rejectedInput = true;
-      log(`#${job.id} rejected: Request protocol 1 requires a valid request nonce. Update the WoWAI addon and /reload; this request was not run.`);
+      log(`#${job.id} rejected: Request protocol 1 requires a valid request nonce. Update the Wowie addon and /reload; this request was not run.`);
       // Old clients match replies by numeric ID alone. A fake error reply would
       // erase their pending question before the nonce migration can resume it.
       publishNow();
@@ -645,7 +644,7 @@ function runJob(job) {
     finish(job, 'error', `Folder does not exist: ${cwd}\n` +
       `Paths are relative to ${DEFAULT_CWD}.` +
       (sibs.length ? `\nFolders there: ${sibs.join(', ')}` : '') +
-      `\nUse /wow-ai cd <folder> to pick one, or /wow-ai cd alone for the default.`);
+      `\nUse /wowie cd <folder> to pick one, or /wowie cd alone for the default.`);
     return;
   }
   // Which agent: the chat's own (an "agent=" flag), else the bridge's default.
@@ -653,7 +652,7 @@ function runJob(job) {
   if (!agentId) {
     log(`${tag} unknown agent "${job.agent}"`);
     finish(job, 'error', `Unknown agent "${job.agent}". This bridge knows: ${A.agentIds().join(', ')}.\n` +
-      `Use /wow-ai agent <name> to pick one, or /wow-ai agent alone for the default (${DEFAULT_AGENT}).`);
+      `Use /wowie agent <name> to pick one, or /wowie agent alone for the default (${DEFAULT_AGENT}).`);
     return;
   }
   job.agent = agentId;
@@ -714,7 +713,7 @@ function runJob(job) {
   try {
     fs.mkdirSync(MAP_DIR, { recursive: true });
     fs.rmSync(mapFileFor(job), { force: true });
-    env.WOW_AI_MAP_FILE = mapFileFor(job);
+    env.WOWIE_MAP_FILE = mapFileFor(job);
   } catch (e) { log(`${tag} map file unavailable: ${e.message}`); }
 
   log(`${tag} (${job.via}) ${agent.name} starting in ${cwd}${resume ? ' (resume ' + resume.slice(0, 8) + ')' : ' (new session)'}${ctx ? ' [game context]' : ''}${running.size ? ' [' + (running.size + 1) + ' running]' : ''}`);
@@ -963,8 +962,8 @@ function agentLine(id) {
 }
 
 function banner() {
-  console.log('WoW AI bridge');
-  console.log(`  folder   : ${DEFAULT_CWD}  (${DEFAULT_CWD_SOURCE}; chats can override with /wow-ai cd)`);
+  console.log('Wowie bridge');
+  console.log(`  folder   : ${DEFAULT_CWD}  (${DEFAULT_CWD_SOURCE}; chats can override with /wowie cd)`);
   console.log(`  addons   : ${cfg.addonDir}`);
   if (path.basename(CLIENT_DIR) === '_classic_beta_' && fs.existsSync(path.join(path.dirname(CLIENT_DIR), '_forever_'))) {
     console.log('  WARNING  : this config is on the beta client, but _forever_ is installed - run: node setup.js, then restart WoW');
@@ -974,11 +973,11 @@ function banner() {
   console.log(`  capture  : ${cap.enabled ? 'on (' + cap.processName + ', ' + cap.cellsPerRow + 'x' + cap.maxRows + ' cells of ' + cap.cellPx + 'px)' : 'off'}`);
   console.log(`  parallel : up to ${MAX_PARALLEL} chats at once`);
   console.log(`  fallback : ${SAVED_VARS || 'waiting for the first login'}`);
-  console.log(`  agent    : ${DEFAULT_AGENT} (default; chats pick their own with /wow-ai agent)`);
+  console.log(`  agent    : ${DEFAULT_AGENT} (default; chats pick their own with /wowie agent)`);
   for (const id of A.agentIds()) console.log(`  ${id.padEnd(9)}: ${agentLine(id)}`);
   console.log(`  sessions : ${Object.keys(state.sessions).length} saved`);
   const ctx = gameContext();
-  console.log(`  context  : ${cfg.gameContext === false ? 'off (gameContext in config.json)' : ctx ? (ctx.split('\n').find(l => /^Character:/i.test(l)) || ctx.split('\n')[0]).slice(0, 100) : 'none yet (the addon sends it with its hello; /wow-ai context in game)'}`);
+  console.log(`  context  : ${cfg.gameContext === false ? 'off (gameContext in config.json)' : ctx ? (ctx.split('\n').find(l => /^Character:/i.test(l)) || ctx.split('\n')[0]).slice(0, 100) : 'none yet (the addon sends it with its hello; /wowie context in game)'}`);
   console.log(`  primer   : ${!PRIMER_FILE ? 'off (primerFile in config.json)' : primer() ? path.resolve(REPO, PRIMER_FILE) + ' (' + primer().length + ' chars, with the context)' : 'NOT FOUND: ' + path.resolve(REPO, PRIMER_FILE)}`);
   console.log('Leave this window open while you play. Ctrl+C to stop.\n');
 }

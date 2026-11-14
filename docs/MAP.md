@@ -4,7 +4,7 @@ The agent can mark your world map. What it draws are **layers**: a named list of
 
 ## How marks get from the agent to the game
 
-1. For every run, whatever the agent, the bridge sets `WOW_AI_MAP_FILE` to a fresh file in `bridge/mapjobs/`. Tools append commands there, one JSON object per line:
+1. For every run, whatever the agent, the bridge sets `WOWIE_MAP_FILE` to a fresh file in `bridge/mapjobs/`. Tools append commands there, one JSON object per line:
 
    ```json
    {"op":"set","layer":"mining","title":"Copper loop","ordered":true,"loop":true,"points":[{"m":1432,"x":41.5,"y":47.8,"label":"1. Copper Vein","kind":"ore"}]}
@@ -18,33 +18,33 @@ The agent can mark your world map. What it draws are **layers**: a named list of
 
 ## In game
 
-- **Navigation in wow-ai:** click **Navigation** in the workspace header. Search saved destinations by their readable names, then click **Navigate** or **Start route**; any route stop can be selected directly. The active card has **Previous**, **Next**, **Stop**, **Show on map** and layer visibility controls. No layer identifier or command is needed, and saved destinations remain usable while the bridge is disconnected.
-- **Add and delete points:** **Add point** opens a form for a name, destination group and coordinates. Choose **My places** or an existing route/group; **Use my position** and **Use map pin** fill the coordinates without typing a map ID. Route additions append a stop, without starting or changing active guidance. Each saved point has **Delete**, with confirmation; deleting the active destination stops only WoWAI's owned tracking.
+- **Navigation in Wowie:** click **Navigation** in the workspace header. Search saved destinations by their readable names, then click **Navigate** or **Start route**; any route stop can be selected directly. The active card has **Previous**, **Next**, **Stop**, **Show on map** and layer visibility controls. No layer identifier or command is needed, and saved destinations remain usable while the bridge is disconnected.
+- **Add and delete points:** **Add point** opens a form for a name, destination group and coordinates. Choose **My places** or an existing route/group; **Use my position** and **Use map pin** fill the coordinates without typing a map ID. Route additions append a stop, without starting or changing active guidance. Each saved point has **Delete**, with confirmation; deleting the active destination stops only Wowie's owned tracking.
 - **World map:** pins for every visible layer on the map you are looking at, projected onto continent maps too. Hover for the label; click to track a destination. A point outside Orgrimmar belongs on Durotar's map, not the city map.
-- **Tracked destinations:** the active stop is sent to the game's waypoint tracking, not a separate WoWAI compass. OpenMap follows the native waypoint. With **ShortestPathForever** enabled, its public routing API draws your configured map/minimap route, including dotted paths and directions around terrain. It owns its intermediate waypoint; WoWAI does not overwrite it on each update. Without that routing addon, the game tracks the destination as a native waypoint.
+- **Tracked destinations:** the active stop is sent to the game's waypoint tracking, not a separate Wowie compass. OpenMap follows the native waypoint. With **ShortestPathForever** enabled, its public routing API draws your configured map/minimap route, including dotted paths and directions around terrain. It owns its intermediate waypoint; Wowie does not overwrite it on each update. Without that routing addon, the game tracks the destination as a native waypoint.
 - **Progress and stopping:** new/changed ordered routes and single destinations on your continent activate automatically unless another route is active. Unordered multi-point collections do not choose a destination until you select one; arrival completes only that chosen destination. ShortestPathForever decides routed arrival; native-only navigation advances within 12 yards. The Navigation window's **Previous**, **Next** and **Stop** buttons control the tracked destination, and ordered loops wrap around. Stop/completion restores prior player tracking only while the addon still owns it; a player-selected pin or quest is not overwritten. Routing requested in combat starts after combat unless another owner has taken over.
-- **Herb and ore nodes:** with a `WoWAI_Nodes` data addon installed (see below), every herb and ore spawn point of the zone on the world map, filtered to what your skill can gather.
+- **Herb and ore nodes:** with a `Wowie_Nodes` data addon installed (see below), every herb and ore spawn point of the zone on the world map, filtered to what your skill can gather.
 
 Slash commands remain optional shortcuts:
 
 | Command | Does |
 |---|---|
-| `/wow-ai map` | List layers, navigation and node settings |
-| `/wow-ai map ore [on\|off]`, `/wow-ai map herb [on\|off]` | Show or hide mining / herbalism nodes |
-| `/wow-ai map filter all\|skill` | Every node, or only those your skill can gather (default) |
-| `/wow-ai map hide <layer>`, `/wow-ai map show <layer>` | Hide or show a layer locally |
-| `/wow-ai map nav <layer> [n]`, `next`, `prev`, `stop` | Track a destination, move between stops, or stop the owned route |
+| `/wowie map` | List layers, navigation and node settings |
+| `/wowie map ore [on\|off]`, `/wowie map herb [on\|off]` | Show or hide mining / herbalism nodes |
+| `/wowie map filter all\|skill` | Every node, or only those your skill can gather (default) |
+| `/wowie map hide <layer>`, `/wowie map show <layer>` | Hide or show a layer locally |
+| `/wowie map nav <layer> [n]`, `next`, `prev`, `stop` | Track a destination, move between stops, or stop the owned route |
 
-`/aimap` is a shorter alias for `/wow-ai map`. Everything here only reads positions and draws. Nothing moves, targets or acts for you.
+`/aimap` is a shorter alias for `/wowie map`. Everything here only reads positions and draws. Nothing moves, targets or acts for you.
 
 A stopped destination stays stopped across UI reloads and unchanged bridge snapshots. The Navigation window shows the active stop, routing backend, combat deferral or unavailable guidance rather than treating saved marks as proof that navigation is running.
 
 Point edits are local to the addon and saved across `/reload`, separately from the bridge's source snapshot. Exact deleted entries stay removed when that snapshot is resent or refreshed, including repeated route stops being deleted individually. Manually added points survive the assistant clearing or replacing its layers; delete those points in Navigation. Regenerating a source route does not redirect guidance away from a manually appended active stop.
 
-The native integration uses the client's [`C_Map.SetUserWaypoint`](https://github.com/Ketho/wow-ui-source-forever/blob/forever/Interface/AddOns/Blizzard_APIDocumentationGenerated/MapDocumentation.lua) and [`C_SuperTrack`](https://github.com/Ketho/wow-ui-source-forever/blob/forever/Interface/AddOns/Blizzard_APIDocumentationGenerated/SuperTrackManagerDocumentation.lua) APIs. ShortestPathForever is optional; its v1 API receives one active destination under the owner `WoWAI`, and only that owner's route is cancelled.
+The native integration uses the client's [`C_Map.SetUserWaypoint`](https://github.com/Ketho/wow-ui-source-forever/blob/forever/Interface/AddOns/Blizzard_APIDocumentationGenerated/MapDocumentation.lua) and [`C_SuperTrack`](https://github.com/Ketho/wow-ui-source-forever/blob/forever/Interface/AddOns/Blizzard_APIDocumentationGenerated/SuperTrackManagerDocumentation.lua) APIs. ShortestPathForever is optional; its v1 API receives one active destination under the owner `Wowie`, and only that owner's route is cancelled.
 
 ## Where the data comes from
 
-The bridge ships no game data: the agent has to know where things are. With just the system prompt it can place marks it knows or that you tell it about. For real routes, point the chat at a folder (`/wow-ai cd`) that holds game data and tools to query it, and describe them in that folder's `CLAUDE.md` (or the equivalent for your agent): quests, NPCs, objects and gathering spawns with their `uiMapID` and coordinates, and a script that appends `set` commands to `$WOW_AI_MAP_FILE`. Such datasets exist (QuestieDB, AtlasLootClassic, the vmangos world database) but their licences don't allow redistributing them here, so that folder stays yours.
+The bridge ships no game data: the agent has to know where things are. With just the system prompt it can place marks it knows or that you tell it about. For real routes, point the chat at a folder (`/wowie cd`) that holds game data and tools to query it, and describe them in that folder's `CLAUDE.md` (or the equivalent for your agent): quests, NPCs, objects and gathering spawns with their `uiMapID` and coordinates, and a script that appends `set` commands to `$WOWIE_MAP_FILE`. Such datasets exist (QuestieDB, AtlasLootClassic, the vmangos world database) but their licences don't allow redistributing them here, so that folder stays yours.
 
-The optional `WoWAI_Nodes` addon is the same idea for the in-game node pins: a separate addon that sets the global `WoWAINodes = { kinds = { { name, "mining"|"herbalism", requiredSkill }, ... }, maps = { [uiMapID] = { [kindIndex] = "xxxyyyxxxyyy..." } } }`, where each point is x and y in tenths of a percent, three digits each. `Map.lua` reads it if it is there and says so in `/wow-ai map` if it is not.
+The optional `Wowie_Nodes` addon is the same idea for the in-game node pins: a separate addon that sets the global `WowieNodes = { kinds = { { name, "mining"|"herbalism", requiredSkill }, ... }, maps = { [uiMapID] = { [kindIndex] = "xxxyyyxxxyyy..." } } }`, where each point is x and y in tenths of a percent, three digits each. `Map.lua` reads it if it is there and says so in `/wowie map` if it is not.

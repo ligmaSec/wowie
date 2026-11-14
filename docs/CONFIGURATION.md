@@ -9,15 +9,15 @@ The bridge reads `config.json` once at start. Restart it after editing, except f
 | Key | Default (from `config.example.json`) | Meaning |
 |---|---|---|
 | `addonDir` | `…\World of Warcraft\_forever_\Interface\AddOns` | The game's AddOns folder. The bridge writes the slot addons, `Inbox.lua` and every signal file under it. `setup.js` fills this in from the client it finds. |
-| `inboxFile` | `<addonDir>\WoWAI\Inbox.lua` | The file the game reads on `/reload` (fallback path). Normally derived from `addonDir`; only change it if you moved the addon. A value still naming the old `WoWClaude` addon is ignored in favour of the derived one. |
-| `savedVariablesFile` | `…\WTF\Account\<account>\SavedVariables\WoWAI.lua` | The addon's saved data. The bridge polls it for the reload-path outbox. `setup.js` picks the first account under `WTF\Account`; pass `--account <name>` to choose another. |
-| `defaultCwd` | `C:\path\to\your\project` | Folder for chats that have not chosen one with `/wow-ai cd`, when the bridge is started from inside this repo (`npm start`). See [Which folder the agent works in](#which-folder-the-agent-works-in). |
+| `inboxFile` | `<addonDir>\Wowie\Inbox.lua` | The file the game reads on `/reload` (fallback path). Normally derived from `addonDir`; only change it if you moved the addon. A value that names an older addon folder is ignored in favour of the derived one. |
+| `savedVariablesFile` | `…\WTF\Account\<account>\SavedVariables\Wowie.lua` | The addon's saved data. The bridge polls it for the reload-path outbox. `setup.js` picks the first account under `WTF\Account`; pass `--account <name>` to choose another. |
+| `defaultCwd` | `C:\path\to\your\project` | Folder for chats that have not chosen one with `/wowie cd`, when the bridge is started from inside this repo (`npm start`). See [Which folder the agent works in](#which-folder-the-agent-works-in). |
 
 ## Agents
 
 | Key | Default | Meaning |
 |---|---|---|
-| `agent` | `"claude"` | The agent for chats that have not picked one with `/wow-ai agent`. One of `claude`, `codex`, `grok`, `agy`, `hermes`; the bridge refuses to start on anything else. |
+| `agent` | `"claude"` | The agent for chats that have not picked one with `/wowie agent`. One of `claude`, `codex`, `grok`, `agy`, `hermes`; the bridge refuses to start on anything else. |
 | `agents.<id>` | one block per agent | That agent's settings, below. A missing block means the defaults. |
 
 Keys under `agents.claude`, `agents.codex`, `agents.grok`, `agents.agy` and `agents.hermes` (what each one means per agent is spelled out in [AGENTS.md](AGENTS.md)):
@@ -36,16 +36,16 @@ Keys under `agents.claude`, `agents.codex`, `agents.grok`, `agents.agy` and `age
 
 A `config.json` from before agents existed kept Claude's settings at the top level (`claudePath`, `model`, `permissionMode`, `allowedTools`). The bridge still reads them, under anything in `agents.claude`; `setup.js` moves them down.
 
-The addon's **Defaults...** panel saves an agent/model/reasoning tuple in `WoWAIDB.settings.defaults`; **Save** applies it, **Cancel** discards edits, and **Bridge defaults → Save** clears it. Per-chat selectors take precedence, followed by addon defaults for that agent, these bridge settings, and finally CLI defaults. The addon sends resolved choices on both transports without changing `config.json`. New chats inherit the current chat's choices. Explicit model/effort selections override matching `extraArgs`; unrelated arguments remain. Default-agent changes preserve provider-specific chat overrides on their original agent. Clearing an override starts a fresh session when needed; pending requests, including resends after `/reload`, keep their original selection.
+The addon's **Defaults...** panel saves an agent/model/reasoning tuple in `WowieDB.settings.defaults`; **Save** applies it, **Cancel** discards edits, and **Bridge defaults → Save** clears it. Per-chat selectors take precedence, followed by addon defaults for that agent, these bridge settings, and finally CLI defaults. The addon sends resolved choices on both transports without changing `config.json`. New chats inherit the current chat's choices. Explicit model/effort selections override matching `extraArgs`; unrelated arguments remain. Default-agent changes preserve provider-specific chat overrides on their original agent. Clearing an override starts a fresh session when needed; pending requests, including resends after `/reload`, keep their original selection.
 
-Information-sharing choices live separately in `WoWAIDB.settings.sharing` (category ID → boolean); `WoWAIDB.settings.context` is the master switch. Common character categories default on, sensitive/broad data and `api:<namespace>` scopes default off. Pausing the master preserves choices. Scope descriptions disclose overlap and window dependencies. Mail-body access has an additional explicit default-off permission because the game's read API marks messages as read. Snapshots reflect permissions when the question was sent; additional queries check current permissions. Already-sent data cannot be recalled, and these controls do not change the agent CLI's host-file/tool permissions.
+Information-sharing choices live separately in `WowieDB.settings.sharing` (category ID → boolean); `WowieDB.settings.context` is the master switch. Common character categories default on, sensitive/broad data and `api:<namespace>` scopes default off. Pausing the master preserves choices. Scope descriptions disclose overlap and window dependencies. Mail-body access has an additional explicit default-off permission because the game's read API marks messages as read. Snapshots reflect permissions when the question was sent; additional queries check current permissions. Already-sent data cannot be recalled, and these controls do not change the agent CLI's host-file/tool permissions.
 
 ## Runs
 
 | Key | Default | Meaning |
 |---|---|---|
 | `gameContext` | `true` | Allow the selected short context, full information snapshots and permission-gated addon queries. `false` excludes all of them from agent input and disables query requests. The addon also has a master switch and individual **Sharing...** checkboxes. |
-| `primerFile` | `"docs/WOW-ADDON-PRIMER.md"` | A markdown file appended to the system prompt together with the game context, whatever folder the chat works in: how to write addons and macros for this client. Relative to the wow-ai folder, or absolute. Re-read on every run, so edits count at once. `""` sends none. Off whenever the context is off. |
+| `primerFile` | `"docs/WOW-ADDON-PRIMER.md"` | A markdown file appended to the system prompt together with the game context, whatever folder the chat works in: how to write addons and macros for this client. Relative to the Wowie folder, or absolute. Re-read on every run, so edits count at once. `""` sends none. Off whenever the context is off. |
 | `maxParallel` | `3` | How many chats may run an agent at the same time. Further messages queue per chat. |
 | `timeoutMs` | `1800000` (30 min) | A run longer than this is killed (with its children) and reported as an error in game. |
 | `progressWriteMs` | `3000` | Minimum gap between progress writes to the slot files. Final replies are written immediately. |
@@ -57,7 +57,7 @@ Keys under `capture`:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | Run `capture.ps1` (Windows), `capture_mac.py` (macOS) or `capture_x11.py` (Linux). With `false` only the reload path works (`/wow-ai mode reload` in game). |
+| `enabled` | `true` | Run `capture.ps1` (Windows), `capture_mac.py` (macOS) or `capture_x11.py` (Linux). With `false` only the reload path works (`/wowie mode reload` in game). |
 | `processName` | `"Wow"` | The game executable without `.exe`. `setup.js` sets it from the `Wow*.exe` it finds in the client folder (on macOS, from the binary inside the `.app` bundle). On Windows the capture also skips a game running from a different client folder than `addonDir`, because retail's exe has the same name. Proton runtimes (Steam, umu-launcher, Faugus) ignore it: they set `WM_CLASS` to `steam_app_<appid>` for every window in the prefix, and the Linux capture matches the client by its "World of Warcraft" title instead. |
 | `cellPx` | `4` | Robust capture geometry. Decoders also discover 2-pixel Compact/Quiet and 4-pixel Quiet fallback; choose optional modes in the in-game Settings panel rather than changing this for appearance. |
 | `cellsPerRow` | `200` | Cells per strip row. Must match the addon. |
@@ -72,11 +72,11 @@ The capture region covers `cellsPerRow × cellPx` by `maxRows × cellPx` pixels 
 
 ## Slot pool and signal files
 
-These sizes are baked into the files `install-slots.js` creates, and the addon has matching constants at the top of `addon/WoWAI/WoWAI.lua` (`SLOT_COUNT`, `ACT_MAX`, `PRESENCE_MAX`). Change all three places together, re-run `node bridge/install-slots.js`, and restart the game.
+These sizes are baked into the files `install-slots.js` creates, and the addon has matching constants at the top of `addon/Wowie/Wowie.lua` (`SLOT_COUNT`, `ACT_MAX`, `PRESENCE_MAX`). Change all three places together, re-run `node bridge/install-slots.js`, and restart the game.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `slots` | `200` | Reply-slot addons `WoWAI_S001` … `WoWAI_S200`. Each slot can be loaded once per UI session; `/reload` frees them all. |
+| `slots` | `200` | Reply-slot addons `Wowie_S001` … `Wowie_S200`. Each slot can be loaded once per UI session; `/reload` frees them all. |
 | `actMax` | `60` | Heartbeat files per message (`act/NNN/01..60.wav`). One flips per agent action. |
 | `presenceMax` | `2000` | Presence files (`presence/0001..2000.wav`). One flips per `presenceIntervalMs`. |
 | `presenceIntervalMs` | `30000` | Publish fresh Inbox/all reply-slot timestamps and advance a presence WAV when available. Heartbeats retain the last hello ACK unchanged and never renew connection verification. |
@@ -84,7 +84,7 @@ These sizes are baked into the files `install-slots.js` creates, and the addon h
 
 ## Command line
 
-`wow-ai` (after `npm link`) and `node bridge/bridge.js` take the same flags. `npm start` runs `bridge/supervisor.js`, which restarts the bridge on crash and passes flags through.
+`wowie` (after `npm link`) and `node bridge/bridge.js` take the same flags. `npm start` runs `bridge/supervisor.js`, which restarts the bridge on crash and passes flags through.
 
 | Flag | Meaning |
 |---|---|
@@ -100,23 +100,23 @@ Exit codes: `0` normal, `1` the injected or one-shot job failed, `2` config miss
 
 | Variable | Meaning |
 |---|---|
-| `WOW_AI_PROJECT` | Default working folder, below `--project` and above the start folder in precedence. |
+| `WOWIE_PROJECT` | Default working folder, below `--project` and above the start folder in precedence. |
 | `CLAUDECODE` | Removed from Claude's environment so a bridge started from inside a Claude Code session can still launch `claude -p`. |
 | `GROK_DISABLE_AUTOUPDATER` | Set to `1` for Grok runs, so a headless run never stops for an update. |
 | `GROK_HOME` | Honoured when looking for `grok.exe` (`<GROK_HOME>\bin`); Grok's own setting. |
-| `WOW_AI_MAP_FILE` | Set by the bridge for each run, whatever the agent: a file where the agent's tools append map commands, one JSON object per line (see [MAP.md](MAP.md)). |
+| `WOWIE_MAP_FILE` | Set by the bridge for each run, whatever the agent: a file where the agent's tools append map commands, one JSON object per line (see [MAP.md](MAP.md)). |
 
 ## Which folder the agent works in
 
-Each chat can pick its own folder with `/wow-ai cd` or **Folder...** in the menu that opens when you right-click the chat in the left panel. Chats that have not are given the bridge's default folder, chosen in this order:
+Each chat can pick its own folder with `/wowie cd` or **Folder...** in the menu that opens when you right-click the chat in the left panel. Chats that have not are given the bridge's default folder, chosen in this order:
 
 1. `--project <dir>`
-2. `WOW_AI_PROJECT`
+2. `WOWIE_PROJECT`
 3. The folder the bridge was started from, unless that is inside this repo
 4. `defaultCwd` in `config.json`
 5. The current folder
 
-A relative `/wow-ai cd` path is resolved against that default. `~` expands to your home folder. The agents keep sessions per folder, so a chat that changes folder starts a fresh session there; the same happens when a chat changes agent.
+A relative `/wowie cd` path is resolved against that default. `~` expands to your home folder. The agents keep sessions per folder, so a chat that changes folder starts a fresh session there; the same happens when a chat changes agent.
 
 ## Files the bridge writes next to itself
 
@@ -127,7 +127,7 @@ All of these are gitignored.
 | `bridge/config.json` | Your configuration. |
 | `bridge/state.json` | Agent sessions, handled message IDs, presence/map state and the latest selected **short** context. Full snapshots/query results are held for the active job, not copied here. Delete it to forget all sessions. |
 | `bridge/transcripts.json` | The last 200 chat messages per conversation. Internal information requests do not duplicate user turns or store the raw full snapshot; ordinary final answers remain in history. |
-| `bridge/mapjobs/` | One map command file per running job (`WOW_AI_MAP_FILE`), read and deleted when the job ends. Map layers themselves live in `state.json` (`map`). |
+| `bridge/mapjobs/` | One map command file per running job (`WOWIE_MAP_FILE`), read and deleted when the job ends. Map layers themselves live in `state.json` (`map`). |
 | `bridge/bridge.log` | Everything printed to the console, with timestamps. Grows without bound; delete it whenever you like. |
 | `bridge/tmp/` | Prompt files for agents that read the prompt from disk (Grok). Each is deleted when its run ends. |
 
@@ -139,4 +139,4 @@ All of these are gitignored.
 | `--project "<dir>"` | Written to `defaultCwd`. Defaults to the folder you ran setup from. |
 | `--account <name>` | Which `WTF\Account\<name>` to use when there are several. |
 
-Re-running `setup.js` re-copies the addon (except `Inbox.lua`, which the bridge owns once running), keeps an existing `config.json` (adding the `agents` blocks and fixing paths if it predates them), and only creates slot and signal files that are missing. An install under the project's old name (the `WoWClaude` addon) is migrated: its saved data is copied to `WoWAI.lua` so chats survive, and the old addon and slot folders are removed.
+Re-running `setup.js` re-copies existing addon code (except the bridge-owned `Inbox.lua`), preserves custom configuration, and creates only missing slots/signals. For an installation from before the rename, stop the bridge and fully quit the client first; setup refuses live-client migration. It copies each account's saved globals into `Wowie.lua` without rewriting history text, preserves existing Wowie files, migrates generated sounds, enabled-addon choices and hotkey targets, and removes old addon folders only after new slot installation succeeds. Recovery copies are retained. The rename requires a full relaunch; later Lua-only updates can use `/reload`.

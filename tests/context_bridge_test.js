@@ -24,19 +24,19 @@ function addonVM(fullAddon = false) {
     const result = lua.lua_isnil(L, -1) ? null : to_jsstring(lua.lua_tostring(L, -1)); lua.lua_pop(L, 1); return result;
   };
   run(fs.readFileSync(path.join(ROOT, 'tests/wow_stub.lua'), 'utf8'));
-  run('WoWAIDB = {settings={context=true,sharing={mail=false}}}');
-  for (const name of fullAddon ? ['Codec.lua', 'Inbox.lua', 'WoWAI.lua', 'Context.lua', 'ContextUI.lua'] : ['Context.lua']) {
-    run(fs.readFileSync(path.join(ROOT, 'addon/WoWAI', name), 'utf8'), 'WoWAI');
+  run('WowieDB = {settings={context=true,sharing={mail=false}}}');
+  for (const name of fullAddon ? ['Codec.lua', 'Inbox.lua', 'Wowie.lua', 'Context.lua', 'ContextUI.lua'] : ['Context.lua']) {
+    run(fs.readFileSync(path.join(ROOT, 'addon/Wowie', name), 'utf8'), 'Wowie');
   }
-  if (fullAddon) run(`local encode = WoWAI_Codec.Encode
-    WoWAI_Codec.Encode = function(id, text)
+  if (fullAddon) run(`local encode = Wowie_Codec.Encode
+    Wowie_Codec.Encode = function(id, text)
       TEST_STRIP = {id = id, text = text}
       return encode(id, text)
     end`);
   return { run, get };
 }
 
-function waitInbox(file, vm, wanted, globalName = 'WoWAI_Inbox') {
+function waitInbox(file, vm, wanted, globalName = 'Wowie_Inbox') {
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); watcher.close(); error ? reject(error) : resolve(value); };
@@ -57,11 +57,11 @@ function waitInbox(file, vm, wanted, globalName = 'WoWAI_Inbox') {
 }
 
 test('bridge waits for selected data, asks the real permission gate, resumes the same conversation and records one user turn', async t => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wowai-context-bridge-'));
-  const addons = path.join(dir, 'addons'), inbox = path.join(addons, 'WoWAI/Inbox.lua'), saved = path.join(dir, 'saved.lua');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wowie-context-bridge-'));
+  const addons = path.join(dir, 'addons'), inbox = path.join(addons, 'Wowie/Inbox.lua'), saved = path.join(dir, 'saved.lua');
   fs.mkdirSync(path.dirname(inbox), { recursive: true });
   fs.mkdirSync(path.join(dir, 'project'));
-  fs.writeFileSync(path.join(addons, 'WoWAI/WoWAI.toc'), '## Interface: 16001\n');
+  fs.writeFileSync(path.join(addons, 'Wowie/Wowie.toc'), '## Interface: 16001\n');
   for (const name of ['bridge.js', 'agents.js', 'protocol.js', 'context.js']) fs.copyFileSync(path.join(ROOT, 'bridge', name), path.join(dir, name));
   const agent = path.join(dir, 'agent.js');
   fs.writeFileSync(agent, `
@@ -70,7 +70,7 @@ test('bridge waits for selected data, asks the real permission gate, resumes the
       const resumed = process.argv.includes('--resume');
       let text, error = false;
       if (!resumed) {
-        require('node:fs').appendFileSync(process.env.WOW_AI_MAP_FILE, JSON.stringify({op:'set',layer:'before-context',title:'Saved marker',points:[{m:1429,x:50,y:50}]}) + '\\n');
+        require('node:fs').appendFileSync(process.env.WOWIE_MAP_FILE, JSON.stringify({op:'set',layer:'before-context',title:'Saved marker',points:[{m:1429,x:50,y:50}]}) + '\\n');
         if (input.includes('PRIVATE_DISABLED_IDENTITY_OLD') || process.argv.some(arg => arg.includes('PRIVATE_DISABLED_IDENTITY_OLD'))) { text = 'unchecked old context was re-injected'; error = true; }
         else
         if (!input.includes('PROFILE_END_SENTINEL')) { text = 'snapshot was clipped'; error = true; }
@@ -86,7 +86,7 @@ test('bridge waits for selected data, asks the real permission gate, resumes the
   `);
   const profile = JSON.stringify({ version: 1, capturedAt: 1, enabled: ['inventory'], data: { inventory: Array.from({ length: 1800 }, (_, i) => ({ id: i, name: 'Épée-' + i })), tail: 'PROFILE_END_SENTINEL' } });
   const hex = text => Buffer.from(text).toString('hex');
-  const state = (response, nonce = 'owner-000001') => `WoWAIDB = { ["outbox"] = { ["id"] = 1, ["session"] = "token", ["chat"] = "chat", ["nonce"] = "owner-000001", ["text"] = "${hex('What can you tell me?')}", ["profile"] = "${hex(profile)}" }${response ? `, ["contextOutbox"] = { ["id"] = 1, ["session"] = "token", ["chat"] = "chat", ["nonce"] = "${nonce}", ["request"] = "1-1", ["text"] = "${hex(response)}" }` : ''} }`;
+  const state = (response, nonce = 'owner-000001') => `WowieDB = { ["outbox"] = { ["id"] = 1, ["session"] = "token", ["chat"] = "chat", ["nonce"] = "owner-000001", ["text"] = "${hex('What can you tell me?')}", ["profile"] = "${hex(profile)}" }${response ? `, ["contextOutbox"] = { ["id"] = 1, ["session"] = "token", ["chat"] = "chat", ["nonce"] = "${nonce}", ["request"] = "1-1", ["text"] = "${hex(response)}" }` : ''} }`;
   fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({lastId:0,sessions:{},handled:{},context:{text:'PRIVATE_DISABLED_IDENTITY_OLD'}}));
   fs.writeFileSync(saved, state());
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ addonDir: addons, savedVariablesFile: saved, defaultCwd: path.join(dir, 'project'), agent: 'claude', agents: {claude:{path:agent}}, capture:{enabled:false}, primerFile:'', timeoutMs:15000, pollMs:25, slots:1 }));
@@ -97,15 +97,15 @@ test('bridge waits for selected data, asks the real permission gate, resumes the
   const exited = new Promise(resolve => child.on('exit', code => resolve(code)));
   t.after(async () => { if (child.exitCode === null) { child.kill(); await exited; } fs.rmSync(dir, { recursive: true, force: true }); });
   assert.equal(await waiting, 'context_query', output);
-  assert.equal(vm.get('WoWAI_Inbox.requestProtocol'), '1');
-  assert.equal(vm.get('WoWAI_Inbox.replies[1].nonce'), 'owner-000001');
-  assert.equal(vm.get('WoWAI_Inbox.map.layers[1].name'), 'before-context', 'map side effects must be published before a read-only continuation waits');
-  const response = vm.get('WoWAIContext.Query(WoWAI_Inbox.replies[1].queries[1])');
+  assert.equal(vm.get('Wowie_Inbox.requestProtocol'), '1');
+  assert.equal(vm.get('Wowie_Inbox.replies[1].nonce'), 'owner-000001');
+  assert.equal(vm.get('Wowie_Inbox.map.layers[1].name'), 'before-context', 'map side effects must be published before a read-only continuation waits');
+  const response = vm.get('WowieContext.Query(Wowie_Inbox.replies[1].queries[1])');
   assert.equal(JSON.parse(response).ok, false, 'the real current checkbox gate rejects unchecked mail');
   fs.writeFileSync(saved + '.tmp', state('[' + response + ']', 'owner-000000')); fs.renameSync(saved + '.tmp', saved);
   await new Promise(resolve => setTimeout(resolve, 150));
   vm.run(fs.readFileSync(inbox, 'utf8'));
-  assert.equal(vm.get('WoWAI_Inbox.replies[1].status'), 'context_query', 'a reused numeric id and query round cannot resume another nonce owner');
+  assert.equal(vm.get('Wowie_Inbox.replies[1].status'), 'context_query', 'a reused numeric id and query round cannot resume another nonce owner');
   assert.equal(child.exitCode, null);
   const final = waitInbox(inbox, vm, status => status === 'done' || status === 'error');
   fs.writeFileSync(saved + '.tmp', state('[' + response + ']')); fs.renameSync(saved + '.tmp', saved);
@@ -135,14 +135,14 @@ function waitFor(predicate) {
 }
 
 function bridgeSandbox(t, initialState, options = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wowai-request-identity-'));
-  const addons = path.join(dir, 'addons'), inbox = path.join(addons, 'WoWAI/Inbox.lua'), saved = path.join(dir, 'saved.lua');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wowie-request-identity-'));
+  const addons = path.join(dir, 'addons'), inbox = path.join(addons, 'Wowie/Inbox.lua'), saved = path.join(dir, 'saved.lua');
   fs.mkdirSync(path.dirname(inbox), { recursive: true });
   fs.mkdirSync(path.join(dir, 'project'));
-  fs.writeFileSync(path.join(addons, 'WoWAI/WoWAI.toc'), '## Interface: 16001\n');
-  const slots = Array.from({ length: options.slots || 1 }, (_, i) => path.join(addons, 'WoWAI_S' + P.pad3(i + 1), 'Inbox.lua'));
+  fs.writeFileSync(path.join(addons, 'Wowie/Wowie.toc'), '## Interface: 16001\n');
+  const slots = Array.from({ length: options.slots || 1 }, (_, i) => path.join(addons, 'Wowie_S' + P.pad3(i + 1), 'Inbox.lua'));
   for (const file of slots) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, ''); }
-  if (options.presence) fs.mkdirSync(path.join(addons, 'WoWAI/presence'));
+  if (options.presence) fs.mkdirSync(path.join(addons, 'Wowie/presence'));
   for (const name of ['bridge.js', 'agents.js', 'protocol.js', 'context.js']) fs.copyFileSync(path.join(ROOT, 'bridge', name), path.join(dir, name));
   const calls = path.join(dir, 'calls.jsonl');
   const agent = path.join(dir, 'agent.js');
@@ -183,7 +183,7 @@ function bridgeSandbox(t, initialState, options = {}) {
     const rename = fs.renameSync;
     fs.renameSync = function(from, to) {
       const result = rename.apply(this, arguments);
-      if (path.dirname(to) === ${JSON.stringify(path.join(addons, 'WoWAI/presence'))} && fs.readFileSync(to).length) {
+      if (path.dirname(to) === ${JSON.stringify(path.join(addons, 'Wowie/presence'))} && fs.readFileSync(to).length) {
         fs.appendFileSync(${JSON.stringify(readinessFile)}, JSON.stringify({
           file: path.basename(to),
           inbox: fs.readFileSync(${JSON.stringify(inbox)}, 'utf8'),
@@ -223,7 +223,7 @@ function bridgeSandbox(t, initialState, options = {}) {
     fs.rmSync(dir, { recursive: true, force: true });
   });
   const write = source => { fs.writeFileSync(saved + '.tmp', source); fs.renameSync(saved + '.tmp', saved); };
-  const outbox = (nonce, chat = 'chat', id = 146) => `WoWAIDB = { ["outbox"] = { ["id"] = ${id}, ["session"] = "token", ["chat"] = "${chat}", ${nonce == null ? '' : `["nonce"] = "${nonce}",`} ["text"] = "${Buffer.from('The same player question').toString('hex')}" } }`;
+  const outbox = (nonce, chat = 'chat', id = 146) => `WowieDB = { ["outbox"] = { ["id"] = ${id}, ["session"] = "token", ["chat"] = "${chat}", ${nonce == null ? '' : `["nonce"] = "${nonce}",`} ["text"] = "${Buffer.from('The same player question').toString('hex')}" } }`;
   const release = attempt => fs.writeFileSync(path.join(dir, 'release-' + attempt), '');
   const callCount = () => fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').length : 0;
   const messages = (chat = 'chat') => JSON.parse(fs.readFileSync(path.join(dir, 'transcripts.json'), 'utf8')).chats[chat].messages;
@@ -239,13 +239,13 @@ function bridgeSandbox(t, initialState, options = {}) {
 
 function waitClock(fixture, vm, now) {
   return Promise.all([fixture.inbox, ...fixture.slots].map((file, i) => {
-    const globalName = i === 0 ? 'WoWAI_Inbox' : 'WoWAI_SlotData';
+    const globalName = i === 0 ? 'Wowie_Inbox' : 'Wowie_SlotData';
     return waitInbox(file, vm, () => Number(vm.get(`${globalName}.now`)) >= now, globalName);
   }));
 }
 
 function loginClient(vm, now) {
-  vm.run(`STUB.epoch = ${now} - math.floor(STUB.now); STUB.FireEvent("ADDON_LOADED", "WoWAI"); STUB.FireEvent("PLAYER_LOGIN"); STUB.RunTimers()`);
+  vm.run(`STUB.epoch = ${now} - math.floor(STUB.now); STUB.FireEvent("ADDON_LOADED", "Wowie"); STUB.FireEvent("PLAYER_LOGIN"); STUB.RunTimers()`);
 }
 
 function deliverSlot(vm, file, seconds) {
@@ -264,7 +264,7 @@ function sendClientPacket(fixture, vm) {
 
 function waitAck(fixture, vm, nonce, at = 0) {
   return Promise.all([fixture.inbox, ...fixture.slots].map((file, i) => {
-    const name = i === 0 ? 'WoWAI_Inbox' : 'WoWAI_SlotData';
+    const name = i === 0 ? 'Wowie_Inbox' : 'Wowie_SlotData';
     return waitInbox(file, vm, () =>
       vm.get(`${name}.connectionProtocol`) === '1' &&
       vm.get(`${name}.connectionAck and ${name}.connectionAck.nonce`) === nonce &&
@@ -280,30 +280,30 @@ test('periodic slot clocks and presence never renew a real hello verification', 
     await waitClock(fixture, vm, initial);
     loginClient(vm, initial);
     deliverSlot(vm, fixture.slots[0], 6);
-    assert.equal(vm.get('WoWAI.IsConnected()'), 'false', 'a live bridge clock alone does not verify an unsent hello');
-    const nonce = vm.get('WoWAIDB.hello.nonce');
+    assert.equal(vm.get('Wowie.IsConnected()'), 'false', 'a live bridge clock alone does not verify an unsent hello');
+    const nonce = vm.get('WowieDB.hello.nonce');
     sendClientPacket(fixture, vm);
     await waitAck(fixture, vm, nonce, initial);
-    assert.equal(vm.get('WoWAI_Inbox.connectionAck.session'), vm.get('WoWAIDB.session'));
+    assert.equal(vm.get('Wowie_Inbox.connectionAck.session'), vm.get('WowieDB.session'));
     deliverSlot(vm, fixture.slots[1], 6);
-    assert.equal(vm.get('WoWAI.IsConnected()'), 'true');
-    const history = vm.get('#WoWAIDB.chats[1].history');
-    const ackAt = vm.get('WoWAI_Inbox.connectionAck.at');
+    assert.equal(vm.get('Wowie.IsConnected()'), 'true');
+    const history = vm.get('#WowieDB.chats[1].history');
+    const ackAt = vm.get('Wowie_Inbox.connectionAck.at');
     for (const seconds of [91, 610, 610]) {
       const now = fixture.advance(seconds);
       await waitClock(fixture, vm, now);
       for (const file of fixture.slots) {
         vm.run(fs.readFileSync(file, 'utf8'));
-        assert.equal(vm.get('WoWAI_SlotData.connectionAck.at'), ackAt, 'heartbeat retains the actual receive time');
-        assert.equal(vm.get('WoWAI_SlotData.connectionAck.nonce'), nonce);
+        assert.equal(vm.get('Wowie_SlotData.connectionAck.at'), ackAt, 'heartbeat retains the actual receive time');
+        assert.equal(vm.get('Wowie_SlotData.connectionAck.nonce'), nonce);
       }
       deliverSlot(vm, fixture.slots[0], seconds);
-      assert.equal(vm.get('WoWAI.IsConnected()'), 'false', 'advancing clocks cannot keep an expired handshake green');
-      assert.equal(vm.get('#WoWAIDB.chats[1].history'), history, 'maintenance must not create conversation turns');
-      assert.equal(vm.get('#WoWAI_Inbox.replies'), '0');
+      assert.equal(vm.get('Wowie.IsConnected()'), 'false', 'advancing clocks cannot keep an expired handshake green');
+      assert.equal(vm.get('#WowieDB.chats[1].history'), history, 'maintenance must not create conversation turns');
+      assert.equal(vm.get('#Wowie_Inbox.replies'), '0');
       assert.equal(fixture.callCount(), 0);
     }
-    assert.equal(fs.existsSync(path.join(fixture.addons, 'WoWAI/presence')), presence);
+    assert.equal(fs.existsSync(path.join(fixture.addons, 'Wowie/presence')), presence);
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(fixture.dir, 'transcripts.json'), 'utf8')).chats, {});
   });
 });
@@ -314,38 +314,38 @@ test('an idle heartbeat retains the latest completed reply independently of expi
   fixture.start([]);
   await waitClock(fixture, vm, initial);
   loginClient(vm, initial);
-  vm.run('WoWAIDB.settings.context = false');
-  const helloNonce = vm.get('WoWAIDB.hello.nonce');
+  vm.run('WowieDB.settings.context = false');
+  const helloNonce = vm.get('WowieDB.hello.nonce');
   sendClientPacket(fixture, vm);
   await waitAck(fixture, vm, helloNonce, initial);
   deliverSlot(vm, fixture.slots[0], 6);
-  vm.run('WoWAI.Send("The same player question")');
-  const chat = vm.get('WoWAIDB.chats[1].id'), nonce = vm.get('WoWAIDB.chats[1].request.nonce');
+  vm.run('Wowie.Send("The same player question")');
+  const chat = vm.get('WowieDB.chats[1].id'), nonce = vm.get('WowieDB.chats[1].request.nonce');
   const done = waitInbox(fixture.inbox, vm, status => status === 'done');
   sendClientPacket(fixture, vm);
   fixture.release(1);
   await done;
   const originalReply = {
-    text: vm.get('WoWAI_Inbox.replies[1].text'),
-    summary: vm.get('WoWAI_Inbox.replies[1].summary'),
+    text: vm.get('Wowie_Inbox.replies[1].text'),
+    summary: vm.get('Wowie_Inbox.replies[1].summary'),
   };
-  const messages = fixture.messages(chat), ackAt = vm.get('WoWAI_Inbox.connectionAck.at');
+  const messages = fixture.messages(chat), ackAt = vm.get('Wowie_Inbox.connectionAck.at');
   const now = fixture.advance(3600);
   await waitClock(fixture, vm, now);
   for (const file of fixture.slots) {
     vm.run(fs.readFileSync(file, 'utf8'));
-    assert.equal(vm.get('WoWAI_SlotData.replies[1].nonce'), nonce);
-    assert.equal(vm.get('WoWAI_SlotData.replies[1].text'), originalReply.text);
-    assert.equal(vm.get('WoWAI_SlotData.replies[1].summary'), originalReply.summary);
-    assert.equal(vm.get('WoWAI_SlotData.connectionAck.at'), ackAt);
+    assert.equal(vm.get('Wowie_SlotData.replies[1].nonce'), nonce);
+    assert.equal(vm.get('Wowie_SlotData.replies[1].text'), originalReply.text);
+    assert.equal(vm.get('Wowie_SlotData.replies[1].summary'), originalReply.summary);
+    assert.equal(vm.get('Wowie_SlotData.connectionAck.at'), ackAt);
   }
   deliverSlot(vm, fixture.slots[1], 3600);
-  assert.equal(vm.get('WoWAIDB.chats[1].pendingId'), null, 'the real reply consumer completes the original nonce after a long idle');
-  assert.equal(vm.get('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].text'), originalReply.text);
-  assert.equal(vm.get('WoWAI.IsConnected()'), 'false', 'delivering an exact pending reply is not a new hello acknowledgement');
+  assert.equal(vm.get('WowieDB.chats[1].pendingId'), null, 'the real reply consumer completes the original nonce after a long idle');
+  assert.equal(vm.get('WowieDB.chats[1].history[#WowieDB.chats[1].history].text'), originalReply.text);
+  assert.equal(vm.get('Wowie.IsConnected()'), 'false', 'delivering an exact pending reply is not a new hello acknowledgement');
   await waitClock(fixture, vm, fixture.advance(610));
   deliverSlot(vm, fixture.slots[2], 610);
-  assert.equal(vm.get('#WoWAIDB.chats[1].history'), '2', 'repeated heartbeat copies must not duplicate a delivered assistant turn');
+  assert.equal(vm.get('#WowieDB.chats[1].history'), '2', 'repeated heartbeat copies must not duplicate a delivered assistant turn');
   assert.equal(fixture.callCount(), 1);
   assert.deepEqual(fixture.messages(chat), messages);
 });
@@ -356,18 +356,18 @@ test('a duplicate in-flight hello acknowledges its actual retry without mutating
   fixture.start([]);
   await waitClock(fixture, vm, initial);
   loginClient(vm, initial);
-  const nonce = vm.get('WoWAIDB.hello.nonce'), hello = sendClientPacket(fixture, vm);
+  const nonce = vm.get('WowieDB.hello.nonce'), hello = sendClientPacket(fixture, vm);
   await waitAck(fixture, vm, nonce, initial);
-  assert.equal(vm.get('WoWAI.IsConnected()'), 'false', 'the first return publication has not reached the client');
+  assert.equal(vm.get('Wowie.IsConnected()'), 'false', 'the first return publication has not reached the client');
   const transcripts = fs.readFileSync(path.join(fixture.dir, 'transcripts.json'), 'utf8');
   const state = fs.readFileSync(path.join(fixture.dir, 'state.json'), 'utf8');
-  vm.run('STUB.onLoadAddOn = function() WoWAI_SlotData = nil end; STUB.now = STUB.now + 6; STUB.Tick(); WoWAI.Connect()');
+  vm.run('STUB.onLoadAddOn = function() Wowie_SlotData = nil end; STUB.now = STUB.now + 6; STUB.Tick(); Wowie.Connect()');
   assert.deepEqual(clientPacket(vm), hello, 'repeated Connect during one in-flight attempt preserves the nonce and immutable context');
   const now = fixture.advance(6);
   fixture.strip(hello.text, hello.id);
   await waitAck(fixture, vm, nonce, now);
   deliverSlot(vm, fixture.slots[1], 6);
-  assert.equal(vm.get('WoWAI.IsConnected()'), 'true', 'a received same-nonce retry recovers the client without restarting Node');
+  assert.equal(vm.get('Wowie.IsConnected()'), 'true', 'a received same-nonce retry recovers the client without restarting Node');
   assert.equal(fixture.callCount(), 0);
   assert.equal(fs.readFileSync(path.join(fixture.dir, 'transcripts.json'), 'utf8'), transcripts);
   assert.equal(fs.readFileSync(path.join(fixture.dir, 'state.json'), 'utf8'), state);
@@ -379,50 +379,50 @@ test('stopping and restarting a bridge requires a fresh probe before a queued qu
   const first = fixture.start([]);
   await waitClock(fixture, vm, initial);
   loginClient(vm, initial);
-  vm.run('WoWAIDB.settings.context = false; WoWAI.Toggle(true)');
-  const firstNonce = vm.get('WoWAIDB.hello.nonce');
+  vm.run('WowieDB.settings.context = false; Wowie.Toggle(true)');
+  const firstNonce = vm.get('WowieDB.hello.nonce');
   sendClientPacket(fixture, vm);
   await waitAck(fixture, vm, firstNonce, initial);
   deliverSlot(vm, fixture.slots[0], 6);
-  assert.equal(vm.get('WoWAI.IsConnected()'), 'true');
+  assert.equal(vm.get('Wowie.IsConnected()'), 'true');
   first.child.kill(); await first.exited;
   fixture.clearStrip();
 
-  vm.run('WoWAI.Connect(); WoWAI.Send("Queued while stopped", {"WebSearch"})');
-  const stoppedNonce = vm.get('WoWAIDB.hello.nonce');
+  vm.run('Wowie.Connect(); Wowie.Send("Queued while stopped", {"WebSearch"})');
+  const stoppedNonce = vm.get('WowieDB.hello.nonce');
   assert.notEqual(stoppedNonce, firstNonce, 'an explicit Reconnect supersedes the previous verification');
   deliverSlot(vm, fixture.slots[1], 1);
-  assert.equal(vm.get('WoWAI.IsConnected()'), 'false', 'a recently published old ack cannot complete a new probe');
-  assert.equal(vm.get('WoWAIDB.chats[1].pendingId'), null);
+  assert.equal(vm.get('Wowie.IsConnected()'), 'false', 'a recently published old ack cannot complete a new probe');
+  assert.equal(vm.get('WowieDB.chats[1].pendingId'), null);
   assert.equal(fixture.callCount(), 0);
   deliverSlot(vm, fixture.slots[2], 16);
-  assert.equal(vm.get('WoWAI.IsConnected()'), 'false');
-  assert.equal(vm.get('WoWAIReconnect:IsEnabled()'), 'true', 'timeout leaves the direct Reconnect action usable');
-  assert.equal(vm.get('WoWAIInput:GetText()'), 'Queued while stopped');
-  assert.equal(vm.get('WoWAIDB.chats[1].pendingId'), null, 'timeout preserves the draft without fabricating a turn');
+  assert.equal(vm.get('Wowie.IsConnected()'), 'false');
+  assert.equal(vm.get('WowieReconnect:IsEnabled()'), 'true', 'timeout leaves the direct Reconnect action usable');
+  assert.equal(vm.get('WowieInput:GetText()'), 'Queued while stopped');
+  assert.equal(vm.get('WowieDB.chats[1].pendingId'), null, 'timeout preserves the draft without fabricating a turn');
 
   const restartedAt = fixture.advance(18);
   const restarted = fixture.start([]);
   await waitClock(fixture, vm, restartedAt);
   for (const file of [fixture.inbox, ...fixture.slots]) {
     vm.run(fs.readFileSync(file, 'utf8'));
-    const name = file === fixture.inbox ? 'WoWAI_Inbox' : 'WoWAI_SlotData';
+    const name = file === fixture.inbox ? 'Wowie_Inbox' : 'Wowie_SlotData';
     assert.equal(vm.get(`${name}.connectionAck`), null, 'historic receipts do not restore a process-local acknowledgement');
   }
-  vm.run('WoWAI.Connect(); WoWAI.Send("Queued while stopped", {"WebSearch"})');
-  const freshNonce = vm.get('WoWAIDB.hello.nonce');
+  vm.run('Wowie.Connect(); Wowie.Send("Queued while stopped", {"WebSearch"})');
+  const freshNonce = vm.get('WowieDB.hello.nonce');
   assert.notEqual(freshNonce, stoppedNonce, 'a new logical attempt gets a new nonce');
   deliverSlot(vm, fixture.slots[0], 6);
-  assert.equal(vm.get('WoWAI.IsConnected()'), 'false', 'fresh clocks after restart still cannot verify an unsent probe');
-  assert.equal(vm.get('WoWAIDB.chats[1].pendingId'), null);
+  assert.equal(vm.get('Wowie.IsConnected()'), 'false', 'fresh clocks after restart still cannot verify an unsent probe');
+  assert.equal(vm.get('WowieDB.chats[1].pendingId'), null);
   const receivedAt = fixture.advance(6);
   const hello = sendClientPacket(fixture, vm);
   await waitAck(fixture, vm, freshNonce, receivedAt);
   deliverSlot(vm, fixture.slots[1], 6);
-  assert.equal(vm.get('WoWAI.IsConnected()'), 'true');
-  assert.equal(vm.get('WoWAIInput:GetText()'), '', 'only the matching round trip releases the queued draft');
-  assert.equal(vm.get('#WoWAIDB.chats[1].history'), '1');
-  const chat = vm.get('WoWAIDB.chats[1].id'), question = clientPacket(vm);
+  assert.equal(vm.get('Wowie.IsConnected()'), 'true');
+  assert.equal(vm.get('WowieInput:GetText()'), '', 'only the matching round trip releases the queued draft');
+  assert.equal(vm.get('#WowieDB.chats[1].history'), '1');
+  const chat = vm.get('WowieDB.chats[1].id'), question = clientPacket(vm);
   const job = P.jobsFromStrip(question.id, question.text).find(job => !job.hello && !job.data && !job.forget);
   assert.ok(job, 'the real addon publishes the queued question through its pixel serializer');
   assert.equal(job.text, 'Queued while stopped');
@@ -438,7 +438,7 @@ test('stopping and restarting a bridge requires a fresh probe before a queued qu
   const messages = fixture.messages(chat);
   assert.equal(messages.filter(message => message.role === 'user').length, 1);
   assert.equal(messages.filter(message => message.role === 'assistant').length, 1);
-  assert.equal(vm.get('WoWAIDB.chats[1].pendingId'), null);
+  assert.equal(vm.get('WowieDB.chats[1].pendingId'), null);
   const retryAt = fixture.advance(7);
   fixture.strip(hello.text, hello.id);
   await waitAck(fixture, vm, freshNonce, retryAt);
@@ -447,7 +447,7 @@ test('stopping and restarting a bridge requires a fresh probe before a queued qu
   await waitFor(() => (restarted.output().match(/strip #/g) || []).length >= 4);
   assert.equal(fixture.callCount(), 1, 'replayed metadata, hello and question never create another model turn');
   assert.deepEqual(fixture.messages(chat), messages);
-  assert.equal(vm.get('#WoWAIDB.chats[1].history'), '2');
+  assert.equal(vm.get('#WowieDB.chats[1].history'), '2');
   const state = JSON.parse(fs.readFileSync(path.join(fixture.dir, 'state.json'), 'utf8'));
   assert.equal(state.connectionAck, undefined, 'connection acknowledgements are never persisted');
 });
@@ -460,13 +460,13 @@ test('a restarted bridge acknowledges a received historic hello retry, but never
   const vm = addonVM(), initial = fixture.advance(0);
   fixture.start([]);
   await waitClock(fixture, vm, initial);
-  assert.equal(vm.get('WoWAI_Inbox.connectionAck'), null);
+  assert.equal(vm.get('Wowie_Inbox.connectionAck'), null);
   const before = fs.readFileSync(path.join(fixture.dir, 'state.json'), 'utf8');
   const receivedAt = fixture.advance(10);
   fixture.strip(hello, 146);
   await waitAck(fixture, vm, nonce, receivedAt);
-  assert.equal(vm.get('WoWAI_Inbox.connectionAck.session'), session);
-  assert.equal(vm.get('WoWAI_Inbox.connectionAck.at'), String(receivedAt));
+  assert.equal(vm.get('Wowie_Inbox.connectionAck.session'), session);
+  assert.equal(vm.get('Wowie_Inbox.connectionAck.at'), String(receivedAt));
   assert.equal(fs.readFileSync(path.join(fixture.dir, 'state.json'), 'utf8'), before, 'a received duplicate does not rewrite persistent receipts or context');
   assert.equal(fs.existsSync(path.join(fixture.dir, 'transcripts.json')), false);
   assert.equal(fixture.callCount(), 0);
@@ -479,13 +479,13 @@ test('malformed hello input cannot mint an acknowledgement or prevent a later va
   fixture.strip(['token', 'chat', '1', '', 'h;nonce=bad', 'Chat', ''].join('\x1f'), 1);
   await waitFor(() => running.output().includes('rejected: Request protocol 1'));
   await waitClock(fixture, vm, fixture.advance(2));
-  assert.equal(vm.get('WoWAI_Inbox.connectionProtocol'), '1');
-  assert.equal(vm.get('WoWAI_Inbox.connectionAck'), null);
+  assert.equal(vm.get('Wowie_Inbox.connectionProtocol'), '1');
+  assert.equal(vm.get('Wowie_Inbox.connectionAck'), null);
   assert.equal(fixture.callCount(), 0);
   const receivedAt = fixture.advance(1), nonce = 'valid-hello-001';
   fixture.strip(['token', 'chat', '1', '', `h;nonce=${nonce}`, 'Chat', ''].join('\x1f'), 1);
   await waitAck(fixture, vm, nonce, receivedAt);
-  assert.equal(vm.get('WoWAI_Inbox.connectionAck.session'), 'token');
+  assert.equal(vm.get('Wowie_Inbox.connectionAck.session'), 'token');
   assert.equal(fixture.callCount(), 0);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(fixture.dir, 'transcripts.json'), 'utf8')).chats, {});
 });
@@ -499,7 +499,7 @@ test('an old hello id runs a new nonce, queued reused ids stay distinct, and ret
   const firstWorking = waitInbox(fixture.inbox, vm, status => status === 'working');
   const running = fixture.start([]);
   assert.equal(await firstWorking, 'working');
-  assert.equal(vm.get('WoWAI_Inbox.replies[1].nonce'), 'question-000146');
+  assert.equal(vm.get('Wowie_Inbox.replies[1].nonce'), 'question-000146');
   fixture.write(fixture.outbox('question-000146') + '\n-- retry');
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(fixture.callCount(), 1, 'a retry while running must not start another agent');
@@ -507,10 +507,10 @@ test('an old hello id runs a new nonce, queued reused ids stay distinct, and ret
   await waitFor(() => fs.readFileSync(path.join(fixture.dir, 'bridge.log'), 'utf8').includes('#146@token queued'));
   fixture.write(fixture.outbox('question-000147') + '\n-- queued retry');
   await new Promise(resolve => setTimeout(resolve, 100));
-  const secondWorking = waitInbox(fixture.inbox, vm, status => status === 'working' && vm.get('WoWAI_Inbox.replies[1].nonce') === 'question-000147');
+  const secondWorking = waitInbox(fixture.inbox, vm, status => status === 'working' && vm.get('Wowie_Inbox.replies[1].nonce') === 'question-000147');
   fixture.release(1);
   await secondWorking;
-  const done = waitInbox(fixture.inbox, vm, status => status === 'done' && vm.get('WoWAI_Inbox.replies[1].nonce') === 'question-000147');
+  const done = waitInbox(fixture.inbox, vm, status => status === 'done' && vm.get('Wowie_Inbox.replies[1].nonce') === 'question-000147');
   fixture.release(2);
   await done;
   running.child.kill(); await running.exited;
@@ -535,8 +535,8 @@ test('nonce-less input cannot finish an old client question, run an AI or poison
   assert.equal(await rejected.exited, 1, rejected.output());
   assert.equal(fixture.callCount(), 0);
   vm.run(fs.readFileSync(fixture.inbox, 'utf8'));
-  assert.equal(vm.get('WoWAI_Inbox.requestProtocol'), '1');
-  assert.equal(vm.get('#WoWAI_Inbox.replies'), '0', 'compatibility metadata cannot complete the old pending question');
+  assert.equal(vm.get('Wowie_Inbox.requestProtocol'), '1');
+  assert.equal(vm.get('#Wowie_Inbox.replies'), '0', 'compatibility metadata cannot complete the old pending question');
   assert.equal(JSON.parse(fs.readFileSync(path.join(fixture.dir, 'state.json'), 'utf8')).handledNonces, undefined);
   fixture.write(fixture.outbox('recovered-000146'));
   fixture.release(1);
@@ -553,9 +553,9 @@ test('inject mints a fresh nonce for every invocation and publishes protocol 1 r
     const injected = fixture.start(['--inject', 'A deterministic CLI question']);
     assert.equal(await injected.exited, 0, injected.output());
     vm.run(fs.readFileSync(fixture.inbox, 'utf8'));
-    assert.equal(vm.get('WoWAI_Inbox.requestProtocol'), '1');
-    assert.equal(vm.get('WoWAI_Inbox.replies[1].status'), 'done');
-    const nonce = vm.get('WoWAI_Inbox.replies[1].nonce');
+    assert.equal(vm.get('Wowie_Inbox.requestProtocol'), '1');
+    assert.equal(vm.get('Wowie_Inbox.replies[1].status'), 'done');
+    const nonce = vm.get('Wowie_Inbox.replies[1].nonce');
     assert.match(nonce, /^[A-Za-z0-9_-]{8,64}$/);
     nonces.push(nonce);
   }
@@ -563,7 +563,7 @@ test('inject mints a fresh nonce for every invocation and publishes protocol 1 r
   assert.equal(fixture.callCount(), 2);
 });
 
-function replyField(vm, nonce, field = 'status', globalName = 'WoWAI_Inbox') {
+function replyField(vm, nonce, field = 'status', globalName = 'Wowie_Inbox') {
   return vm.get(`(function() for _, record in ipairs(${globalName}.replies) do if record.nonce == ${P.luaStr(nonce)} then return record[${P.luaStr(field)}] end end end)()`);
 }
 
@@ -586,7 +586,7 @@ function assertPulse(fixture, vm, index, nonce, status) {
   assert.equal(replyField(vm, nonce), status);
   for (const source of pulse.slots) {
     vm.run(source);
-    assert.equal(replyField(vm, nonce, 'status', 'WoWAI_SlotData'), status, 'every slot already contains this phase when its readiness flag is written');
+    assert.equal(replyField(vm, nonce, 'status', 'Wowie_SlotData'), status, 'every slot already contains this phase when its readiness flag is written');
   }
 }
 
@@ -594,21 +594,21 @@ test('calibration echoes only validated capture provenance, retries retain actua
   const fixture = bridgeSandbox(t, { lastId: 0, sessions: {}, handled: {} }, { clock: true, capture: true, presence: true, presenceMax: 3, slots: 3, captureIntervalMs: 75, presenceIntervalMs: 25 });
   const vm = addonVM(), initial = fixture.advance(0), running = fixture.start([]);
   await waitClock(fixture, vm, initial);
-  assert.equal(vm.get('WoWAI_Inbox.transportProtocol'), '1');
-  assert.equal(vm.get('WoWAI_Inbox.transport.captureIntervalMs'), '75');
-  assert.equal(vm.get('WoWAI_Inbox.transport.frameIntervalMs'), '150');
-  assert.equal(vm.get('table.concat(WoWAI_Inbox.transport.displays, ",")'), 'robust,compact,quiet,quiet4');
-  assert.equal(vm.get('WoWAI_Inbox.requestProtocol'), '1');
-  assert.equal(vm.get('WoWAI_Inbox.connectionProtocol'), '1');
-  assert.equal(vm.get('WoWAI_Inbox.contextProtocol'), '2');
+  assert.equal(vm.get('Wowie_Inbox.transportProtocol'), '1');
+  assert.equal(vm.get('Wowie_Inbox.transport.captureIntervalMs'), '75');
+  assert.equal(vm.get('Wowie_Inbox.transport.frameIntervalMs'), '150');
+  assert.equal(vm.get('table.concat(Wowie_Inbox.transport.displays, ",")'), 'robust,compact,quiet,quiet4');
+  assert.equal(vm.get('Wowie_Inbox.requestProtocol'), '1');
+  assert.equal(vm.get('Wowie_Inbox.connectionProtocol'), '1');
+  assert.equal(vm.get('Wowie_Inbox.contextProtocol'), '2');
   assert.equal(fixture.pulses().length, 0, 'idle slot clocks are not readiness boundaries');
   const hello = nonce => ['token', 'chat', '16384', '', `h;c;nonce=${nonce};calibration=quiet;display=quiet;captureDisplay=quiet`, 'Chat', 'Character: Calibration fixture', ''].join('\x1f').padEnd(3200, '.');
   const first = 'calibrate-000001';
   await capturePacket(fixture, running, hello(first), 16384, 'compact');
   await waitAck(fixture, vm, first, initial);
   await waitFor(() => fixture.pulses().length >= 1);
-  assert.equal(vm.get('WoWAI_Inbox.connectionAck.display'), 'compact', 'a requested Quiet profile cannot replace an actually captured Compact frame');
-  const received = vm.get('WoWAI_Inbox.connectionAck.at');
+  assert.equal(vm.get('Wowie_Inbox.connectionAck.display'), 'compact', 'a requested Quiet profile cannot replace an actually captured Compact frame');
+  const received = vm.get('Wowie_Inbox.connectionAck.at');
   await capturePacket(fixture, running, hello(first), 16384, 'compact');
   await waitClock(fixture, vm, fixture.advance(0));
   assert.equal(fixture.pulses().length, 1, 'identical same-receipt hello headers do not spend readiness flags');
@@ -616,38 +616,38 @@ test('calibration echoes only validated capture provenance, retries retain actua
   await capturePacket(fixture, running, hello(first), 16384, 'compact');
   await waitAck(fixture, vm, first, retryAt);
   await waitFor(() => fixture.pulses().length >= 2);
-  assert.notEqual(vm.get('WoWAI_Inbox.connectionAck.at'), received, 'only another actual receipt renews the acknowledgement');
+  assert.notEqual(vm.get('Wowie_Inbox.connectionAck.at'), received, 'only another actual receipt renews the acknowledgement');
   await capturePacket(fixture, running, hello('calibrate-000002'), 16384);
   await waitAck(fixture, vm, 'calibrate-000002', retryAt);
   await waitFor(() => fixture.pulses().length >= 3);
-  assert.equal(vm.get('WoWAI_Inbox.connectionAck.display'), null, 'requested-only metadata is not visual proof');
+  assert.equal(vm.get('Wowie_Inbox.connectionAck.display'), null, 'requested-only metadata is not visual proof');
   const lastAt = fixture.advance(2);
   await capturePacket(fixture, running, hello('calibrate-000003'), 16384, 'quiet-ish');
   await waitAck(fixture, vm, 'calibrate-000003', lastAt);
-  assert.equal(vm.get('WoWAI_Inbox.connectionAck.display'), null, 'unknown decoder profiles are not echoed');
+  assert.equal(vm.get('Wowie_Inbox.connectionAck.display'), null, 'unknown decoder profiles are not echoed');
   await capturePacket(fixture, running, ['token', 'chat', '16384', '', 'nonce=control-000004;calibration=quiet', 'Chat', 'not a user question'].join('\x1f'), 16384, 'quiet');
   await waitClock(fixture, vm, fixture.advance(2));
-  assert.equal(vm.get('WoWAI_Inbox.connectionAck.nonce'), 'calibrate-000003');
-  assert.equal(vm.get('WoWAI_Inbox.connectionAck.at'), String(lastAt), 'clocks and ignored controls do not manufacture a new ACK time');
+  assert.equal(vm.get('Wowie_Inbox.connectionAck.nonce'), 'calibrate-000003');
+  assert.equal(vm.get('Wowie_Inbox.connectionAck.at'), String(lastAt), 'clocks and ignored controls do not manufacture a new ACK time');
   assert.equal(fixture.callCount(), 0, 'hello and calibration controls never start a provider');
-  assert.equal(vm.get('#WoWAI_Inbox.replies'), '0', 'controls do not manufacture user replies');
+  assert.equal(vm.get('#Wowie_Inbox.replies'), '0', 'controls do not manufacture user replies');
   assert.equal(fixture.pulses().length, 3, 'the finite readiness pool stops instead of recycling flags');
-  assert.equal(fs.existsSync(path.join(fixture.addons, 'WoWAI/presence/0004.wav')), false);
+  assert.equal(fs.existsSync(path.join(fixture.addons, 'Wowie/presence/0004.wav')), false);
   const largerAt = fixture.advance(2);
   await capturePacket(fixture, running, hello('calibrate-000005'), 16384, 'quiet4');
   await waitAck(fixture, vm, 'calibrate-000005', largerAt);
-  assert.equal(vm.get('WoWAI_Inbox.connectionAck.display'), 'quiet4', 'dark four-pixel fallback still needs actual capture provenance');
+  assert.equal(vm.get('Wowie_Inbox.connectionAck.display'), 'quiet4', 'dark four-pixel fallback still needs actual capture provenance');
   assert.equal(fixture.callCount(), 0);
   assert.equal(fixture.pulses().length, 3, 'an exhausted hint pool cannot recycle flags even for a verified fallback');
-  for (let i = 1; i <= 3; i++) assert.deepEqual(fs.readFileSync(path.join(fixture.addons, `WoWAI/presence/${String(i).padStart(4, '0')}.wav`)), P.SILENT_WAV, 'used flags remain monotonic');
+  for (let i = 1; i <= 3; i++) assert.deepEqual(fs.readFileSync(path.join(fixture.addons, `Wowie/presence/${String(i).padStart(4, '0')}.wav`)), P.SILENT_WAV, 'used flags remain monotonic');
 });
 
 test('complete queued receipts publish promptly across chats without partial, progress or heartbeat readiness storms', async t => {
   const fixture = bridgeSandbox(t, { lastId: 0, sessions: {}, handled: {} }, { clock: true, capture: true, presence: true, slots: 3, maxParallel: 1, progressWriteMs: 1, presenceIntervalMs: 25 });
   const vm = addonVM(), initial = fixture.advance(0), running = fixture.start([]);
   await waitClock(fixture, vm, initial);
-  assert.equal(vm.get('WoWAI_Inbox.transport.captureIntervalMs'), '50');
-  assert.equal(vm.get('WoWAI_Inbox.transport.frameIntervalMs'), '100');
+  assert.equal(vm.get('Wowie_Inbox.transport.captureIntervalMs'), '50');
+  assert.equal(vm.get('Wowie_Inbox.transport.frameIntervalMs'), '100');
   const busyNonce = 'busy-chat-000001', nonce = 'queued-chat-000001';
   const record = (chat, owner, flags, text) => ['token', chat, '146', '', `nonce=${owner}${flags ? ';' + flags : ''}`, chat, text].join('\x1f');
   await capturePacket(fixture, running, record('busy', busyNonce, '', 'First fixture question'));

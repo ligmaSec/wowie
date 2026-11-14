@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { lua, lauxlib, lualib, to_luastring, to_jsstring } = require('fengari');
 
-const addon = path.join(__dirname, '../addon/WoWAI');
+const addon = path.join(__dirname, '../addon/Wowie');
 function vm() {
   const L = lauxlib.luaL_newstate();
   lualib.luaL_openlibs(L);
@@ -27,19 +27,19 @@ function vm() {
   };
   run(fs.readFileSync(path.join(__dirname, 'wow_stub.lua'), 'utf8'));
   run('UIParent:SetSize(1280, 900)');
-  for (const file of ['Codec.lua', 'Inbox.lua', 'WoWAI.lua', 'Context.lua', 'ContextUI.lua']) {
-    run(fs.readFileSync(path.join(addon, file), 'utf8'), 'WoWAI');
+  for (const file of ['Codec.lua', 'Inbox.lua', 'Wowie.lua', 'Context.lua', 'ContextUI.lua']) {
+    run(fs.readFileSync(path.join(addon, file), 'utf8'), 'Wowie');
   }
   run(`
-    STUB.FireEvent('ADDON_LOADED', 'WoWAI')
+    STUB.FireEvent('ADDON_LOADED', 'Wowie')
     STUB.FireEvent('PLAYER_LOGIN')
     function Click(control)
       if control.kind == 'CheckButton' then control:SetChecked(not control:GetChecked()) end
       control:GetScript('OnClick')(control)
     end
-    function Search(text) WoWAIContextSearch:SetText(text) end
+    function Search(text) WowieContextSearch:SetText(text) end
     function ScrollTo(offset)
-      local p = WoWAIContextPermissions
+      local p = WowieContextPermissions
       local maximum = math.max(0, #p.filtered * 64 - p.scroll:GetHeight())
       p.scroll:SetVerticalScroll(math.min(offset, maximum))
       for _, hook in ipairs(p.scroll.hooks.OnVerticalScroll or {}) do hook(p.scroll, p.scroll:GetVerticalScroll()) end
@@ -52,16 +52,16 @@ function vm() {
     end
     function Choices()
       local ids = {}
-      for _, category in ipairs(WoWAIContext.Categories()) do
+      for _, category in ipairs(WowieContext.Categories()) do
         if category.enabled then ids[#ids + 1] = category.id end
       end
       table.sort(ids)
-      return #ids == 0 and '[]' or WoWAIContext.Encode(ids)
+      return #ids == 0 and '[]' or WowieContext.Encode(ids)
     end
     NOTIFICATIONS = 0
-    function WoWAI.UpdateSharingSummary()
+    function Wowie.UpdateSharingSummary()
       NOTIFICATIONS = NOTIFICATIONS + 1
-      LAST_SUMMARY = WoWAIContextUI.Summary()
+      LAST_SUMMARY = WowieContextUI.Summary()
     end
   `);
   return { run, value, json: expression => JSON.parse(value(expression)), num: expression => Number(value(expression)) };
@@ -71,18 +71,18 @@ test('search, view changes and recycled rows toggle only the displayed permissio
   const v = vm();
   v.run(`
     AddScopes(320)
-    WoWAIContextUI.Show()
-    Click(WoWAIContextClear)
-    Click(WoWAIContextTabAdvanced)
+    WowieContextUI.Show()
+    Click(WowieContextClear)
+    Click(WowieContextTabAdvanced)
     ScrollTo(64 * 210)
-    FIRST = WoWAIContextPermissions.rows[1].category.id
-    Click(WoWAIContextPermissions.rows[1].check)
+    FIRST = WowieContextPermissions.rows[1].category.id
+    Click(WowieContextPermissions.rows[1].check)
     ScrollTo(64 * 250)
-    SECOND = WoWAIContextPermissions.rows[1].category.id
-    Click(WoWAIContextPermissions.rows[1])
+    SECOND = WowieContextPermissions.rows[1].category.id
+    Click(WowieContextPermissions.rows[1])
     Search('Scope0007')
-    FILTERED = WoWAIContextPermissions.rows[1].category.id
-    Click(WoWAIContextPermissions.rows[1].check)
+    FILTERED = WowieContextPermissions.rows[1].category.id
+    Click(WowieContextPermissions.rows[1].check)
   `);
   const first = v.value('FIRST');
   const second = v.value('SECOND');
@@ -90,17 +90,17 @@ test('search, view changes and recycled rows toggle only the displayed permissio
   assert.equal(v.value('FILTERED'), 'api:Scope0007');
   assert.deepEqual(v.json('Choices()'), [first, second, 'api:Scope0007'].sort());
   v.run(`
-    Click(WoWAIContextTabPrivate)
-    EMPTY = #WoWAIContextPermissions.filtered
+    Click(WowieContextTabPrivate)
+    EMPTY = #WowieContextPermissions.filtered
     Search('mail')
-    PRIVATE = WoWAIContextPermissions.rows[1].category.id
-    Click(WoWAIContextPermissions.rows[1])
+    PRIVATE = WowieContextPermissions.rows[1].category.id
+    Click(WowieContextPermissions.rows[1])
   `);
   assert.equal(v.num('EMPTY'), 0, 'search remains combined with the newly selected view');
   assert.ok(['mail', 'mail_body'].includes(v.value('PRIVATE')));
   assert.deepEqual(v.json('Choices()'), [first, second, 'api:Scope0007', v.value('PRIVATE')].sort());
-  assert.equal(v.num('WoWAIContextUI.Summary().selected'), 4);
-  assert.ok(v.num('#WoWAIContextPermissions.rows') <= v.num('math.ceil(WoWAIContextScroll:GetHeight() / 64) + 1'));
+  assert.equal(v.num('WowieContextUI.Summary().selected'), 4);
+  assert.ok(v.num('#WowieContextPermissions.rows') <= v.num('math.ceil(WowieContextScroll:GetHeight() / 64) + 1'));
   assert.equal(v.num('LAST_SUMMARY.selected'), 4);
 });
 
@@ -108,94 +108,94 @@ test('selected removal reclamps scrolling and retargets reused rows without losi
   const v = vm();
   v.run(`
     AddScopes(180)
-    WoWAIContextUI.Show()
-    Click(WoWAIContextClear)
-    WoWAIContext.SetEnabled('identity', true)
-    for i = 1, 180 do WoWAIContext.SetEnabled(string.format('api:Scope%04d', i), true) end
-    WoWAIContextUI.Show()
-    Click(WoWAIContextTabSelected)
+    WowieContextUI.Show()
+    Click(WowieContextClear)
+    WowieContext.SetEnabled('identity', true)
+    for i = 1, 180 do WowieContext.SetEnabled(string.format('api:Scope%04d', i), true) end
+    WowieContextUI.Show()
+    Click(WowieContextTabSelected)
     ScrollTo(64 * 10000)
-    REMOVED = WoWAIContextPermissions.rows[1].category.id
-    BEFORE = WoWAIContextScroll:GetVerticalScroll()
-    Click(WoWAIContextPermissions.rows[1].check)
-    NEXT = WoWAIContextPermissions.rows[1].category.id
-    AFTER = WoWAIContextScroll:GetVerticalScroll()
-    Click(WoWAIContextPermissions.rows[1])
+    REMOVED = WowieContextPermissions.rows[1].category.id
+    BEFORE = WowieContextScroll:GetVerticalScroll()
+    Click(WowieContextPermissions.rows[1].check)
+    NEXT = WowieContextPermissions.rows[1].category.id
+    AFTER = WowieContextScroll:GetVerticalScroll()
+    Click(WowieContextPermissions.rows[1])
   `);
   assert.notEqual(v.value('REMOVED'), v.value('NEXT'));
-  assert.equal(v.value('WoWAIDB.settings.sharing[REMOVED]'), 'false');
-  assert.equal(v.value('WoWAIDB.settings.sharing[NEXT]'), 'false');
-  assert.equal(v.value("WoWAIContext.IsEnabled('identity')"), 'true');
-  assert.equal(v.num('WoWAIContextUI.Summary().selected'), 179);
-  assert.equal(v.num('#WoWAIContextPermissions.filtered'), 179);
+  assert.equal(v.value('WowieDB.settings.sharing[REMOVED]'), 'false');
+  assert.equal(v.value('WowieDB.settings.sharing[NEXT]'), 'false');
+  assert.equal(v.value("WowieContext.IsEnabled('identity')"), 'true');
+  assert.equal(v.num('WowieContextUI.Summary().selected'), 179);
+  assert.equal(v.num('#WowieContextPermissions.filtered'), 179);
   assert.ok(v.num('AFTER') < v.num('BEFORE'));
   v.run(`
     Search('Scope0001')
-    Click(WoWAIContextPermissions.rows[1].check)
+    Click(WowieContextPermissions.rows[1].check)
   `);
-  assert.equal(v.num('#WoWAIContextPermissions.filtered'), 0);
-  assert.equal(v.value('WoWAIContextPermissions.empty:IsShown()'), 'true');
-  assert.equal(v.num('WoWAIContextScroll:GetVerticalScroll()'), 0);
+  assert.equal(v.num('#WowieContextPermissions.filtered'), 0);
+  assert.equal(v.value('WowieContextPermissions.empty:IsShown()'), 'true');
+  assert.equal(v.num('WowieContextScroll:GetVerticalScroll()'), 0);
   assert.equal(v.num('LAST_SUMMARY.selected'), 178);
-  assert.equal(v.value("WoWAIContext.IsEnabled('identity')"), 'true');
+  assert.equal(v.value("WowieContext.IsEnabled('identity')"), 'true');
 });
 
 test('paused sharing keeps editable choices but still blocks real context getters', () => {
   const v = vm();
   v.run(`
-    WoWAIContextUI.Show()
-    Click(WoWAIContextClear)
+    WowieContextUI.Show()
+    Click(WowieContextClear)
     Search('carried copper')
-    Click(WoWAIContextPermissions.rows[1].check)
+    Click(WowieContextPermissions.rows[1].check)
     READS = 0
     function GetMoney() READS = READS + 1; return 12345 end
-    Click(WoWAIContextMaster)
+    Click(WowieContextMaster)
   `);
   assert.deepEqual(v.json('Choices()'), ['money']);
-  assert.equal(v.value('WoWAIContextUI.Summary().enabled'), 'false');
-  const denied = v.json("WoWAIContext.Query({ op = 'snapshot', category = 'money' })");
+  assert.equal(v.value('WowieContextUI.Summary().enabled'), 'false');
+  const denied = v.json("WowieContext.Query({ op = 'snapshot', category = 'money' })");
   assert.equal(denied.ok, false);
   assert.equal(v.num('READS'), 0);
   v.run(`
     Search('identity')
-    Click(WoWAIContextPermissions.rows[1])
+    Click(WowieContextPermissions.rows[1])
   `);
   assert.deepEqual(v.json('Choices()'), ['identity', 'money']);
-  assert.equal(v.value('WoWAIContextPermissions.rows[1].check:GetChecked()'), 'true');
-  assert.equal(v.value("WoWAIContext.IsEnabled('identity')"), 'false');
+  assert.equal(v.value('WowieContextPermissions.rows[1].check:GetChecked()'), 'true');
+  assert.equal(v.value("WowieContext.IsEnabled('identity')"), 'false');
   assert.equal(v.num('LAST_SUMMARY.selected'), 2);
-  v.run('Click(WoWAIContextMaster)');
+  v.run('Click(WowieContextMaster)');
   assert.equal(v.value('LAST_SUMMARY.enabled'), 'true');
-  assert.equal(v.json("WoWAIContext.Query({ op = 'snapshot', category = 'money' })").ok, true);
+  assert.equal(v.json("WowieContext.Query({ op = 'snapshot', category = 'money' })").ok, true);
   assert.equal(v.num('READS'), 1);
 });
 
 test('summary avoids repeated discovery, reopening discovers late scopes, and clear discards unavailable saved grants', () => {
   const v = vm();
   v.run(`
-    local categories = WoWAIContext.Categories
+    local categories = WowieContext.Categories
     DISCOVERIES = 0
-    WoWAIContext.Categories = function() DISCOVERIES = DISCOVERIES + 1; return categories() end
-    WoWAIContextUI.Summary()
+    WowieContext.Categories = function() DISCOVERIES = DISCOVERIES + 1; return categories() end
+    WowieContextUI.Summary()
     BASELINE = DISCOVERIES
-    for i = 1, 30 do WoWAIContextUI.Summary() end
+    for i = 1, 30 do WowieContextUI.Summary() end
   `);
   assert.equal(v.num('DISCOVERIES'), v.num('BASELINE'));
   v.run(`
     AddScopes(12)
-    WoWAIContextUI.Show()
-    Click(WoWAIContextTabAdvanced)
+    WowieContextUI.Show()
+    Click(WowieContextTabAdvanced)
   `);
-  assert.equal(v.num('#WoWAIContextPermissions.filtered'), 12);
+  assert.equal(v.num('#WowieContextPermissions.filtered'), 12);
   v.run(`
-    WoWAIDB.settings.sharing['api:Unavailable'] = true
-    Click(WoWAIContextClear)
+    WowieDB.settings.sharing['api:Unavailable'] = true
+    Click(WowieContextClear)
   `);
-  assert.equal(v.value("WoWAIDB.settings.sharing['api:Unavailable'] == nil"), 'true');
+  assert.equal(v.value("WowieDB.settings.sharing['api:Unavailable'] == nil"), 'true');
   assert.equal(v.num('LAST_SUMMARY.selected'), 0);
   assert.deepEqual(v.json('Choices()'), []);
-  v.run('Click(WoWAIContextDefaults)');
+  v.run('Click(WowieContextDefaults)');
   assert.equal(v.num('LAST_SUMMARY.selected'), 9);
-  assert.equal(v.value("WoWAIContext.IsEnabled('mail_body')"), 'false');
-  assert.equal(v.value("WoWAIContext.IsEnabled('api:Scope0001')"), 'false');
+  assert.equal(v.value("WowieContext.IsEnabled('mail_body')"), 'false');
+  assert.equal(v.value("WowieContext.IsEnabled('api:Scope0001')"), 'false');
 });
