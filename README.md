@@ -2,7 +2,7 @@
 
 **An in-game AI chat assistant for World of Warcraft: Forever.**
 
-Ask questions about your character, items, spells, professions or quests without leaving the game. Wowie connects an addon chat window to an AI CLI on your computer, with checkboxes controlling which addon-readable information accompanies your questions.
+Ask questions about your character, items, spells, professions or quests without leaving the game. Wowie connects an addon chat window to an AI CLI on your computer. Choose a sharing preset once; the assistant can then request the relevant permitted information itself.
 
 > **A chat companion, not an autopilot.** Wowie is intended for conversation, explanations and read-only character context—not botting, unattended play or gaining an unfair advantage. You remain in control of your character and every gameplay action.
 
@@ -13,8 +13,6 @@ Wowie is an independently maintained fork with its own interface and workflow. I
 <p align="center">
   <img src="docs/screenshots/wowie-chat.png" alt="Wowie chat window with conversations, agent, model and reasoning selectors, and Sharing, Navigation and Settings controls" width="1000">
 </p>
-
-*Local folder path blurred.*
 
 ## Purpose and boundaries
 
@@ -31,9 +29,9 @@ This intended use is not a guarantee that a particular server permits external A
 
 ## The Wowie experience
 
-- **Chat-first workspace:** a black-and-gold interface, searchable conversations, a large discussion area, directly selectable replies and persistent per-chat drafts.
+- **Readable chat workspace:** opaque dark surfaces, a collapsible conversation sidebar, structured selectable replies, compact sources and persistent per-chat drafts.
 - **Agent, model and reasoning controls:** choose them in the discussion header, or save addon-wide defaults in **Settings**. Each conversation keeps its own session and overrides.
-- **Explicit character sharing:** searchable checkboxes for gear, bags, spellbooks, professions, talents, quests and other available information. Private/social and advanced scopes are opt-in.
+- **Simple character sharing:** one-click Recommended or Minimal presets, Smart on-demand reads, and optional customization. Includes action bars/keybinds, current interactions and optional Auctionator prices; private/social data and macro bodies remain opt-in.
 - **Integrated navigation:** search saved destinations, add or delete points, show them on the map and manage route stops from **Navigation**, without typing layer names.
 - **Bridge verification and recovery:** fresh round-trip checks, delivery acknowledgements, persistent transcripts and clearer idle/error states.
 - **Less intrusive transport options:** **Robust**, **Compact** and **Quiet** pixel displays, with calibration before a smaller or dark display is enabled.
@@ -49,7 +47,7 @@ Supported agents are **Claude Code**, **OpenAI Codex**, **Grok Build**, **Antigr
 - At least one supported AI CLI, installed and authenticated on the bridge computer. Its normal provider/account requirements still apply.
 - A supported capture environment:
   - **Windows:** NTFS.
-  - **Linux:** Python 3 and Wine/Proton using **X11 or Xwayland**. Native Wine Wayland windows are not supported by the X11 capture helper.
+  - **Linux:** Python 3 and Wine/Proton on **X11 or a compatible Wayland compositor**. Direct Wayland capture uses Python's standard library and libwayland-client, with no source picker or portal fallback. Hyprland is tested-capable; not every compositor exposes the required protocols. Native Wine Wayland and Xwayland windows are supported. See [Linux setup](docs/INSTALL-LINUX.md).
   - **macOS:** Python 3 and a native game client, with Automation and Screen Recording permission for the terminal running the bridge.
 
 The bridge runs locally; the selected AI CLI may send prompts to an external provider. “Local bridge” does not mean “local model.”
@@ -96,17 +94,23 @@ The installer carries forward account data, chats, settings, pending request ide
 
 Relaunch the game and start the bridge again. **`/reload` cannot discover renamed or newly added addon files.** For later Lua-only updates, deploy the files and use `/reload`; restart the bridge after bridge changes when it is idle.
 
+The interface revamp adds `ReplyView.lua`. Install the update, then **fully quit and relaunch WoW once** so the client discovers it. Restart the bridge when idle to use the updated reply-format instructions.
+
 If you used a previous global launcher, unlink that command and run `npm link` from this repository. The current launcher is **`wowie`**; `wowie --project <folder>` selects a working folder explicitly. Otherwise, `wowie` uses the folder it is launched from, while `npm start` in this repository falls back to the configured `defaultCwd`. Run only one bridge at a time.
 
 ## Using Wowie
 
 Open `/wowie` and use **New chat** in the Conversations sidebar. Each chat has a persistent agent session, transcript, working folder and draft. Its **...** menu provides rename, copy, folder, fresh-session, clear and delete actions.
 
+**Chats** toggles the sidebar when you want more reading space. Replies separate headings, paragraphs, steps, quotes and code into selectable blocks. Markdown links become readable source references; numbered **Source** buttons open the exact URL for copying because an addon cannot launch your browser. Inline emphasis markers are normalized rather than displayed literally. **Summary** and routine bridge **Details** stay collapsed; errors remain visible. The per-message **Copy** button retains the original complete text, including URLs.
+
+**Settings → Reading** offers Small, Medium and Large text, plus a local **Preview formatting** page. **Back to Settings** preserves unsaved choices. Preview never sends an AI request or creates a conversation. Save applies reading preferences; Cancel discards them.
+
 - **Agent / Model / Reasoning** apply to the next message. Changing agents starts a fresh agent session while keeping the transcript. Pending requests retain the settings they were sent with.
 - **Settings** saves addon-wide defaults without editing the bridge configuration. Selection precedence is **per-chat choice → addon default for that agent → bridge config → CLI default**.
 - **Enter** sends; **Shift+Enter** inserts a newline. Drag-select reply text and press **Ctrl+C** to copy it directly. **Esc** releases text focus without discarding your draft.
 - **Shift-click** an item, spell, quest or chat link into the composer to include its name and tooltip in your question.
-- **Cancel wait** stops local waiting, not the external AI process. **Check reply** retrieves an outstanding reply without consuming your next-message draft.
+- **Stop waiting** stops local waiting, not the external AI process. **Check reply** retrieves an outstanding reply without consuming your next-message draft.
 
 The full answer stays in the discussion window. Game-chat echo defaults to a short `TL;DR` with an **open** link; `/wowie echo full` changes that.
 
@@ -114,7 +118,8 @@ The full answer stays in the discussion window. Game-chat echo defaults to a sho
 
 Ask for a location or route, then manage its points through **Navigation**:
 
-- **Navigate**, **Start route**, **Previous**, **Next**, **Stop** and **Show on map** control guidance.
+- **Navigate** starts a destination; that point's button becomes **Stop navigation**, so another click cancels guidance without deleting the point. **Previous**, **Next** and the active card's **Stop** remain available.
+- **On map / Show on map** opens and centers the destination, using OpenMap's stitched-world view or the native map canvas. Wowie minimizes so it does not cover the map; your draft and active route are preserved.
 - **Add point** saves your current position, a world-map pin or entered coordinates to **My places** or an existing route.
 - **Delete** asks for confirmation; local edits persist through reloads and bridge refreshes.
 
@@ -148,13 +153,23 @@ Most controls are available in the UI; commands are optional shortcuts.
 
 ## Sharing and privacy
 
-Open **Sharing** to choose the information the AI receives. Character snapshots accompany questions; additional queries are checked against the **current** permissions before the addon reads them.
+Open **Sharing**, choose **Recommended**, and ask your question. There is no separate Save step and no need to enable individual API namespaces for built-in character information. Existing explicit choices survive updates; applying a preset deliberately replaces them.
 
-- Common character categories such as identity, location, equipment, inventory, spells, skills, talents and quests are enabled by default.
-- Bank, mail, chat history, guild, friends/Battle.net, party/raid, target/focus, UI, addon/global tables and advanced API scopes are off by default.
-- **Sensitive** means private or broad data access, not permission to automate gameplay. Broad API/UI/addon scopes can overlap other categories; read their descriptions before enabling them.
-- Bank and mailbox information depends on the relevant window being open. **Mail message bodies require separate consent because the client's read API marks those messages as read.** This is an explicit side-effect exception, not a zero-write guarantee.
-- **Sharing on / paused** preserves your choices while pausing snapshot/query access. It cannot recall information already sent. Links you manually include in a message still share their tooltip.
+- **Recommended** allows useful ordinary character data: gear, bags, spells, skills, talents, quests, action bars/keybinds, auras, pet state, reputation, currencies, collections, combat stats, current interactions, travel, cached lockouts and optional Auctionator data.
+- **Minimal** allows only identity and location.
+- **Smart delivery** is the default. Each question carries small enabled essentials plus a catalog of permitted sources. The AI fetches relevant details automatically through read-only queries, rather than collecting everything or asking you to hunt for another checkbox.
+- **Customize** opens the searchable per-category controls, private/social permissions and advanced API scopes. **Full snapshot** delivery is available there if you want all selected snapshot data with every question; Auctionator databases and advanced APIs still remain query-only.
+- **Sharing on / paused** blocks or resumes reads without erasing your choices. Delivery and permission settings are independent.
+
+**Action bars** include assigned spells/items/macros/flyouts, observed button/page mappings, keybinds, counts, cooldowns and charges where exposed. Native and installed EllesmereUI button mappings are read without pressing or changing them. Macro names can be shown with actions, but **macro bodies** require their separate private permission.
+
+**Auctionator** is optional and detected automatically. Wowie reads recognized cached prices and history from the active database, including the installed version's `Auctionator.Database.db` / `AUCTIONATOR_PRICE_DATABASE` and supported `AuctionatorDB` price layouts. No full database is attached to every message; targeted item queries and bounded pages provide the details. Prices are historical observations in copper, not live listings or proof of current stock. Wowie never starts scans, bids, buys or posts.
+
+The assistant can also read currently open merchant/trainer/gossip/quest windows, bind location and visible taxi options, cached instance lockouts, gear durability, temporary weapon enchants and repair costs where exposed. Closed windows and missing APIs are reported explicitly.
+
+Bank, mail, chat history, guild, friends/Battle.net, party/raid, target/focus, macro bodies, UI/addon tables and advanced API access remain separate private/broad permissions. Broad API/UI/addon scopes can overlap categories; their descriptions explain this. **Mail bodies require separate consent because the client's read API marks messages as read.** Additional queries always check current consent.
+
+Pausing or changing sharing cannot recall information already sent. Links you manually include in a message still share their tooltip.
 
 Prompts and permitted character data can reach the selected AI provider. Chat history and bridge state are also persisted locally for recovery. Do not treat the Sharing panel as an anonymity mechanism or a way to remove data from a provider after delivery.
 
@@ -179,6 +194,8 @@ Sound-file readiness checks are notification hints, not proof of a live connecti
 
 Under **Settings → Pixel display**, Compact uses smaller cells where the display supports them. Quiet uses dark colors and verifies whether a smaller or larger dark grid is reliable. Failed calibration keeps the robust display. These options reduce visual intrusion; they do not change the assistant's permissions.
 
+Pixel textures are built and repainted in bounded slices across UI frames, with an approximately 2 ms paint budget when the client's profiler is available. Only complete frames are shown, and each gets its full capture interval after painting. Large uploads or low frame rates can therefore take more frames without dropping selected information or doing the entire canvas update in one game frame.
+
 Normal pixel-mode exchanges do not require a reload per message. The reply pool is still finite: **200 slots per UI session**, freed by `/reload`, not by restarting Node. A reload-based fallback exists for setups where capture is unavailable.
 
 Protocol details and limitations: [Architecture](docs/ARCHITECTURE.md).
@@ -188,7 +205,7 @@ Protocol details and limitations: [Architecture](docs/ARCHITECTURE.md).
 - **Bridge not responding:** start the bridge, ensure the game window is capturable, then click **Reconnect**. A failed check keeps your draft.
 - **Idle / not verified:** the previous verification expired; this is not proof that the bridge stopped. Sending checks again automatically.
 - **Replies stop after extended use:** inspect `/wowie slots`. If exhausted, `/reload` frees the pool.
-- **A question takes a long time:** more shared data means a larger prompt. Select fewer categories, a faster model or a lower reasoning level; compression does not reduce model tokens.
+- **A question takes a long time:** keep **Smart** delivery enabled so unused sources are not collected with every question. Full snapshots and large requested sections still increase prompt size; a faster model or lower reasoning level can reduce AI processing time. Compression does not reduce model tokens.
 - **Linux capture is black, stale or cannot find the game:** follow the [Linux capture guide](docs/INSTALL-LINUX.md). `npm run probe` captures a diagnostic image; avoid sharing it if it contains private information.
 - **New addon files or slots are missing:** run setup with the client closed, then fully relaunch—not just `/reload`.
 - **An agent is missing or not authenticated:** check the bridge banner and run that CLI manually once. See [Agents](docs/AGENTS.md).

@@ -122,7 +122,7 @@ function newVM() {
   };
   run(fs.readFileSync(path.join(__dirname, 'wow_stub.lua'), 'utf8'));
   run(MACRO_STUB);
-  for (const f of ['Codec.lua', 'Inbox.lua', 'Wowie.lua', 'Context.lua', 'ContextUI.lua']) run(fs.readFileSync(path.join(ADDON, f), 'utf8'), 'Wowie');
+  for (const f of ['Codec.lua', 'Inbox.lua', 'Wowie.lua', 'ReplyView.lua', 'Context.lua', 'ContextUI.lua']) run(fs.readFileSync(path.join(ADDON, f), 'utf8'), 'Wowie');
   run('STUB.FireEvent("ADDON_LOADED", "Wowie"); STUB.FireEvent("PLAYER_LOGIN")');
   return { run, evaluate };
 }

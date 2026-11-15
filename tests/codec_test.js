@@ -16,7 +16,7 @@ const available = command => {
 };
 const python = ['python3', ...(process.platform === 'win32' ? ['python'] : [])].find(available);
 if (python) {
-  for (const script of ['capture_x11.py', 'capture_mac.py']) {
+  for (const script of ['capture_x11.py', 'capture_wayland.py', 'capture_mac.py']) {
     decoders.push({ name: script, run: (file, cell) =>
       execFileSync(python, [path.join(BRIDGE, script), '--test-image', file, '--cell', String(cell)], { encoding: 'utf8' }) });
   }

@@ -9,12 +9,34 @@ const luaparse = require('luaparse');
 
 const ADDON = process.argv[2] || path.join(__dirname, '..', 'addon', 'Wowie');
 let bad = 0;
-for (const f of ['Codec.lua', 'Wowie.lua', 'Context.lua', 'ContextUI.lua', 'Inbox.lua', 'Map.lua']) {
+for (const f of ['Codec.lua', 'Wowie.lua', 'ReplyView.lua', 'Context.lua', 'ContextUI.lua', 'Inbox.lua', 'Map.lua']) {
   const src = fs.readFileSync(path.join(ADDON, f), 'utf8');
-  luaparse.parse(src, { luaVersion: '5.1' });
+  const tree = luaparse.parse(src, { luaVersion: '5.1', ranges: true, comments: true });
   console.log('OK   ' + f + ' parses');
-  // Blank out comments so a name mentioned in prose doesn't count as a use.
-  const code = src.replace(/--\[\[[\s\S]*?\]\]|--[^\n]*/g, m => m.replace(/[^\n]/g, ' '));
+  // Literal text is not a variable reference. Use parser ranges so quoted "--"
+  // and long-bracket strings/comments cannot hide code or invent early uses.
+  const ignored = [], nodes = [tree];
+  while (nodes.length) {
+    const node = nodes.pop();
+    if (node.type === 'StringLiteral' || node.type === 'Comment') {
+      ignored.push(node.range);
+      continue;
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) {
+        for (const child of value) if (child && typeof child === 'object') nodes.push(child);
+      } else if (value && typeof value === 'object') nodes.push(value);
+    }
+  }
+  ignored.sort((a, b) => a[0] - b[0]);
+  const pieces = [];
+  let at = 0;
+  for (const [start, end] of ignored) {
+    pieces.push(src.slice(at, start), src.slice(start, end).replace(/[^\n]/g, ' '));
+    at = end;
+  }
+  pieces.push(src.slice(at));
+  const code = pieces.join('');
   const forward = new Set([...code.matchAll(/^local (\w+)\s*$/gm)].map(m => m[1]));
   const defs = [
     ...[...code.matchAll(/^local function (\w+)/gm)].map(m => ({ name: m[1], at: m.index, kind: 'function' })),

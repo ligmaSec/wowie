@@ -111,6 +111,16 @@ test('splitSummary takes the last TL;DR block for the game chat and keeps the wh
   assert.equal((lua.match(/summary = /g) || []).length, 1);
 });
 
+test('reply summaries ignore fenced examples and never echo bridge bookkeeping', () => {
+  const code = '```text\nTL;DR: this is code, not a summary\n```';
+  assert.equal(P.splitSummary(code).summary, '');
+  const reply = '# Instructions\n\n' + code + '\n\nTL;DR:\nFollow the steps above.\n\n[bridge] map: layer internal-id: 1 point(s)';
+  const result = P.splitSummary(reply);
+  assert.equal(result.summary, 'Follow the steps above.');
+  assert.equal(result.text, reply, 'raw copy/history must retain the complete original reply');
+  assert.equal(P.splitSummary('~~~\nTL;DR: still code\n~~~\n\n## TL;DR\nDone.').summary, 'Done.');
+});
+
 test('the shipped primer exists, mentions the essentials, and stays small enough to send on every run', () => {
   const fs = require('fs');
   const primer = fs.readFileSync(path.join(__dirname, '..', 'docs', 'WOW-ADDON-PRIMER.md'), 'utf8');

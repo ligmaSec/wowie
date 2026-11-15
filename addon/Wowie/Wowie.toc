@@ -9,6 +9,7 @@
 Codec.lua
 Inbox.lua
 Wowie.lua
+ReplyView.lua
 Context.lua
 ContextUI.lua
 Map.lua

@@ -55,13 +55,18 @@ function newVM(nativeEncoding = false) {
     }
     lua.lua_setglobal(L, to_luastring('C_EncodingUtil'));
   }
-  for (const f of ['Codec.lua', 'Inbox.lua', 'Wowie.lua', 'Context.lua', 'ContextUI.lua']) run(fs.readFileSync(path.join(ADDON, f), 'utf8'), 'Wowie');
+  for (const f of ['Codec.lua', 'Inbox.lua', 'Wowie.lua', 'ReplyView.lua', 'Context.lua', 'ContextUI.lua']) run(fs.readFileSync(path.join(ADDON, f), 'utf8'), 'Wowie');
   return { run, evaluate, num };
 }
 
 // Read the strip the addon drew, exactly like capture.ps1: 3 bits per cell,
 // [C7 1A] [id] [len] [payload] [fletcher]. Returns { id, text } or null.
-function decodeStrip(vm) {
+function decodeStrip(vm, finishPaint = true) {
+  if (finishPaint) vm.run(`
+    for i = 1, 32 do
+      if not WowieStripPainter:GetScript("OnUpdate") then break end
+      STUB.RenderFrame()
+    end`);
   if (vm.evaluate('WowieStrip and WowieStrip.shown') !== 'true') return null;
   vm.run(`
     local source, lastRow = {}, 0
@@ -339,6 +344,7 @@ test(`complete selected inventory crosses pixel frames without UTF-8 loss or cli
   login(vm);
   connect(vm);
   vm.run(`
+    WowieContext.SetDelivery("full")
     C_Container = {
       GetContainerNumSlots = function(bag) return bag == 0 and 96 or 0 end,
       GetContainerItemInfo = function(bag, slot) return {itemID=20000+slot,stackCount=slot,hyperlink="item:" .. (20000+slot)} end,
@@ -369,6 +375,36 @@ test(`complete selected inventory crosses pixel frames without UTF-8 loss or cli
   assert.equal(Number(P.parseFlags(original.flags).profile), original.id);
 });
 }
+
+test('smart sends advertise allowed sections without reading large providers and retries retain their original delivery', () => {
+  const vm = newVM(true);
+  login(vm);
+  connect(vm);
+  vm.run(`
+    WowieContext.ApplyPreset("recommended")
+    WowieContext.SetDelivery("smart")
+    STUB.inventoryReads = 0
+    C_Container = {
+      GetContainerNumSlots = function() STUB.inventoryReads = STUB.inventoryReads + 1; return 1000 end,
+      GetContainerItemInfo = function() error("Smart must not eagerly read inventory") end,
+    }
+    Wowie.Send("help me with my character")
+  `);
+  const first = questionRecord(vm, 'help me with my character');
+  const profile = vm.evaluate('WowieDB.chats[1].request.profile');
+  const snapshot = JSON.parse(profile);
+  assert.equal(snapshot.delivery, 'smart');
+  assert.equal(snapshot.data.inventory, undefined);
+  assert.equal(snapshot.data.actionbars, undefined);
+  assert.equal(snapshot.data.money.copper, vm.num('STUB.money'));
+  assert.ok(snapshot.catalog.some(category => category.id === 'inventory'));
+  assert.ok(snapshot.catalog.some(category => category.id === 'actionbars'));
+  assert.equal(vm.num('STUB.inventoryReads'), 0, 'allowing a large source must not collect it with every question');
+  vm.run('WowieContext.SetDelivery("full"); Wowie.Resend()');
+  assert.equal(vm.evaluate('WowieDB.chats[1].request.profile'), profile);
+  assert.equal(vm.num('STUB.inventoryReads'), 0, 'changing delivery cannot recollect a pending question');
+  assert.deepEqual(questionRecord(vm, first.text), first);
+});
 
 test('incoming agent information queries use current checkbox permissions, not the earlier snapshot permission', () => {
   const vm = newVM(true);
@@ -434,7 +470,7 @@ test('a shift-clicked link lands in the focused input and is sent as its name pl
   const rec = stripRecords(vm).find(r => r.text.startsWith('is this good'));
   assert.equal(rec.text, expected);
   assert.equal(vm.evaluate('WowieDB.chats[1].history[#WowieDB.chats[1].history].text'), expected, 'the transcript shows what was sent');
-  assert.equal(vm.evaluate('WowieDB.chats[1].name'), 'Is this good for me');
+  assert.doesNotMatch(vm.evaluate('WowieDB.chats[1].name'), /Linked from|Main Hand|Requires Level/, 'generated tooltip metadata must not become the conversation title');
   // Bare links (no colour) and repeated links: one block each, tooltip or not.
   vm.run('RESULT = (Wowie.ExpandLinks("x |Hspell:1978|h[Serpent Sting]|h y |Hspell:1978|h[Serpent Sting]|h"))');
   assert.equal(vm.evaluate('RESULT'), 'x [Serpent Sting] y [Serpent Sting]\n\n--- Linked from the game ---\n[Serpent Sting] spell 1978');
@@ -1257,6 +1293,7 @@ test(`legacy pending migration resumes its full original profile and tuple from 
   pickSelection(vm, 'model', 'code-model');
   pickSelection(vm, 'reasoning', 'high');
   vm.run(`
+    WowieContext.SetDelivery("full")
     C_Container = {
       GetContainerNumSlots = function(bag) return bag == 0 and 96 or 0 end,
       GetContainerItemInfo = function(bag, slot) return {itemID=30000+slot,stackCount=slot,hyperlink="item:" .. (30000+slot)} end,
@@ -1507,7 +1544,7 @@ test('discussion selection is in place, read only and stable across redraws', ()
   const text = '  Épée | literal pipes\n    indented answer\nlast line  ';
   vm.run(`
     Wowie.Toggle(true)
-    table.insert(WowieDB.chats[1].history, {role="assistant",text=${P.luaStr(text)}})
+    table.insert(WowieDB.chats[1].history, {role="user",text=${P.luaStr(text)}})
     Wowie.Render()
     WowieMessageText1:SetFocus()
     WowieMessageText1:HighlightText(4, 16)
@@ -1582,19 +1619,128 @@ test('wrapped replies contain their painted text and actions after width changes
     table.insert(WowieDB.chats[1].history, {role="assistant",text=${P.luaStr(text)},denied={"WebSearch"}})
     Wowie.Toggle(true)
   `);
-  const extent = () => vm.num('(function() local b=WowieMessageText2; local _,size=b:GetFont(); return PaintedHeight(b:GetText(),b:GetWidth(),size,b:GetSpacing()) end)()');
-  assert.ok(vm.num('WowieMessageText2:GetHeight()') >= extent(), 'the entire painted reply fits its selectable region');
-  assert.ok(vm.num('WowieMessageText2:GetParent():GetHeight()') >= extent() + 30, 'permission controls have room below the painted text');
-  assert.equal(vm.evaluate('WowieMessageText2:GetText()'), text, 'measurement escapes cannot alter selectable text');
+  vm.run(`
+    function ReplyCard(i) return _G["WowieMessageCopy" .. i]:GetParent() end
+    function CheckPaintedReply(i)
+      local card = ReplyCard(i)
+      local total = 0
+      for _, block in ipairs(card.body.blocks) do
+        if block.body and block.body:IsShown() then
+          local body = block.body
+          local _, size = body:GetFont()
+          local painted = PaintedHeight(body:GetText(),body:GetWidth(),size,body:GetSpacing())
+          assert(body:GetHeight() >= painted, "a formatted block clips its glyphs")
+          total = total + painted
+        end
+      end
+      assert(card.body:GetHeight() >= total, "reply container clips its blocks")
+      assert(card:GetHeight() >= card.body:GetHeight() + 40, "header/actions overlap reply")
+    end
+    CheckPaintedReply(2)
+  `);
+  assert.equal(vm.evaluate('WowieDB.chats[1].history[2].text'), text, 'formatted layout must not rewrite the source');
   vm.run('table.insert(WowieDB.chats[1].history, {role="user",text="next message"})');
   for (const width of [280, 700, 420]) {
-    vm.run(`STUB.replyWidth=${width}; Wowie.Render()`);
-    const painted = extent();
-    assert.ok(vm.num('WowieMessageText2:GetHeight()') >= painted, `wrapped text fits at width ${width}`);
-    assert.ok(vm.num('WowieMessageText2:GetParent():GetHeight()') >= painted, `card encloses the reply at width ${width}`);
-    assert.ok(vm.num('-WowieMessageText3:GetParent().y') >= vm.num('-WowieMessageText2:GetParent().y') + painted, 'the following message starts after the full reply');
-    assert.equal(vm.evaluate('WowieMessageText2:GetText()'), text);
+    vm.run(`STUB.replyWidth=${width}; Wowie.Render(); CheckPaintedReply(2)`);
+    assert.ok(vm.num('-ReplyCard(3).y') >= vm.num('-ReplyCard(2).y + ReplyCard(2):GetHeight()'), 'following messages start below the entire card');
+    vm.run('WowieMessageCopy2:GetScript("OnClick")(WowieMessageCopy2)');
+    assert.equal(vm.evaluate('WowieCopyBox:GetText()'), text, 'full copy retains the exact source, including the URL');
   }
+});
+
+test('conversation sidebar and reading preview preserve drafts, history and transport state', () => {
+  const vm = newVM();
+  login(vm);
+  vm.run(`
+    Wowie.Toggle(true)
+    table.insert(WowieDB.chats[1].history,{role="assistant",text="A readable answer."})
+    Wowie.Render()
+    WowieInput:SetText("keep this draft")
+    BEFORE_ID = WowieDB.lastSeq
+    BEFORE_HISTORY = #WowieDB.chats[1].history
+    WowieMessageText1:SetFocus()
+    WowieMessageText1:HighlightText(2,8)
+    WowieToggleSidebar:GetScript("OnClick")(WowieToggleSidebar)
+  `);
+  assert.equal(vm.evaluate('WowieConversations:IsShown()'), 'false');
+  assert.equal(vm.num('WowieContentEdge.x'), 0);
+  assert.equal(vm.evaluate('WowieInput:GetText()'), 'keep this draft');
+  assert.equal(vm.evaluate('WowieMessageText1:HasFocus()'), 'true');
+  assert.equal(vm.num('WowieMessageText1.highlightStart'), 2);
+  vm.run(`
+    Wowie.ShowDefaults()
+    WowieReadingSize16:GetScript("OnClick")(WowieReadingSize16)
+    WowiePreviewFormatting:GetScript("OnClick")(WowiePreviewFormatting)
+  `);
+  assert.equal(vm.evaluate('WowieReplyPreview:IsShown()'), 'true');
+  assert.equal(vm.evaluate('WowieDefaults:IsShown()'), 'false', 'preview replaces Settings instead of stacking over it');
+  assert.equal(vm.num('WowieDB.lastSeq'), vm.num('BEFORE_ID'), 'preview never sends a request');
+  assert.equal(vm.num('#WowieDB.chats[1].history'), vm.num('BEFORE_HISTORY'), 'preview is not a fake chat message');
+  assert.notEqual(vm.num('WowieDB.settings.replyFontSize'), 16, 'appearance preview is not a saved setting');
+  vm.run('WowieReplyPreviewClose:GetScript("OnClick")(WowieReplyPreviewClose)');
+  assert.equal(vm.evaluate('WowieDefaults:IsShown()'), 'true');
+  assert.equal(vm.evaluate('WowieReadingSize16.isSelected'), 'true', 'Back preserves the unsaved reading choice');
+  vm.run('WowieDefaultsCancel:GetScript("OnClick")(WowieDefaultsCancel)');
+  assert.equal(vm.evaluate('WowieReplyPreview:IsShown()'), 'false');
+  vm.run('Wowie.ShowDefaults(); WowieReadingSize16:GetScript("OnClick")(WowieReadingSize16); WowieDefaultsSave:GetScript("OnClick")(WowieDefaultsSave)');
+  assert.equal(vm.num('WowieDB.settings.replyFontSize'), 16);
+  assert.equal(vm.evaluate('WowieInput:GetText()'), 'keep this draft');
+  assert.equal(vm.num('WowieDB.lastSeq'), vm.num('BEFORE_ID'));
+  vm.run('WowieToggleSidebar:GetScript("OnClick")(WowieToggleSidebar)');
+  assert.equal(vm.evaluate('WowieConversations:IsShown()'), 'true');
+});
+
+test('full pixel frames yield between bounded paint slices and publish only a complete checksummed packet', () => {
+  const vm = newVM();
+  connectFast(vm);
+  vm.run(`
+    PAINT_CLOCK, PAINT_COLORS, PAINT_CREATED = 0, 0, 0
+    debugprofilestop = function() return PAINT_CLOCK end
+    local function instrument(t)
+      local color = t.SetColorTexture
+      t.SetColorTexture = function(self, ...)
+        PAINT_CLOCK, PAINT_COLORS = PAINT_CLOCK + 0.05, PAINT_COLORS + 1
+        return color(self, ...)
+      end
+    end
+    for _, t in ipairs(WowieStrip.textures) do instrument(t) end
+    local create = WowieStrip.CreateTexture
+    WowieStrip.CreateTexture = function(self, ...)
+      PAINT_CLOCK, PAINT_CREATED = PAINT_CLOCK + 0.1, PAINT_CREATED + 1
+      local t = create(self, ...); instrument(t); return t
+    end
+  `);
+  chooseDisplay(vm, 'quiet');
+  assert.ok(vm.num('PAINT_CLOCK') <= 4.4, 'starting an upload cannot paint the whole canvas synchronously');
+  assert.equal(decodeStrip(vm, false), null, 'the first partial canvas stays hidden');
+  let frames = 0;
+  while (vm.evaluate('WowieStripPainter:GetScript("OnUpdate") ~= nil') === 'true') {
+    const before = vm.num('PAINT_CLOCK');
+    vm.run('STUB.Advance(1 / 60)');
+    assert.ok(vm.num('PAINT_CLOCK') - before <= 4.4, 'each paint slice stays within the time budget plus one 16-cell check batch');
+    if (vm.evaluate('WowieStripPainter:GetScript("OnUpdate") ~= nil') === 'true') assert.equal(decodeStrip(vm, false), null);
+    assert.ok(++frames < 1000, 'a full frame must eventually publish instead of restarting its paint');
+  }
+  const packet = decodeStrip(vm, false);
+  assert.equal(Buffer.byteLength(packet.text), 3200);
+  assert.equal(P.jobsFromStrip(packet.id, packet.text)[0].calibration, 'quiet');
+  const visibleAt = vm.num('GetTime()');
+  vm.run('STUB.Advance(0.09)');
+  assert.deepEqual(decodeStrip(vm, false), packet, 'the completed canvas remains visible long enough for native capture');
+  assert.ok(vm.num('GetTime()') >= visibleAt + 0.09);
+});
+
+test('cancelling an upload during painting cannot publish the cancelled request later', () => {
+  const vm = newVM();
+  connectFast(vm);
+  vm.run(`WowieDB.settings.context = false; Wowie.Send(${P.luaStr('long message '.repeat(200))})`);
+  assert.ok(vm.num('WowieDB.chats[1].pendingId'));
+  assert.equal(decodeStrip(vm, false), null);
+  assert.equal(vm.evaluate('WowieStripPainter:GetScript("OnUpdate") ~= nil'), 'true');
+  vm.run('SlashCmdList.WOWIE("cancel"); for i=1,16 do STUB.RenderFrame() end');
+  assert.equal(vm.evaluate('WowieDB.chats[1].pendingId'), null);
+  assert.equal(vm.evaluate('WowieStripPainter:GetScript("OnUpdate")'), null);
+  assert.equal(decodeStrip(vm, false), null);
 });
 
 test('readiness acknowledges promptly without scheduled or cached hints consuming idle slots', () => {
@@ -1610,7 +1756,7 @@ test('readiness acknowledges promptly without scheduled or cached hints consumin
 test('negotiated fast uploads preserve complete selected data and stop on queued full receipt', () => {
   const vm = newVM(true);
   connectFast(vm);
-  vm.run(`C_Container = {
+  vm.run(`WowieContext.SetDelivery("full"); C_Container = {
       GetContainerNumSlots=function(bag) return bag == 0 and 96 or 0 end,
       GetContainerItemInfo=function(bag,slot) return {itemID=20000+slot,stackCount=slot,hyperlink="item:" .. (20000+slot)} end,
     }
@@ -1622,18 +1768,22 @@ test('negotiated fast uploads preserve complete selected data and stop on queued
   const receiver = new ContextProtocol.Transfers();
   let complete, parts;
   for (let i = 0; i < 200 && !complete; i++) {
-    for (const packet of P.jobsFromStrip(0, decodeStrip(vm).text)) {
-      if (!packet.data) continue;
-      parts = packet.parts;
-      const result = receiver.add(packet);
-      if (result.text) complete = result.text;
+    const frame = decodeStrip(vm, false);
+    if (frame) {
+      for (const packet of P.jobsFromStrip(0, frame.text)) {
+        if (!packet.data) continue;
+        parts = packet.parts;
+        const result = receiver.add(packet);
+        if (result.text) complete = result.text;
+      }
     }
     if (!complete) vm.run('STUB.Advance(0.05)');
   }
   assert.ok(complete, 'fast pacing must deliver all selected data rather than clipping it');
   assert.equal(complete, vm.evaluate('WowieDB.chats[1].request.profile'));
-  // The first data frame also waits for the service ticker's phase; capture samples every 50ms.
-  assert.ok(vm.num('GetTime()') - start <= (parts + 1) * 0.1 + 0.051, 'a complete upload must follow negotiated 100ms pacing, including startup and capture sampling');
+  // A 3,200-byte frame takes at most five 2,048-cell slices. The first
+  // slice is immediate; up to four 60Hz frames precede its capture hold.
+  assert.ok(vm.num('GetTime()') - start <= (parts + 1) * (0.1 + 4 / 60) + 0.051, 'all selected data must arrive within the bounded paint and negotiated capture periods');
   const flags = P.parseFlags(original.flags);
   nextSlot(vm, `{now=time(),replies={{chat=${P.luaStr(original.chat)},id=${original.id},nonce=${P.luaStr(flags.nonce)},status="queued",text="Waiting for a worker"}},${FAST_TRANSPORT}}`);
   wake(vm);

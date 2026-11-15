@@ -57,6 +57,7 @@ function WorldMapFrame:GetCanvas() return canvas end
 function WorldMapFrame:GetMapID() return STUB.shownMap or 1432 end
 function WorldMapFrame:GetCanvasScale() return 1 end
 function WorldMapFrame:OnMapChanged() end
+function WorldMapFrame:PanAndZoomTo(x, y) STUB.mapFocus = { map = self:GetMapID(), x = x, y = y } end
 function OpenWorldMap(mapID) STUB.shownMap = mapID; WorldMapFrame:Show(); WorldMapFrame:OnMapChanged() end
 local T = getmetatable(canvas).__index
 MINING, HERBALISM = "Mining", "Herbalism"
@@ -88,12 +89,65 @@ function Methods.SetScale(self, s) self.scale = s end
 function Methods.SetAllPoints(self, rel) if rel then self.width, self.height = rel.width, rel.height end end
 function Methods.GetFrameLevel(self) return self.level or 1 end
 function Methods.SetFrameLevel(self, l) self.level = l end
+function Methods.SetFrameStrata(self, strata) self.strata = strata end
+function Methods.StartMoving(self) self.moving = true end
+function Methods.StopMovingOrSizing(self) self.moving = false end
+local setPoint = Methods.SetPoint
+function Methods.SetPoint(self, point, relative, relativePoint, x, y)
+  if type(relative) == "number" then
+    x, y, relative, relativePoint = relative, relativePoint, self.parent, point
+  end
+  self.anchors = self.anchors or {}
+  self.anchors[point] = { relative or self.parent or UIParent, relativePoint or point, x or 0, y or 0 }
+  setPoint(self, point, relative, relativePoint, x, y)
+end
+function Methods.ClearAllPoints(self) self.anchors = {} end
+local fractions = {
+  TOPLEFT = {0, 0}, TOP = {.5, 0}, TOPRIGHT = {1, 0},
+  LEFT = {0, .5}, CENTER = {.5, .5}, RIGHT = {1, .5},
+  BOTTOMLEFT = {0, 1}, BOTTOM = {.5, 1}, BOTTOMRIGHT = {1, 1},
+}
+function Bounds(frame)
+  if frame == UIParent then return { x = 0, y = 0, w = frame:GetWidth(), h = frame:GetHeight() } end
+  local axes = { {}, {} }
+  for point, anchor in pairs(frame.anchors or {}) do
+    local r, f, rf = Bounds(anchor[1]), fractions[point], fractions[anchor[2]]
+    axes[1][#axes[1] + 1] = { f[1], r.x + rf[1] * r.w + anchor[3] }
+    axes[2][#axes[2] + 1] = { f[2], r.y + rf[2] * r.h - anchor[4] }
+  end
+  local result = {}
+  for axis, anchors in ipairs(axes) do
+    local size = axis == 1 and frame:GetWidth() or frame:GetHeight()
+    for _, a in ipairs(anchors) do
+      for _, b in ipairs(anchors) do
+        if a[1] ~= b[1] then size = (b[2] - a[2]) / (b[1] - a[1]) end
+      end
+    end
+    result[axis == 1 and "w" or "h"] = size
+    result[axis == 1 and "x" or "y"] = anchors[1] and anchors[1][2] - anchors[1][1] * size or 0
+  end
+  return result
+end
+function Disjoint(a, b)
+  a, b = Bounds(a), Bounds(b)
+  return a.x + a.w <= b.x or b.x + b.w <= a.x or a.y + a.h <= b.y or b.y + b.h <= a.y
+end
+function Inside(child, parent)
+  local c, p = Bounds(child), Bounds(parent)
+  return c.x >= p.x and c.y >= p.y and c.x + c.w <= p.x + p.w and c.y + c.h <= p.y + p.h
+end
+local showPopup = StaticPopup_Show
+function StaticPopup_Show(which, text, second, data)
+  local popup = showPopup(which, text, second, data)
+  STUB.popup.text = text
+  return popup
+end
 `;
   stub = stub.replace('local function NewObject(', 'function NewObjectPublic(').replace(/NewObject\(/g, 'NewObjectPublic(');
   run(stub);
   run(MAP_STUB);
   if (initialState) run(initialState);
-  for (const f of ['Codec.lua', 'Inbox.lua', 'Wowie.lua', 'Context.lua', 'ContextUI.lua', 'Map.lua']) run(fs.readFileSync(path.join(ADDON, f), 'utf8'), 'Wowie');
+  for (const f of ['Codec.lua', 'Inbox.lua', 'Wowie.lua', 'ReplyView.lua', 'Context.lua', 'ContextUI.lua', 'Map.lua']) run(fs.readFileSync(path.join(ADDON, f), 'utf8'), 'Wowie');
   run('STUB.FireEvent("ADDON_LOADED", "Wowie"); STUB.FireEvent("PLAYER_LOGIN")');
   return { run, evaluate, num };
 }
@@ -278,19 +332,25 @@ test('native waypoint ownership survives reload without treating the addon pin a
   assert.equal(reloaded.num('C_Map.GetUserWaypoint().position.y'), 0.25);
 });
 
-function installRouter(vm) {
+function installRouter(vm, version = 1) {
   vm.run(`
     STUB.routeEnded = {}
     ShortestPathForever = { API = {
-      version = 1,
+      version = ${version},
       Navigate = function(owner, map, x, y, title, kind)
         if InCombatLockdown() then return false end
         STUB.routeEnded[owner] = nil
         STUB.route = { owner = owner, map = map, x = x, y = y, title = title, kind = kind }
         return true
       end,
-      CurrentStop = function(owner) return STUB.route and STUB.route.owner == owner and 1 or nil end,
-      Ended = function(owner) return STUB.routeEnded[owner] end,
+      CurrentStop = function(owner)
+        if STUB.route and STUB.route.owner == owner then return 1 end
+        return nil, ${version === 2 ? '"none"' : 'nil'}
+      end,
+      Ended = function(owner)
+        if STUB.routeEnded[owner] then return STUB.routeEnded[owner], GetTime() end
+        return nil, ${version === 2 ? '"none"' : 'nil'}
+      end,
       Active = function() return STUB.route ~= nil end,
       Cancel = function(owner)
         if not STUB.route or STUB.route.owner ~= owner then return false end
@@ -298,6 +358,63 @@ function installRouter(vm) {
       end,
     } }
   `);
+}
+
+test('Navigate uses installed ShortestPathForever v2 instead of silently falling back to a native pin', () => {
+  const vm = newVM();
+  vm.run(`WowieMap.Sync(${LAYER}); WowieMap.ShowNavigation()`);
+  assert.equal(vm.evaluate('WowieMap.GetNavigationState().status'), 'native');
+  installRouter(vm, 2);
+  click(vm, 'WowieNavigationRow2Navigate');
+  assert.equal(vm.evaluate('WowieMap.GetNavigationState().status'), 'route');
+  assert.equal(vm.evaluate('STUB.route.owner'), 'Wowie');
+  assert.equal(vm.num('STUB.route.map'), 1432);
+  assert.equal(vm.num('STUB.route.x'), 0.6);
+  assert.equal(vm.num('STUB.route.y'), 0.5);
+  assert.equal(vm.evaluate('WowieMapDB.waypoint'), null, 'native fallback must not compete with the dotted route');
+  assert.equal(vm.evaluate('C_Map.GetUserWaypoint()'), null);
+  assert.equal(vm.evaluate('WowieMap.GetNavigationState().message'), '');
+  vm.run('STUB.route=nil; STUB.routeEnded.Wowie="arrived"; WowieMap.UpdateNavigator()');
+  assert.equal(vm.num('WowieMap.GetNavigationState().active.index'), 3);
+  assert.equal(vm.num('STUB.route.x'), 0.55);
+  click(vm, 'WowieNavigationStop');
+  assert.equal(vm.evaluate('STUB.route'), null);
+  assert.equal(vm.evaluate('WowieMap.GetNavigationState().active'), null);
+  click(vm, 'WowieNavigationRow1Navigate');
+  vm.run('STUB.route={owner="OtherAddon"}; STUB.routeEnded.Wowie="replaced"; WowieMap.UpdateNavigator()');
+  assert.equal(vm.evaluate('WowieMap.GetNavigationState().active'), null);
+  assert.equal(vm.evaluate('STUB.route.owner'), 'OtherAddon', 'v2 cancellation cannot erase another addon route');
+});
+
+test('v2 navigation selected in combat waits and then starts the requested dotted route', () => {
+  const vm = newVM();
+  installRouter(vm, 2);
+  vm.run(`WowieMap.Sync(${LAYER}); WowieMap.Stop(); WowieMap.ShowNavigation()
+    STUB.combat=true; function InCombatLockdown() return STUB.combat end`);
+  click(vm, 'WowieNavigationRow3Navigate');
+  assert.equal(vm.evaluate('WowieMap.GetNavigationState().status'), 'pending');
+  assert.equal(vm.evaluate('STUB.route'), null);
+  assert.equal(vm.evaluate('C_Map.GetUserWaypoint()'), null);
+  vm.run('STUB.combat=false; STUB.FireEvent("PLAYER_REGEN_ENABLED")');
+  assert.equal(vm.evaluate('WowieMap.GetNavigationState().status'), 'route');
+  assert.equal(vm.num('STUB.route.x'), 0.55);
+});
+
+for (const failure of ['unsupported', 'incomplete', 'declined']) {
+test(`waypoint-only fallback reports ${failure} routing rather than implying dotted guidance`, () => {
+  const vm = newVM();
+  installRouter(vm, failure === 'unsupported' ? 999 : 2);
+  if (failure === 'incomplete') vm.run('ShortestPathForever.API.Navigate=nil');
+  if (failure === 'declined') vm.run('ShortestPathForever.API.Navigate=function() return false end');
+  vm.run(`WowieMap.Sync(${LAYER}); WowieMap.ShowNavigation()`);
+  click(vm, 'WowieNavigationRow2Navigate');
+  assert.equal(vm.evaluate('WowieMap.GetNavigationState().status'), 'native');
+  assert.equal(vm.evaluate('STUB.route'), null);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.6);
+  const reason = vm.evaluate('WowieMap.GetNavigationState().message');
+  assert.match(reason, new RegExp(failure, 'i'));
+  assert.ok(vm.evaluate('WowieNavigationActive.status:GetText()').includes(reason), 'the panel exposes the routing limitation');
+});
 }
 
 test('dotted routing drives arrival, advances the active stop, and yields to another route owner', () => {
@@ -436,7 +553,7 @@ test('virtual destination buttons resolve rebound rows after scroll, filter and 
       { name = "internal-collection", title = "Saved places", points = points } } })
     WowieMap.ShowNavigation()
     FIRST_ROW = WowieNavigationPanel.rows[1]
-    WowieNavigationScroll:SetVerticalScroll(999 * 72)`);
+    WowieNavigationScroll:SetVerticalScroll(999 * 124)`);
   assert.equal(vm.evaluate('WowieMapDB.nav'), null, 'browsing does not activate an unordered collection');
   assert.ok(vm.num('#WowieNavigationPanel.rows') < 20, 'only viewport-sized rows are allocated');
   assert.equal(vm.evaluate('WowieNavigationPanel.rows[1] == FIRST_ROW'), 'true');
@@ -530,7 +647,7 @@ test('router UI controls defer during combat, finish chosen unordered points, an
 test('a deferred route yields when another owner starts tracking during combat', () => {
   const vm = newVM();
   installRouter(vm);
-  vm.run(`WowieMap.Sync(${LAYER}); WowieMap.ShowNavigation()
+  vm.run(`WowieMap.Sync(${LAYER}); WowieMap.Stop(); WowieMap.ShowNavigation()
     STUB.combat = true; function InCombatLockdown() return STUB.combat == true end`);
   click(vm, 'WowieNavigationRow1Navigate');
   vm.run('STUB.route = { owner = "OtherAddon" }; STUB.combat = false; STUB.FireEvent("PLAYER_REGEN_ENABLED")');
@@ -740,6 +857,9 @@ test('delete confirmation targets its original point after row recycling and ref
     WowieNavigationSearch:SetText("2. Copper")`);
   click(vm, 'WowieNavigationRow1Delete');
   assert.equal(vm.num('#WowieMap.GetNavigationState().layers[1].points'), 3, 'confirmation must not delete immediately');
+  assert.match(vm.evaluate('STUB.popup.text'), /2\. Copper[\s\S]*Copper loop[\s\S]*Loch Modan/);
+  assert.equal(vm.evaluate('STUB.popup.data.layer'), 'mining');
+  assert.equal(vm.num('STUB.popup.data.index'), 2);
   vm.run('WowieNavigationSearch:SetText("3. Tin")');
   click(vm, 'WowieNavigationRow1Navigate');
   vm.run('StaticPopupDialogs.WOWIE_MAP_DELETE.OnAccept({}, STUB.popup.data)');
@@ -760,6 +880,74 @@ test('delete confirmation targets its original point after row recycling and ref
   assert.equal(vm.num('#WowieNavigationPanel.filtered'), 0, 'source updates must not resurrect the earlier deletion');
 });
 
+test('navigation and point editor fit small clients with full-width labels and disjoint actions', () => {
+  const vm = newVM();
+  vm.run(`WowieMap.Sync(${LAYER}); WowieMap.Stop()`);
+  for (const [width, height] of [[1280, 900], [800, 600], [640, 480]]) {
+    vm.run(`UIParent:SetSize(${width}, ${height}); WowieMap.ShowNavigation()`);
+    assert.ok(vm.num('WowieNavigationPanel:GetWidth() * WowieNavigationPanel:GetEffectiveScale()') <= width - 24);
+    assert.ok(vm.num('WowieNavigationPanel:GetHeight() * WowieNavigationPanel:GetEffectiveScale()') <= height - 24);
+    for (const id of ['Active', 'Previous', 'Next', 'Stop', 'Map', 'Visibility', 'Add', 'Close', 'Search', 'Clear', 'Scroll']) {
+      assert.equal(vm.evaluate(`Inside(WowieNavigation${id}, WowieNavigationPanel)`), 'true', id);
+    }
+    for (const [a, b] of [['Add', 'Close'], ['Previous', 'Next'], ['Next', 'Stop'], ['Stop', 'Map'], ['Map', 'Visibility'], ['Active', 'Search'], ['Search', 'Clear'], ['Search', 'Scroll']]) {
+      assert.equal(vm.evaluate(`Disjoint(WowieNavigation${a}, WowieNavigation${b})`), 'true', `${a}/${b}`);
+    }
+    vm.run('ROW = WowieNavigationPanel.rows[1]');
+    assert.ok(vm.num('Bounds(ROW.label).w / Bounds(ROW).w') > 0.9, 'buttons no longer consume the destination label width');
+    for (const control of ['label', 'detail', 'navigate', 'map', 'visibility', 'delete']) {
+      assert.equal(vm.evaluate(`Inside(ROW.${control}, ROW)`), 'true', control);
+    }
+    for (const [a, b] of [['label', 'detail'], ['detail', 'navigate'], ['navigate', 'map'], ['map', 'visibility'], ['visibility', 'delete']]) {
+      assert.equal(vm.evaluate(`Disjoint(ROW.${a}, ROW.${b})`), 'true', `${a}/${b}`);
+    }
+    assert.equal(vm.evaluate('WowieMap.GetNavigationState().active'), null, 'layout does not start navigation');
+    click(vm, 'WowieNavigationAdd');
+    assert.ok(vm.num('WowieNavigationPointEditor:GetWidth() * WowieNavigationPointEditor:GetEffectiveScale()') <= width - 24);
+    assert.ok(vm.num('WowieNavigationPointEditor:GetHeight() * WowieNavigationPointEditor:GetEffectiveScale()') <= height - 24);
+    assert.ok(vm.num('WowieNavigationPointEditor:GetFrameLevel()') > vm.num('WowieNavigationPanel:GetFrameLevel()'));
+    for (const id of ['Name', 'Map', 'X', 'Y', 'Targets', 'Current', 'Pin', 'Save', 'Cancel']) {
+      assert.equal(vm.evaluate(`Inside(WowieNavigationPoint${id}, WowieNavigationPointEditor)`), 'true', id);
+    }
+    for (const [a, b] of [['Name', 'Map'], ['Targets', 'Map'], ['Map', 'X'], ['X', 'Y'], ['Targets', 'Current'], ['Current', 'Pin'], ['Pin', 'Save'], ['Save', 'Cancel']]) {
+      assert.equal(vm.evaluate(`Disjoint(WowieNavigationPoint${a}, WowieNavigationPoint${b})`), 'true', `${a}/${b}`);
+    }
+    assert.equal(vm.evaluate('Disjoint(WowieNavigationPointTarget1, WowieNavigationPointTarget2)'), 'true', 'target buttons have a full-height row pitch');
+    assert.equal(vm.evaluate('Disjoint(WowieNavigationPointEditor.error, WowieNavigationPointSave)'), 'true', 'validation text cannot cover save');
+    click(vm, 'WowieNavigationPointCancel');
+  }
+});
+
+test('navigation modal headers alone drag, resizing preserves editor fields and closing clears focus', () => {
+  const vm = newVM();
+  vm.run(`WowieMap.Sync(${LAYER}); WowieMap.ShowNavigation()`);
+  click(vm, 'WowieNavigationAdd');
+  vm.run(`
+    WowieNavigationPointName:SetText("Keep this destination")
+    WowieNavigationPointTarget2:GetScript("OnClick")(WowieNavigationPointTarget2)
+    WowieNavigationPointX:SetText("42")
+    UIParent:SetSize(600, 440)
+    for _, hook in ipairs(UIParent.hooks.OnSizeChanged or {}) do hook(UIParent) end
+  `);
+  for (const [panel, header] of [['WowieNavigationPanel', 'WowieNavigationHeader'], ['WowieNavigationPointEditor', 'WowieNavigationPointHeader']]) {
+    assert.equal(vm.evaluate(`${panel}.strata`), 'FULLSCREEN_DIALOG');
+    assert.equal(vm.evaluate(`${panel}:GetScript("OnDragStart")`), null);
+    assert.ok(vm.num(`${panel}:GetWidth() * ${panel}:GetEffectiveScale()`) <= 576);
+    assert.ok(vm.num(`${panel}:GetHeight() * ${panel}:GetEffectiveScale()`) <= 416);
+    vm.run(`${header}:GetScript("OnDragStart")(${header})`);
+    assert.equal(vm.evaluate(`${panel}.moving`), 'true');
+    vm.run(`${header}:GetScript("OnDragStop")(${header})`);
+    assert.equal(vm.evaluate(`${panel}.moving`), 'false');
+  }
+  assert.equal(vm.evaluate('WowieNavigationPointName:GetText()'), 'Keep this destination');
+  assert.equal(vm.evaluate('WowieNavigationPointX:GetText()'), '42');
+  assert.equal(vm.evaluate('WowieNavigationPointEditor.target'), 'mining');
+  assert.equal(vm.evaluate('WowieMap.GetNavigationState().active.index'), '1');
+  click(vm, 'WowieNavigationClose');
+  assert.equal(vm.evaluate('WowieNavigationPointEditor:IsShown()'), 'false');
+  assert.equal(vm.evaluate('STUB.focus'), null);
+});
+
 test('deleting a repeated route stop preserves its other occurrence across bridge epochs and reload', () => {
   const source = `{ epoch = "repeat", version = 1, layers = {
     { name = "loop", title = "Repeated crossing", ordered = true, loop = true, points = {
@@ -774,7 +962,7 @@ test('deleting a repeated route stop preserves its other occurrence across bridg
   vm.run(`local m = ${source}; m.epoch = "new-process"; m.layers[1].title = "Updated crossing"
     WowieMap.Sync(m); WowieMap.Stop()`);
   const reloaded = newVM(savedMap(vm));
-  reloaded.run(`WowieMap.Sync(${source}); WowieMap.ShowNavigation()`);
+  reloaded.run(`WowieMap.Sync(${source}); WowieMap.Stop(); WowieMap.ShowNavigation()`);
   assert.equal(reloaded.num('#WowieMap.GetNavigationState().layers[1].points'), 3);
   click(reloaded, 'WowieNavigationRow1Navigate');
   assert.equal(reloaded.num('C_Map.GetUserWaypoint().position.x'), 0.1);
@@ -808,4 +996,98 @@ test('deleting active points releases only owned waypoints and dotted routes', (
   routed.run('StaticPopupDialogs.WOWIE_MAP_DELETE.OnAccept({}, STUB.popup.data)');
   assert.equal(routed.evaluate('WowieMap.GetNavigationState().active'), null);
   assert.equal(routed.evaluate('STUB.route.owner'), 'OtherAddon');
+});
+
+for (const backend of ['native', 1, 2]) {
+test(`an active destination button toggles navigation off without deleting points (${backend})`, () => {
+  const vm = newVM();
+  if (backend !== 'native') installRouter(vm, backend);
+  vm.run(`C_Map.SetUserWaypoint(UiMapPoint.CreateFromCoordinates(1432,0.12,0.23))
+    C_SuperTrack.SetSuperTrackedUserWaypoint(true)
+    WowieMap.Sync(${LAYER}); WowieMap.Stop(); WowieMap.ShowNavigation()`);
+  click(vm, 'WowieNavigationRow2Navigate');
+  assert.equal(vm.num('WowieMap.GetNavigationState().active.index'), 2);
+  click(vm, 'WowieNavigationRow2Navigate');
+  assert.equal(vm.evaluate('WowieMap.GetNavigationState().active'), null);
+  assert.equal(vm.evaluate('STUB.route'), null);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.12, 'stopping restores only the previous player waypoint');
+  assert.equal(vm.num('#WowieMap.GetNavigationState().layers[1].points'), 3);
+  click(vm, 'WowieNavigationRow2Navigate');
+  assert.equal(vm.num('WowieMap.GetNavigationState().active.index'), 2, 'the stopped destination can be started again');
+  click(vm, 'WowieNavigationRow3Navigate');
+  assert.equal(vm.num('WowieMap.GetNavigationState().active.index'), 3, 'a different destination starts instead of stopping');
+});
+}
+
+test('stopping the active row cancels deferred guidance without taking a replacement route', () => {
+  const vm = newVM();
+  installRouter(vm, 2);
+  vm.run(`WowieMap.Sync(${LAYER}); WowieMap.Stop(); WowieMap.ShowNavigation()
+    STUB.combat=true; function InCombatLockdown() return STUB.combat end`);
+  click(vm, 'WowieNavigationRow2Navigate');
+  assert.equal(vm.evaluate('WowieMap.GetNavigationState().status'), 'pending');
+  vm.run('STUB.route={owner="OtherAddon"}');
+  click(vm, 'WowieNavigationRow2Navigate');
+  vm.run('STUB.combat=false; STUB.FireEvent("PLAYER_REGEN_ENABLED")');
+  assert.equal(vm.evaluate('WowieMap.GetNavigationState().active'), null);
+  assert.equal(vm.evaluate('STUB.route.owner'), 'OtherAddon');
+});
+
+test('On map focuses destination coordinates without changing guidance or the message draft', () => {
+  const vm = newVM();
+  vm.run(`WowieMap.Sync(${LAYER}); WowieMap.Navigate("mining",2)
+    Wowie.Toggle(true); WowieInput:SetText("keep this message")
+    WowieMap.ShowNavigation(); WorldMapFrame:Hide()`);
+  click(vm, 'WowieNavigationRow3Map');
+  vm.run('STUB.Advance(0)');
+  assert.equal(vm.num('STUB.mapFocus.map'), 1432);
+  assert.equal(vm.num('STUB.mapFocus.x'), 0.55);
+  assert.equal(vm.num('STUB.mapFocus.y'), 0.7);
+  assert.equal(vm.num('WowieMap.GetNavigationState().active.index'), 2);
+  assert.equal(vm.num('C_Map.GetUserWaypoint().position.x'), 0.6, 'view focus cannot replace the active waypoint');
+  assert.equal(vm.evaluate('WowieNavigationPanel:IsShown()'), 'false', 'the navigation window must not cover the destination map');
+  assert.equal(vm.evaluate('WowieFrame:IsShown()'), 'false');
+  assert.equal(vm.evaluate('WowieMini:IsShown()'), 'true');
+  assert.equal(vm.evaluate('WowieInput:GetText()'), 'keep this message');
+});
+
+test('stitched OpenMap focuses through its public world-coordinate API and preserves the route', () => {
+  const vm = newVM();
+  installRouter(vm, 2);
+  vm.run(`WowieMap.Sync(${LAYER}); WowieMap.Navigate("mining",2); WowieMap.ShowNavigation()
+    ROUTE=STUB.route; NATIVE_PANS=0
+    WorldMapFrame.PanAndZoomTo=function() NATIVE_PANS=NATIVE_PANS+1; error("native pan is blocked by OpenMap") end
+    OpenMapAPI={major=1,version=4,
+      IsStitched=function() return true end,
+      WorldFromMap=function(map,x,y) if map==1432 then return 0.2+x*0.1,0.3+y*0.2 end end,
+      GetView=function() return 0.5,0.5,3 end,
+      ShowWorld=function(u,v,zoom) STUB.stitchedView={u=u,v=v,zoom=zoom}; return true end
+    }`);
+  click(vm, 'WowieNavigationRow3Map');
+  vm.run('STUB.Advance(0)');
+  assert.equal(vm.num('STUB.stitchedView.u'), 0.255);
+  assert.equal(vm.num('STUB.stitchedView.v'), 0.44);
+  assert.ok(vm.num('STUB.stitchedView.zoom') >= 5, 'destination focus should show zone-scale detail, not the whole world');
+  assert.equal(vm.num('NATIVE_PANS'), 0);
+  assert.equal(vm.evaluate('STUB.route==ROUTE'), 'true');
+  vm.run('WowieMap.ShowNavigation()');
+  click(vm, 'WowieNavigationMap');
+  vm.run('STUB.Advance(0)');
+  assert.equal(vm.num('STUB.stitchedView.u'), 0.26, 'the active-card map action focuses the active destination');
+});
+
+test('a deferred map focus cannot reopen a closed map or overwrite a newer focus request', () => {
+  const vm = newVM();
+  vm.run(`WowieMap.Sync(${LAYER}); WowieMap.Stop(); WowieMap.ShowNavigation()`);
+  click(vm, 'WowieNavigationRow1Map');
+  vm.run('WowieMap.ShowNavigation()');
+  click(vm, 'WowieNavigationRow3Map');
+  vm.run('STUB.Advance(0)');
+  assert.equal(vm.num('STUB.mapFocus.x'), 0.55);
+  vm.run('WowieMap.ShowNavigation(); STUB.mapFocus=nil');
+  click(vm, 'WowieNavigationRow1Map');
+  vm.run('WorldMapFrame:Hide(); STUB.Advance(0)');
+  assert.equal(vm.evaluate('STUB.mapFocus'), null);
+  assert.equal(vm.evaluate('WorldMapFrame:IsShown()'), 'false');
+  assert.equal(vm.evaluate('WowieMap.GetNavigationState().active'), null);
 });

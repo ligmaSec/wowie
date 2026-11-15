@@ -231,9 +231,9 @@ function parseContextOutbox(src) {
 // agents.js puts it at the top of the prompt.
 const SUMMARY_MARKER = 'TL;DR:';
 const REPLY_FORMAT = [
-  'The user is talking to you from inside World of Warcraft through the wowie addon. They type in a small in-game window and your reply is shown there as plain text (markdown is not rendered), so keep replies compact and formatting simple.',
+  'The user is chatting inside World of Warcraft through Wowie. Its discussion window supports readable Markdown-style headings, paragraphs, bullet lists, numbered steps, block quotes, fenced code and labeled HTTP/HTTPS links. Use that structure naturally: short paragraphs, meaningful headings for longer answers, and steps for instructions. Do not write a wall of text or raw long URLs; use [descriptive label](https://...) for sources. Keep simple answers short without unnecessary sections. Inline emphasis is normalized for selectable native text; avoid decorative formatting, HTML and wide tables.',
   '',
-  `Only a short summary of each reply is printed into the game chat, where the user actually sees it while playing; the full reply is only visible if they open the addon window. So end EVERY reply with a final block that starts with "${SUMMARY_MARKER}" on its own line and holds one or two short lines (under about 200 characters in total) saying what you did or what the answer is, and what you need from the user if anything. Write it as plain text. Do not repeat the summary elsewhere, and put nothing after it.`,
+  `The separate game-chat echo needs a brief plain-text summary. End each reply with "${SUMMARY_MARKER}" on its own line followed by one or two lines under about 200 characters. Wowie keeps this summary in a separate disclosure rather than repeating it in the main answer. Put substantive details and sources before that summary. Do not expose internal bridge labels or claim a map marker proves navigation is active.`,
 ];
 
 // How the agent draws on the world map (see "Map layers" below and docs/MAP.md).
@@ -277,17 +277,26 @@ function systemPrompt(ctx, primer) {
   return lines.join('\n');
 }
 
-// Pull the game-chat summary out of a reply: whatever follows the last "TL;DR:"
-// marker that starts a line (bold or a heading around it is tolerated:
-// "**TL;DR:**", "## TL;DR"). The text for the window stays the whole reply, so
-// nothing the agent wrote is lost however the addon cuts the echo; without a
-// marker the summary is empty and the addon falls back to the reply's first
-// lines.
-const MARKER_RE = /(?:^|\n)[ \t]*(?:#+[ \t]*)?(?:\*\*|__)?[ \t]*TL;?DR[ \t]*:?[ \t]*(?:\*\*|__)?[ \t]*:?[ \t]*/gi;
+// Keep the original reply for history/copy. The chat echo uses only its trailing
+// summary, excluding internal bridge notes and markers inside code examples.
+const MARKER_RE = /^[ \t]*(?:#+[ \t]*)?(?:\*\*|__)?[ \t]*TL;?DR[ \t]*:?[ \t]*(?:\*\*|__)?[ \t]*:?[ \t]*/i;
 function splitSummary(text) {
   const full = String(text || '').trim();
-  const last = [...full.matchAll(MARKER_RE)].pop();
-  const summary = last ? full.slice(last.index + last[0].length).trim() : '';
+  let offset = 0, start = -1, fence = null;
+  for (const line of full.split('\n')) {
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (marker) {
+      if (!fence) fence = marker[1];
+      else if (marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = null;
+    } else if (!fence) {
+      const match = MARKER_RE.exec(line);
+      if (match) start = offset + match[0].length;
+    }
+    offset += line.length + 1;
+  }
+  let summary = start < 0 ? '' : full.slice(start).trim();
+  const note = /(?:^|\n)[ \t]*\[bridge\]/.exec(summary);
+  if (note) summary = summary.slice(0, note.index).trim();
   return { text: full, summary };
 }
 

@@ -81,6 +81,7 @@ local function db()
 	local settings = WowieDB.settings
 	if settings.context == nil then settings.context = true end
 	settings.sharing = settings.sharing or {}
+	if settings.contextDelivery ~= "full" then settings.contextDelivery = "smart" end
 	return settings
 end
 local definitions, byID, providers = {}, {}, {}
@@ -97,23 +98,32 @@ category("spells", "Player and pet spellbooks", "All spellbook skill lines, lear
 category("professions", "Professions and skills", "All profession, secondary and weapon skills; recipes when the profession window is open.", true)
 category("talents", "Talents and specialization", "Talent tabs/ranks and current specialization or trait configuration.", true)
 category("quests", "Quest log", "Visible quest-log entries, objectives and completion state; does not expand collapsed headers.", true)
-category("reputation", "Reputation", "Visible faction standings; collapsed headers are not expanded.")
-category("auras", "Player auras", "Current buffs/debuffs, possibly restricted by the client.")
-category("pet", "Pet", "Active pet identity, health, power and action bar.")
+category("reputation", "Reputation", "Visible faction standings; collapsed headers are not expanded.", true)
+category("auras", "Player auras", "Current buffs/debuffs, possibly restricted by the client.", true)
+category("pet", "Pet", "Active pet identity, health, power and action bar.", true)
 category("target", "Target and focus", "Identity, resources and inspectable state of target/focus.", false, true)
 category("group", "Party and raid", "Roster, roles, names and unit state.", false, true)
-category("currency", "Currencies", "Visible currency-list entries and balances; does not expand headers.")
-category("achievements", "Achievements", "Achievement categories, entries, criteria and points, where supported.")
-category("collections", "Collections", "Mounts, pets and toys available in the client's collection APIs.")
+category("currency", "Currencies", "Visible currency-list entries and balances; does not expand headers.", true)
+category("achievements", "Achievements", "Achievement categories, entries, criteria and points, where supported.", true)
+category("collections", "Collections", "Mounts, pets and toys available in the client's collection APIs.", true)
 category("bank", "Bank", "Personal bank slots only while the bank window is open; overlaps advanced container APIs.", false, true)
 category("mail", "Mailbox", "Inbox headers and attachments while the mail window is open. Does not grant message-body access; select the separate mail-body permission.", false, true)
 category("mail_body", "Mail message bodies (reading marks messages as read)", "Explicitly permits fetching private inbox message text while the mailbox is open. Reading marks messages as read. Separate from mail headers and advanced API namespaces; never sends, deletes or takes mail.", false, true)
 category("chat", "Chat history", "Currently buffered messages in chat frames, including private conversations.", false, true)
 category("guild", "Guild", "Cached guild roster, public/officer notes and guild information; no roster refresh request.", false, true)
 category("friends", "Friends and Battle.net", "Cached friends, presence and Battle.net identities; no refresh requests.", false, true)
-category("combat", "Combat state", "Player combat, health, power, stats, speed and threat.")
+category("combat", "Combat state", "Player combat, health, power, stats, speed and threat.", true)
 category("ui", "UI and frames", "Visible UI state and allowlisted frame getters; may overlap any character/social category.", false, true)
 category("addons", "Addon/global tables", "Inspect arbitrary raw addon/global data tables. Broad access can overlap every other category and expose saved private data.", false, true)
+category("actionbars", "Action bars and keybinds", "Global action slots, cached action details, cooldowns, charges and native/click bindings; never performs actions.", true)
+category("macros", "Private macro bodies", "Account and character macro definitions including private command text.", false, true)
+category("auctionator", "Auctionator cached prices", "Optional cached copper prices and day histories, not live auctions. Query only.", true)
+category("interaction", "Current interaction", "Currently open merchant, trainer, gossip and quest windows only.", true)
+category("travel", "Travel", "Bind location, taxi state and visible taxi destinations; never opens a map.", true)
+category("lockouts", "Cached instance lockouts", "Saved instances, encounters and world-boss lockouts already cached by the client; no refresh.", true)
+byID.auctionator.queryOnly = true
+byID.auctionator.parameters = { itemIDs = "optional dense array of 1..50 positive item IDs; exact base-item keys", limit = "1..100 (default 50)", offset = "zero-based; follow nextOffset sequentially when browsing", historyOffset = "zero-based raw day offset; follow each history field's nextOffset using the same itemIDs", historyLimit = "1..100 raw day entries per history field (default 100)" }
+local categoryAvailability
 local docsAttempted = false
 local apiIndex, schemas = {}, {}
 local function resolve(namespace, name)
@@ -219,7 +229,8 @@ local function discover()
 				if readable(f.Name, system.Name) and type(f.Returns) == "table" and #f.Returns > 0 then
 					local name = namespace and (namespace .. "." .. f.Name) or f.Name
 					local fn, owner = resolve(namespace, f.Name)
-					if trusted(fn, owner, f.Name) then apiIndex[name] = { name = name, category = id, namespace = namespace, shortName = f.Name, metadata = f, fn = fn, requiredPermission = f.Name == "GetInboxText" and "mail_body" or nil } end
+					local required = f.Name == "GetInboxText" and "mail_body" or ((f.Name == "GetMacroInfo" or f.Name == "GetMacroBody") and "macros" or nil)
+					if trusted(fn, owner, f.Name) then apiIndex[name] = { name = name, category = id, namespace = namespace, shortName = f.Name, metadata = f, fn = fn, requiredPermission = required } end
 				end
 			end
 		end
@@ -241,7 +252,9 @@ function Context.Categories()
 	for _, d in ipairs(definitions) do
 		local selected = db().sharing[d.id]
 		if selected == nil then selected = d.default end
-		result[#result + 1] = { id = d.id, label = d.label, description = d.description, sensitive = d.sensitive, enabled = selected == true }
+		local row = { id = d.id, label = d.label, description = d.description, sensitive = d.sensitive, enabled = selected == true, queryOnly = d.queryOnly or (d.id:sub(1, 4) == "api:" and true or nil), parameters = d.parameters }
+		if categoryAvailability then row.available, row.reason = categoryAvailability(d.id) end
+		result[#result + 1] = row
 	end
 	return result
 end
@@ -252,7 +265,35 @@ function Context.SetEnabled(id, enabled)
 	db().sharing[id] = enabled == true
 	return true
 end
-function Context.ResetDefaults() db().sharing = {} end
+function Context.ApplyPreset(preset)
+	if preset ~= "recommended" and preset ~= "minimal" then return false end
+	discover()
+	local selections = {}
+	for _, d in ipairs(definitions) do selections[d.id] = preset == "minimal" and (d.id == "identity" or d.id == "location") or (preset == "recommended" and d.default) end
+	db().sharing = selections
+	return true
+end
+function Context.GetPreset()
+	local recommended, minimal = true, true
+	local sharing = db().sharing
+	for _, d in ipairs(definitions) do
+		local selected = sharing[d.id]
+		if selected == nil then selected = d.default end
+		if selected ~= d.default then recommended = false end
+		if selected ~= (d.id == "identity" or d.id == "location") then minimal = false end
+	end
+	for id, selected in next, sharing do
+		if selected == true and not byID[id] then recommended = false; minimal = false end
+	end
+	return recommended and "recommended" or minimal and "minimal" or "custom"
+end
+function Context.GetDelivery() return db().contextDelivery end
+function Context.SetDelivery(mode)
+	if mode ~= "smart" and mode ~= "full" then return false end
+	db().contextDelivery = mode
+	return true
+end
+function Context.ResetDefaults() return Context.ApplyPreset("recommended") end
 local issues
 local function call(fn, ...)
 	if type(fn) ~= "function" then return nil end
@@ -278,6 +319,14 @@ local function exists(path)
 	return type(namespace and resolve(namespace, name) or rawget(_G, path)) == "function"
 end
 local function choose(modern, legacy) if exists(modern) then return modern end return legacy end
+local function optional(path, ...)
+	if exists(path) then
+		local value = get(path, ...)
+		if value ~= nil then return value end
+		return marker(path .. " returned no accessible value")
+	end
+	return marker(path .. " unavailable")
+end
 local function count(v) return type(v) == "number" and math.max(0, math.floor(v)) or 0 end
 local function available(fields) fields = fields or {}; fields.status = "available"; return fields end
 local function now() local t = call(GetServerTime) or call(time); return type(t) == "number" and t or 0 end
@@ -308,15 +357,32 @@ local function itemDetails(id)
 	if not name then return { status = "unavailable", reason = "item details not cached" } end
 	return available({ name = name, link = link, quality = quality, level = level, minLevel = minLevel, class = class, subclass = subclass, maxStack = maxStack, equipSlot = equipSlot, texture = texture, sellPrice = sellPrice })
 end
+local windowOpen
 providers.equipment = function()
 	if not exists("GetInventoryItemLink") and not exists("GetInventoryItemID") then return marker("equipment APIs unavailable") end
-	local slots = array()
+	local slots, damaged, broken, durabilitySlots = array(), 0, 0, 0
 	for slot = 0, (INVSLOT_LAST_EQUIPPED or 19) do
 		local id, link = get("GetInventoryItemID", "player", slot), get("GetInventoryItemLink", "player", slot)
 		local durability, maxDurability = get("GetInventoryItemDurability", slot)
+		if type(durability) == "number" and type(maxDurability) == "number" and maxDurability > 0 then
+			durabilitySlots = durabilitySlots + 1
+			if durability < maxDurability then damaged = damaged + 1 end
+			if durability == 0 then broken = broken + 1 end
+		end
 		slots[#slots + 1] = { slot = slot, itemID = id, link = link, count = get("GetInventoryItemCount", "player", slot), empty = not id and not link, durability = durability, maxDurability = maxDurability, details = itemDetails(id or link) }
 	end
-	return available({ slots = slots })
+	local enchants = marker("temporary weapon enchant API unavailable")
+	if exists("GetWeaponEnchantInfo") then
+		local main, mainMS, mainCharges, mainID, off, offMS, offCharges, offID = get("GetWeaponEnchantInfo")
+		enchants = available({ mainHand = { active = main, remainingMilliseconds = mainMS, charges = mainCharges, enchantID = mainID }, offHand = { active = off, remainingMilliseconds = offMS, charges = offCharges, enchantID = offID } })
+	end
+	local open = windowOpen("merchant", "MerchantFrame")
+	local repair = { damagedSlots = durabilitySlots > 0 and damaged or nil, brokenSlots = durabilitySlots > 0 and broken or nil, durabilitySlots = durabilitySlots, durabilityStatus = durabilitySlots > 0 and "available" or "unavailable", scope = "only equipped slots exposing numeric durability", costStatus = open == true and "unavailable" or open == false and "closed" or "unknown", costReason = open == true and "repair quote API unavailable" or "repair quote only available at an open merchant" }
+	if open == true and exists("GetRepairAllCost") then
+		repair.canRepair = optional("CanMerchantRepair")
+		repair.copper, repair.needed = get("GetRepairAllCost"); repair.costStatus = "available"; repair.costReason = nil
+	end
+	return available({ slots = slots, temporaryWeaponEnchants = enchants, repair = repair })
 end
 local function containers(bagIDs)
 	local slotsAPI = choose("C_Container.GetContainerNumSlots", "GetContainerNumSlots")
@@ -370,14 +436,20 @@ end
 local windows = {}
 if type(CreateFrame) == "function" then
 	local frame = CreateFrame("Frame")
-	for _, event in ipairs({ "BANKFRAME_OPENED", "BANKFRAME_CLOSED", "MAIL_SHOW", "MAIL_CLOSED", "TRADE_SKILL_SHOW", "TRADE_SKILL_CLOSE" }) do pcall(frame.RegisterEvent, frame, event) end
+	for _, event in ipairs({ "BANKFRAME_OPENED", "BANKFRAME_CLOSED", "MAIL_SHOW", "MAIL_CLOSED", "TRADE_SKILL_SHOW", "TRADE_SKILL_CLOSE", "MERCHANT_SHOW", "MERCHANT_CLOSED", "TRAINER_SHOW", "TRAINER_CLOSED", "GOSSIP_SHOW", "GOSSIP_CLOSED", "QUEST_DETAIL", "QUEST_PROGRESS", "QUEST_COMPLETE", "QUEST_GREETING", "QUEST_FINISHED", "TAXIMAP_OPENED", "TAXIMAP_CLOSED" }) do pcall(frame.RegisterEvent, frame, event) end
 	frame:SetScript("OnEvent", function(_, event)
 		if event == "BANKFRAME_OPENED" then windows.bank = true elseif event == "BANKFRAME_CLOSED" then windows.bank = false
 		elseif event == "MAIL_SHOW" then windows.mail = true elseif event == "MAIL_CLOSED" then windows.mail = false
-		elseif event == "TRADE_SKILL_SHOW" then windows.professions = true elseif event == "TRADE_SKILL_CLOSE" then windows.professions = false end
+		elseif event == "TRADE_SKILL_SHOW" then windows.professions = true elseif event == "TRADE_SKILL_CLOSE" then windows.professions = false
+		elseif event == "MERCHANT_SHOW" then windows.merchant = true elseif event == "MERCHANT_CLOSED" then windows.merchant = false
+		elseif event == "TRAINER_SHOW" then windows.trainer = true elseif event == "TRAINER_CLOSED" then windows.trainer = false
+		elseif event == "GOSSIP_SHOW" then windows.gossip = true elseif event == "GOSSIP_CLOSED" then windows.gossip = false
+		elseif event == "QUEST_FINISHED" then windows.quest = false
+		elseif event == "QUEST_DETAIL" or event == "QUEST_PROGRESS" or event == "QUEST_COMPLETE" or event == "QUEST_GREETING" then windows.quest = true; windows.questStage = event
+		elseif event == "TAXIMAP_OPENED" then windows.taxi = true elseif event == "TAXIMAP_CLOSED" then windows.taxi = false end
 	end)
 end
-local function windowOpen(id, frameName)
+windowOpen = function(id, frameName)
 	if windows[id] ~= nil then return windows[id] end
 	local frame = rawget(_G, frameName)
 	if frame and type(frame.IsShown) == "function" then return call(frame.IsShown, frame) == true end
@@ -695,6 +767,370 @@ providers.addons = function()
 	for i = 1, count(get(modern and "C_AddOns.GetNumAddOns" or "GetNumAddOns")) do entries[#entries + 1] = pack(get(modern and "C_AddOns.GetAddOnInfo" or "GetAddOnInfo", i)) end
 	return available({ entries = entries, scope = "installed addon metadata; raw global tables require explicit table queries" })
 end
+-- All optional providers below are demand-driven in Smart mode.
+providers.macros = function()
+	if not Context.IsEnabled("macros") then return marker("macros permission disabled") end
+	if not exists("GetNumMacros") or not exists("GetMacroInfo") then return marker("macro APIs unavailable") end
+	local account, character = get("GetNumMacros")
+	local entries = array()
+	local function add(index, scope)
+		if not Context.IsEnabled("macros") then return false end
+		local name, icon, body = get("GetMacroInfo", index)
+		entries[#entries + 1] = { index = index, scope = scope, name = name, icon = icon, body = body }
+		return true
+	end
+	for i = 1, count(account) do if not add(i, "account") then return marker("macros permission revoked") end end
+	for i = 1, count(character) do if not add((MAX_ACCOUNT_MACROS or 120) + i, "character") then return marker("macros permission revoked") end end
+	return available({ entries = entries })
+end
+local function cooldown(path, slot)
+	if not exists(path) then return marker(path .. " unavailable") end
+	local start, duration, enabled, rate = get(path, slot)
+	if type(start) == "table" then return start end
+	if start == nil and duration == nil then return marker("cooldown data unavailable") end
+	return { startTime = start, duration = duration, enabled = enabled, modRate = rate }
+end
+providers.actionbars = function()
+	if not exists("GetActionInfo") then return marker("action slot API unavailable") end
+	local state = {
+		page = optional("GetActionBarPage"), bonusOffset = optional("GetBonusBarOffset"),
+		bonus = optional("HasBonusActionBar"), override = optional("HasOverrideActionBar"),
+		overridePage = optional("GetOverrideBarIndex"), vehicle = optional("HasVehicleActionBar"),
+		vehiclePage = optional("GetVehicleBarIndex"), temporary = optional("HasTempShapeshiftActionBar"),
+		temporaryPage = optional("GetTempShapeshiftBarIndex"), stance = optional("GetShapeshiftForm"),
+	}
+	local slots, bindings = array(), array()
+	-- The installed Forever/native action-bar implementation exposes slots 1..180.
+	-- NUM_ACTIONBAR_PAGES counts manually paged bars only, not bonus/extra slots.
+	local n = count(MAX_ACTION_BUTTONS or 180)
+	for slot = 1, n do
+		local kind, id, subtype = get("GetActionInfo", slot)
+		local row = { slot = slot, type = kind, id = id, subtype = subtype, empty = kind == nil, icon = optional("GetActionTexture", slot), text = optional("GetActionText", slot), cooldown = cooldown(choose("C_ActionBar.GetActionCooldown", "GetActionCooldown"), slot), count = optional(choose("C_ActionBar.GetActionDisplayCount", "GetActionCount"), slot) }
+		if exists("C_ActionBar.GetActionCharges") then row.charges = optional("C_ActionBar.GetActionCharges", slot)
+		elseif exists("GetActionCharges") then
+			local charges, maxCharges, start, duration, rate = get("GetActionCharges", slot)
+			if charges == nil then row.charges = marker("no charge data exposed")
+			else row.charges = { current = charges, max = maxCharges, cooldownStartTime = start, cooldownDuration = duration, modRate = rate } end
+		else row.charges = marker("action charge API unavailable") end
+		if kind == "spell" and type(id) == "number" then
+			if exists("C_Spell.GetSpellInfo") then row.spell = get("C_Spell.GetSpellInfo", id)
+			else local name, rank, icon = get("GetSpellInfo", id); row.spell = { name = name, rank = rank, icon = icon } end
+		elseif kind == "item" and (type(id) == "number" or type(id) == "string") then row.item = itemDetails(id)
+		elseif kind == "macro" and type(id) == "number" then
+			-- GetMacroInfo also returns the private body, so never use it for metadata.
+			row.macro = { index = id, name = row.text, spell = optional("GetMacroSpell", id), item = optional("GetMacroItem", id), bodyStatus = Context.IsEnabled("macros") and "query macros category" or "permission disabled" }
+		elseif kind == "flyout" and type(id) == "number" then
+			local name, description, size, known = get("GetFlyoutInfo", id)
+			row.flyout = { name = name, description = description, numSlots = size, known = known, slots = array() }
+			for i = 1, count(size) do local spellID, override, learned, spellName = get("GetFlyoutSlotInfo", id, i); row.flyout.slots[#row.flyout.slots + 1] = { spellID = spellID, overrideSpellID = override, known = learned, name = spellName } end
+		end
+		slots[#slots + 1] = row
+	end
+	local function bindingSlot(command)
+		if type(command) ~= "string" then return nil end
+		local button = tonumber(command:match("^ACTIONBUTTON(%d+)$"))
+		if button then
+			-- Prefer the native button's current action attribute over page arithmetic.
+			local frame = rawget(_G, "ActionButton" .. button)
+			local fn, owner = rawMethod(frame, "GetAttribute")
+			if trusted(fn, owner, "GetAttribute") then local action = call(fn, frame, "action"); if type(action) == "number" then return action end end
+			-- Missing bonus/override state must not be guessed to be inactive.
+			if type(state.page) == "number" and state.bonusOffset == 0 and state.override == false and state.vehicle == false and state.temporary == false then return (state.page - 1) * (NUM_ACTIONBAR_BUTTONS or 12) + button end
+			return nil
+		end
+		local bar, index = command:match("^MULTIACTIONBAR(%d+)BUTTON(%d+)$")
+		local pages = { [1] = 6, [2] = 5, [3] = 3, [4] = 4, [5] = 13, [6] = 14, [7] = 15 }
+		if bar and pages[tonumber(bar)] then return (pages[tonumber(bar)] - 1) * (NUM_ACTIONBAR_BUTTONS or 12) + tonumber(index) end
+		local name = command:match("^CLICK ([%a_][%w_]*):[%w]+$")
+		if name then
+			local frame = rawget(_G, name)
+			local fn, owner = rawMethod(frame, "GetAttribute")
+			if trusted(fn, owner, "GetAttribute") then local action = call(fn, frame, "action"); if type(action) == "number" then return action end end
+		end
+	end
+	if exists("GetNumBindings") and exists("GetBinding") then
+		for i = 1, count(get("GetNumBindings")) do
+			local values = pack(get("GetBinding", i))
+			local command = values[1]
+			if type(command) == "string" then
+				local row = { command = command, slot = bindingSlot(command), keys = array() }
+				local relevant = command:match("^ACTIONBUTTON%d+$") or command:match("^MULTIACTIONBAR%d+BUTTON%d+$") or command:match("^SHAPESHIFTBUTTON%d+$") or command:match("^BONUSACTIONBUTTON%d+$") or row.slot ~= nil
+				-- GetBindingKey avoids the differing legacy/modern GetBinding return layouts.
+				local keys = exists("GetBindingKey") and pack(get("GetBindingKey", command)) or values
+				local firstKey = exists("GetBindingKey") and 1 or 3
+				for k = firstKey, keys.n do
+					if type(keys[k]) == "string" then
+						local effective = exists("GetBindingAction") and get("GetBindingAction", keys[k], true) or command
+						local slot = bindingSlot(effective)
+						if slot ~= nil then relevant = true end
+						row.keys[#row.keys + 1] = { key = keys[k], effectiveCommand = effective, slot = slot }
+					end
+				end
+				if relevant then bindings[#bindings + 1] = row end
+			end
+		end
+	else bindings = marker("binding APIs unavailable") end
+	local buttons = array()
+	local function button(name, command)
+		local frame = rawget(_G, name)
+		if frame == nil then return end
+		local getter, owner = rawMethod(frame, "GetAttribute")
+		if not trusted(getter, owner, "GetAttribute") then return end
+		local action = call(getter, frame, "action")
+		if command == nil then
+			if type(frame) == "table" then command = rawget(frame, "commandName") end
+			if secret(command) or type(command) ~= "string" then command = call(getter, frame, "binding") end
+		end
+		local keys = array()
+		if type(command) == "string" and exists("GetBindingKey") then
+			local values = pack(get("GetBindingKey", command))
+			for i = 1, values.n do
+				if type(values[i]) == "string" then
+					local effective = optional("GetBindingAction", values[i], true)
+					keys[#keys + 1] = { key = values[i], effectiveCommand = effective, slot = bindingSlot(effective) }
+				end
+			end
+		end
+		local shownGetter, shownOwner = rawMethod(frame, "IsShown")
+		local shown
+		if trusted(shownGetter, shownOwner, "IsShown") then shown = call(shownGetter, frame) end
+		buttons[#buttons + 1] = { frame = name, actionSlot = action == nil and marker("button action attribute unavailable") or action, command = command, shown = shown, keys = keys }
+	end
+	for i = 1, 12 do button("ActionButton" .. i, "ACTIONBUTTON" .. i) end
+	for bar, prefix in ipairs({ "MultiBarBottomLeftButton", "MultiBarBottomRightButton", "MultiBarRightButton", "MultiBarLeftButton", "MultiBar5Button", "MultiBar6Button", "MultiBar7Button" }) do
+		for i = 1, 12 do button(prefix .. i, "MULTIACTIONBAR" .. bar .. "BUTTON" .. i) end
+	end
+	-- Installed EllesmereUI uses EABButton<base-slot>, whose action attribute can
+	-- differ from both its name and GetActionBarPage under custom modifier paging.
+	for i = 1, n do button("EABButton" .. i) end
+	return available({ slots = slots, state = state, bindings = bindings, buttons = buttons, slotCount = n, scope = "all global action slots; bindings describe effective native commands; buttons report their observed current action attributes, including EllesmereUI custom paging; unknown active pages are not inferred" })
+end
+local function interactionWindow(id, frame, read)
+	local open = windowOpen(id, frame)
+	if open ~= true then return { status = open == false and "closed" or "unknown", reason = id .. " window must be open" } end
+	return read()
+end
+providers.interaction = function()
+	local merchant = interactionWindow("merchant", "MerchantFrame", function()
+		if not exists("GetMerchantNumItems") then return marker("merchant APIs unavailable") end
+		local entries = array()
+		for i = 1, count(get("GetMerchantNumItems")) do
+			local name, icon, price, quantity, stock, usable, extended = get("GetMerchantItemInfo", i)
+			local row = { index = i, name = name, icon = icon, priceCopper = price, stackCount = quantity, stock = stock, usable = usable, extendedCost = extended, link = optional("GetMerchantItemLink", i), costs = array() }
+			if exists("GetMerchantItemCostInfo") then for j = 1, count(get("GetMerchantItemCostInfo", i)) do local texture, amount, link, currencyName = get("GetMerchantItemCostItem", i, j); row.costs[#row.costs + 1] = { icon = texture, amount = amount, link = link, currencyName = currencyName } end end
+			entries[#entries + 1] = row
+		end
+		return available({ entries = entries, canRepair = optional("CanMerchantRepair") })
+	end)
+	local trainer = interactionWindow("trainer", "ClassTrainerFrame", function()
+		if not exists("GetNumTrainerServices") then return marker("trainer APIs unavailable") end
+		local entries = array()
+		for i = 1, count(get("GetNumTrainerServices")) do
+			local name, second, third, fourth, fifth = get("GetTrainerServiceInfo", i)
+			local modern = type(third) == "number"
+			entries[#entries + 1] = { index = i, name = name, rank = not modern and second or nil, type = modern and second or third, icon = modern and third or nil, requiredLevel = modern and fifth or optional("GetTrainerServiceLevelReq", i), costCopper = optional("GetTrainerServiceCost", i), description = optional("GetTrainerServiceDescription", i), requiredSkill = exists("GetTrainerServiceSkillReq") and pack(get("GetTrainerServiceSkillReq", i)) or nil }
+		end
+		return available({ entries = entries, scope = "currently exposed trainer services and filters" })
+	end)
+	local gossip = interactionWindow("gossip", "GossipFrame", function()
+		local result = available({ text = optional(choose("C_GossipInfo.GetText", "GetGossipText")) })
+		if exists("C_GossipInfo.GetOptions") then
+			result.options = get("C_GossipInfo.GetOptions"); result.availableQuests = optional("C_GossipInfo.GetAvailableQuests"); result.activeQuests = optional("C_GossipInfo.GetActiveQuests")
+		elseif exists("GetGossipOptions") then
+			result.options = array(); local values = pack(get("GetGossipOptions"))
+			for i = 1, values.n, 2 do result.options[#result.options + 1] = { text = values[i], type = values[i + 1] } end
+			result.availableQuests = exists("GetGossipAvailableQuests") and pack(get("GetGossipAvailableQuests")) or marker("quest API unavailable")
+			result.activeQuests = exists("GetGossipActiveQuests") and pack(get("GetGossipActiveQuests")) or marker("quest API unavailable")
+		else return marker("gossip APIs unavailable") end
+		return result
+	end)
+	local quest = interactionWindow("quest", "QuestFrame", function()
+		if windows.questStage == "QUEST_GREETING" then
+			local greeting = available({ stage = "QUEST_GREETING", text = optional("GetGreetingText"), availableQuests = array(), activeQuests = array() })
+			for i = 1, count(get("GetNumAvailableQuests")) do greeting.availableQuests[#greeting.availableQuests + 1] = { index = i, title = optional("GetAvailableTitle", i), level = optional("GetAvailableLevel", i) } end
+			for i = 1, count(get("GetNumActiveQuests")) do greeting.activeQuests[#greeting.activeQuests + 1] = { index = i, title = optional("GetActiveTitle", i), level = optional("GetActiveLevel", i), complete = optional("IsActiveQuestComplete", i) } end
+			return greeting
+		end
+		return available({ stage = windows.questStage or "unknown", questID = optional("GetQuestID"), title = optional("GetTitleText"), detail = windows.questStage == "QUEST_DETAIL" and optional("GetQuestText") or nil, objectives = windows.questStage == "QUEST_DETAIL" and optional("GetObjectiveText") or nil, progress = windows.questStage == "QUEST_PROGRESS" and optional("GetProgressText") or nil, completion = windows.questStage == "QUEST_COMPLETE" and optional("GetRewardText") or nil, completable = optional("IsQuestCompletable") })
+	end)
+	return available({ merchant = merchant, trainer = trainer, gossip = gossip, quest = quest })
+end
+providers.travel = function()
+	local taxi = interactionWindow("taxi", "TaxiFrame", function()
+		if exists("NumTaxiNodes") then
+			local entries = array()
+			for i = 1, count(get("NumTaxiNodes")) do local x, y = get("TaxiNodePosition", i); entries[#entries + 1] = { index = i, name = get("TaxiNodeName", i), type = get("TaxiNodeGetType", i), x = x, y = y, costCopper = optional("TaxiNodeCost", i) } end
+			return available({ entries = entries, scope = "visible taxi map; no routes selected" })
+		end
+		local mapID = exists("GetTaxiMapID") and get("GetTaxiMapID")
+		if type(mapID) == "number" and exists("C_TaxiMap.GetTaxiNodesForMap") then return available({ mapID = mapID, entries = get("C_TaxiMap.GetTaxiNodesForMap", mapID) }) end
+		return marker("visible taxi map API unavailable")
+	end)
+	return available({ bindLocation = optional("GetBindLocation"), onTaxi = optional("UnitOnTaxi", "player"), taxi = taxi })
+end
+providers.lockouts = function()
+	if not exists("GetNumSavedInstances") then return marker("cached instance APIs unavailable") end
+	local entries, bosses = array(), array()
+	for i = 1, count(get("GetNumSavedInstances")) do
+		local name, id, reset, difficulty, locked, extended, instanceIDMostSig, raid, maxPlayers, difficultyName, numEncounters, progress = get("GetSavedInstanceInfo", i)
+		local row = { index = i, name = name, id = id, resetSeconds = reset, difficultyID = difficulty, locked = locked, extended = extended, instanceIDMostSig = instanceIDMostSig, raid = raid, maxPlayers = maxPlayers, difficulty = difficultyName, numEncounters = numEncounters, progress = progress, encounters = array() }
+		if exists("GetSavedInstanceEncounterInfo") then for j = 1, count(numEncounters) do local boss, fileID, killed, unknown = get("GetSavedInstanceEncounterInfo", i, j); row.encounters[#row.encounters + 1] = { name = boss, fileID = fileID, killed = killed, unknown = unknown } end end
+		entries[#entries + 1] = row
+	end
+	if exists("GetNumSavedWorldBosses") then for i = 1, count(get("GetNumSavedWorldBosses")) do local name, id, reset = get("GetSavedWorldBossInfo", i); bosses[#bosses + 1] = { name = name, id = id, resetSeconds = reset } end
+	else bosses = marker("cached world-boss APIs unavailable") end
+	return available({ entries = entries, worldBosses = bosses, scope = "cached lockouts; may be stale; no raid-info refresh requested" })
+end
+
+-- Auctionator's installed DatabaseMixin schema: item-key -> {m,l,h,a}.
+-- Never inspect arbitrary addon configuration, deserialize realms or invoke mixins.
+local function accessibleTable(value)
+	if secret(value) or type(value) ~= "table" then return false end
+	if type(canaccesstable) == "function" then local ok, accessible = pcall(canaccesstable, value); if not ok or not accessible then return false end end
+	return true
+end
+local function field(value, key) if accessibleTable(value) then return rawget(value, key) end; return nil end
+local function priceRecord(value)
+	if not accessibleTable(value) then return false end
+	local price = rawget(value, "m")
+	return (secret(price) or type(price) == "number") and accessibleTable(rawget(value, "l")) and accessibleTable(rawget(value, "h"))
+end
+local function priceKey(key)
+	if secret(key) then return false end
+	return (type(key) == "number" and key > 0 and key % 1 == 0) or (type(key) == "string" and key:match("^%d+[:%d_%-]*$") ~= nil)
+end
+local function recognizedCache(value)
+	if not accessibleTable(value) then return false end
+	local key, metadataOnly = nil, true
+	for _ = 1, 8 do
+		key = next(value, key)
+		if key == nil then return metadataOnly end
+		if priceKey(key) and priceRecord(rawget(value, key)) then return true end
+		if (key ~= "version" and key ~= "__dbversion") or type(rawget(value, key)) ~= "number" then metadataOnly = false end
+	end
+	return false
+end
+local function auctionCache()
+	local addon = rawget(_G, "Auctionator")
+	local active = field(field(addon, "Database"), "db")
+	if active ~= nil then
+		if recognizedCache(active) then return active, "Auctionator.Database.db" end
+		return nil, nil, "unsupported or inaccessible active Auctionator price schema"
+	end
+	local saved = rawget(_G, "AUCTIONATOR_PRICE_DATABASE")
+	local realm = field(field(addon, "State"), "CurrentRealm")
+	if type(realm) ~= "string" and exists("GetNormalizedRealmName") then realm = call(rawget(_G, "GetNormalizedRealmName")) end
+	if type(realm) == "string" then
+		local data = field(saved, realm)
+		if recognizedCache(data) then return data, "AUCTIONATOR_PRICE_DATABASE active realm" end
+		if type(data) == "string" then return nil, nil, "active realm cache is serialized; Auctionator must initialize it" end
+	end
+	local legacy = rawget(_G, "AuctionatorDB")
+	if type(realm) == "string" then
+		local data = field(legacy, realm)
+		if accessibleTable(data) and next(data) ~= nil and recognizedCache(data) then return data, "AuctionatorDB active realm" end
+	end
+	for _, name in ipairs({ "prices", "priceDatabase", "db" }) do
+		local data = field(legacy, name)
+		if accessibleTable(data) and next(data) ~= nil and recognizedCache(data) then return data, "AuctionatorDB." .. name end
+	end
+	if accessibleTable(legacy) and next(legacy) ~= nil and recognizedCache(legacy) then return legacy, "AuctionatorDB recognized price records" end
+	if addon == nil and saved == nil and legacy == nil then return nil, nil, "Auctionator is not installed or loaded" end
+	return nil, nil, "Auctionator price cache unavailable or unsupported; no active recognized realm data"
+end
+categoryAvailability = function(id)
+	if id ~= "auctionator" then return nil end
+	local cache, _, reason = auctionCache()
+	return cache ~= nil, reason
+end
+providers.auctionator = function()
+	local cache, source, reason = auctionCache()
+	if not cache then return marker(reason) end
+	return { status = "query-only", source = source, units = "copper", reason = "request bounded itemIDs or browsing pages" }
+end
+local historyCursors = setmetatable({}, { __mode = "k" })
+local function historyDays(value, offset, limit)
+	if not accessibleTable(value) then return marker("history field unavailable or inaccessible") end
+	local cursors = historyCursors[value]
+	if not cursors or offset == 0 then cursors = {}; historyCursors[value] = cursors end
+	local page = { days = {}, offset = offset, limit = limit, complete = true,
+		scope = "raw Auctionator scan-day buckets, not capture timestamps; cache may change between pages" }
+	if cursors.completeAt and offset >= cursors.completeAt then return page end
+	local key = offset > 0 and cursors[offset] or nil
+	if offset > 0 and (key == nil or rawget(value, key) == nil) then return marker("history cursor expired or cache changed; restart at historyOffset 0 and follow nextOffset") end
+	local scanned = 0
+	while scanned < limit do
+		local nextKey, amount = next(value, key)
+		if nextKey == nil then break end
+		key = nextKey; scanned = scanned + 1
+		if not secret(key) and (type(key) == "string" or type(key) == "number") and tonumber(key) ~= nil then page.days[key] = (secret(amount) or type(amount) == "number") and clean(amount) or marker("unsupported history value") end
+	end
+	page.complete = key == nil or next(value, key) == nil
+	if page.complete then cursors.completeAt = offset + scanned
+	else page.nextOffset = offset + scanned; cursors[page.nextOffset] = key end
+	return page
+end
+local function auctionItem(key, value, historyOffset, historyLimit)
+	if secret(value) then return { key = key, status = "unavailable", reason = "secret or inaccessible value" } end
+	if not priceRecord(value) then return { key = key, status = "unavailable", reason = value == nil and "item not cached" or "unsupported price record" } end
+	local constants = field(rawget(_G, "Auctionator"), "Constants")
+	return {
+		key = key, status = "available", cached = true, units = "copper", minimumCopper = clean(rawget(value, "m")),
+		history = { lowest = historyDays(rawget(value, "l"), historyOffset, historyLimit), highest = historyDays(rawget(value, "h"), historyOffset, historyLimit), maxQuantity = historyDays(rawget(value, "a"), historyOffset, historyLimit), scanDayZero = type(field(constants, "SCAN_DAY_0")) == "number" and clean(field(constants, "SCAN_DAY_0")) or nil, scope = "historical scan-day buckets; lowest falls back to highest when absent; quantity is historical maximum, not current stock" },
+	}
+end
+-- A continuation visits at most limit+1 raw keys, never offset+limit.
+local auctionCursors, auctionCursorDB = {}, nil
+local function auctionQuery(request)
+	local limit, offset = request.limit or 50, request.offset or 0
+	if type(limit) ~= "number" or limit % 1 ~= 0 or limit < 1 or limit > 100 or type(offset) ~= "number" or offset % 1 ~= 0 or offset < 0 then return { ok = false, category = "auctionator", error = "limit must be 1..100; offset must be a nonnegative integer" } end
+	local historyOffset, historyLimit = request.historyOffset or 0, request.historyLimit or 100
+	if type(historyOffset) ~= "number" or historyOffset % 1 ~= 0 or historyOffset < 0 or type(historyLimit) ~= "number" or historyLimit % 1 ~= 0 or historyLimit < 1 or historyLimit > 100 then return { ok = false, category = "auctionator", error = "historyOffset must be a nonnegative integer; historyLimit must be 1..100" } end
+	if request.path ~= nil then return { ok = false, category = "auctionator", error = "Auctionator pages do not accept path; use itemIDs or sequential nextOffset" } end
+	local ids = request.itemIDs
+	if ids ~= nil then
+		if type(ids) ~= "table" or #ids < 1 or #ids > 50 then return { ok = false, category = "auctionator", error = "itemIDs must contain 1..50 positive integer IDs" } end
+		for key, id in next, ids do
+			if type(key) ~= "number" or key % 1 ~= 0 or key < 1 or key > #ids or type(id) ~= "number" or id % 1 ~= 0 or id < 1 or id > 2147483647 then return { ok = false, category = "auctionator", error = "itemIDs must be a dense array of positive integer IDs" } end
+		end
+		for i = 1, #ids do if rawget(ids, i) == nil then return { ok = false, category = "auctionator", error = "itemIDs must be a dense array of positive integer IDs" } end end
+		if offset > #ids then return { ok = false, category = "auctionator", error = "offset exceeds itemIDs length" } end
+	end
+	if not Context.IsEnabled("auctionator") then return { ok = false, category = "auctionator", error = "category permission disabled" } end
+	local cache, source, reason = auctionCache()
+	local page = { kind = "array", items = array(), offset = offset, limit = limit, complete = true, status = cache and "available" or "unavailable", reason = reason, source = source, cached = true, units = "copper", scope = "cached historical prices, never live auctions; cache may change between pages" }
+	if cache then
+		if ids then
+			page.total = #ids
+			for i = offset + 1, math.min(#ids, offset + limit) do
+				local key = tostring(ids[i]); local value = rawget(cache, key)
+				if value == nil then value = rawget(cache, ids[i]) end
+				page.items[#page.items + 1] = auctionItem(key, value, historyOffset, historyLimit)
+			end
+			page.complete = offset + limit >= #ids
+			if not page.complete then page.nextOffset = offset + limit end
+		else
+			if cache ~= auctionCursorDB or offset == 0 then auctionCursors = {}; auctionCursorDB = cache end
+			local key = offset > 0 and auctionCursors[offset] or nil
+			if offset > 0 and (key == nil or rawget(cache, key) == nil) then return { ok = false, category = "auctionator", error = "browsing cursor expired or cache changed; restart at offset 0 and follow nextOffset" } end
+			local visited = 0
+			while visited < limit do
+				local nextKey, value = next(cache, key)
+				if nextKey == nil then break end
+				key = nextKey; visited = visited + 1
+				if priceKey(key) then page.items[#page.items + 1] = auctionItem(key, value, historyOffset, historyLimit) end
+			end
+			page.complete = key == nil or next(cache, key) == nil
+			page.offsetUnits = "raw cache keys (unsupported metadata keys are skipped)"
+			if not page.complete then
+				page.nextOffset = offset + visited
+				auctionCursors = { [page.nextOffset] = key }
+			end
+		end
+	end
+	return { ok = true, category = "auctionator", value = page, nextOffset = page.nextOffset, capturedAt = now() }
+end
+
 local function collect(id)
 	local previous = issues; issues = array()
 	local ok, value = pcall(providers[id])
@@ -710,13 +1146,18 @@ local function collect(id)
 	return value
 end
 function Context.Snapshot()
-	discover()
-	local result = { version = 1, capturedAt = now(), enabled = array(), data = {} }
+	local result = { version = 1, capturedAt = now(), enabled = array(), data = {}, delivery = Context.GetDelivery(), catalog = array() }
+	if not db().context then return Context.Encode(result), "" end
+	local essentials = { identity = true, location = true, money = true }
+	local metadata = {}; for _, row in ipairs(Context.Categories()) do metadata[row.id] = row end
 	for _, d in ipairs(definitions) do
 		if Context.IsEnabled(d.id) then
 			result.enabled[#result.enabled + 1] = d.id
-			if providers[d.id] then result.data[d.id] = collect(d.id)
-			else result.data[d.id] = { status = "query-only", reason = "use catalog/api queries for this namespace" } end
+			result.catalog[#result.catalog + 1] = metadata[d.id]
+			if result.delivery == "full" then
+				if d.queryOnly or not providers[d.id] then result.data[d.id] = { status = "query-only", reason = "request this category with a context query" }
+				else result.data[d.id] = collect(d.id) end
+			elseif essentials[d.id] then result.data[d.id] = collect(d.id) end
 		end
 	end
 	-- The short context must describe this same capture, without reading providers twice.
@@ -724,7 +1165,11 @@ function Context.Snapshot()
 end
 function Context.Summary(captured)
 	if not db().context then return "" end
-	local function selected(id) return captured and (captured[id] or {}) or collect(id) end
+	local function selected(id)
+		if captured then return captured[id] or {} end
+		if Context.GetDelivery() == "smart" and id ~= "identity" and id ~= "location" and id ~= "money" then return {} end
+		return collect(id)
+	end
 	local parts, bytes = {}, 0
 	local function add(value)
 		if type(value) ~= "string" or #value == 0 then return end
@@ -751,7 +1196,7 @@ function Context.Summary(captured)
 		local d = selected("professions")
 		for _, skill in ipairs(d.skills or {}) do if not skill.isHeader and type(skill.name) == "string" then add(skill.name .. " " .. text(skill.rank) .. "/" .. text(skill.maxRank)) end end
 	end
-	if Context.IsEnabled("quests") then local d = selected("quests"); add("Quest log entries: " .. #(d.entries or {})) end
+	if Context.IsEnabled("quests") then local d = selected("quests"); if type(d.entries) == "table" then add("Quest log entries: " .. #d.entries) end end
 	return table.concat(parts, "; ")
 end
 -- Query pagination uses zero-based offsets. Objects are returned as raw-key/value
@@ -922,6 +1367,7 @@ local function query(request)
 	elseif op == "snapshot" then
 		if not providers[categoryID] then return { ok = false, error = "unknown snapshot category" } end
 		if not Context.IsEnabled(categoryID) then return { ok = false, category = categoryID, error = "category permission disabled" } end
+		if categoryID == "auctionator" then return auctionQuery(request) end
 		value = collect(categoryID)
 	elseif op == "api" then
 		discover()
@@ -931,7 +1377,7 @@ local function query(request)
 		if not Context.IsEnabled(categoryID) then return { ok = false, category = categoryID, error = "category permission disabled" } end
 		if entry.requiredPermission then
 			if not Context.IsEnabled(entry.requiredPermission) then return { ok = false, category = categoryID, error = entry.requiredPermission .. " permission disabled" } end
-			if not windowOpen("mail", "MailFrame") then return { ok = false, category = categoryID, error = "mailbox window must be open" } end
+			if entry.requiredPermission == "mail_body" and not windowOpen("mail", "MailFrame") then return { ok = false, category = categoryID, error = "mailbox window must be open" } end
 		end
 		local fn, owner = resolve(entry.namespace, entry.shortName)
 		if fn ~= entry.fn or not trusted(fn, owner, entry.shortName) then return { ok = false, category = categoryID, error = "API implementation changed or is not native" } end

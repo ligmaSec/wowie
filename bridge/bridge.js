@@ -903,33 +903,40 @@ function pollSavedVariables() {
   if (job) submit(job);
 }
 
-// Windows: capture.ps1 (GDI). macOS: capture_mac.py (native screencapture). Elsewhere: capture_x11.py (Wine/X11).
-function captureCommand() {
-  if (process.platform === 'win32') {
-    return ['powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(HERE, 'capture.ps1'),
-      '-Cell', String(cap.cellPx), '-Cells', String(cap.cellsPerRow), '-MaxRows', String(cap.maxRows),
-      '-IntervalMs', String(cap.intervalMs), '-ProcessName', cap.processName, '-ClientFolder', path.basename(CLIENT_DIR)]];
-  }
-  if (process.platform === 'darwin') {
-    const args = [path.join(HERE, 'capture_mac.py'),
-      '--cell', String(cap.cellPx), '--cells', String(cap.cellsPerRow), '--max-rows', String(cap.maxRows),
-      '--interval-ms', String(cap.intervalMs), '--process-name', cap.processName];
-    if (cap.windowName) args.push('--window-name', cap.windowName);
-    return [cap.python || 'python3', args];
-  }
-  const args = [path.join(HERE, 'capture_x11.py'),
-    '--cell', String(cap.cellPx), '--cells', String(cap.cellsPerRow), '--max-rows', String(cap.maxRows),
-    '--interval-ms', String(cap.intervalMs), '--process-name', cap.processName];
-  if (cap.windowName) args.push('--window-name', cap.windowName);
-  if (cap.keepComposited) args.push('--keep-composited');
-  return [cap.python || 'python3', args];
+// The launcher is loaded only when capture is enabled (including isolated --once runs).
+let captureProcess = null;
+let captureRestart = null;
+let captureStopping = false;
+
+function stopCapture() {
+  captureStopping = true;
+  clearTimeout(captureRestart);
+  captureRestart = null;
+  if (!captureProcess) return;
+  const { child, closeReaders } = captureProcess;
+  captureProcess = null;
+  closeReaders();
+  killTree(child);
 }
 
+process.once('exit', stopCapture);
+process.once('SIGINT', () => { stopCapture(); process.exit(130); });
+process.once('SIGTERM', () => { stopCapture(); process.exit(143); });
+
 function startCapture() {
-  const [cmd, args] = captureCommand();
+  if (captureStopping) return;
+  captureRestart = null;
+  let cmd, args;
+  try {
+    [cmd, args] = require('./capture').captureCommand(cap, { here: HERE, clientDir: CLIENT_DIR });
+  } catch (err) {
+    log(`capture requires action: ${err.message} Fix the configuration and restart the bridge.`);
+    return;
+  }
   const ps = spawn(cmd, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const rl = readline.createInterface({ input: ps.stdout });
-  rl.on('line', (line) => {
+  const onLine = (line) => {
+    if (captureStopping) return;
     let ev;
     try { ev = JSON.parse(line); } catch { return; }
     if (ev.info) { log('capture:', ev.info); return; }
@@ -943,12 +950,33 @@ function startCapture() {
         submit(job);
       }
     }
+  };
+  const onStderr = (d) => {
+    if (!captureStopping) log('capture stderr:', String(d).trim().slice(0, 300));
+  };
+  const closeReaders = () => {
+    rl.removeListener('line', onLine);
+    rl.close();
+    ps.stderr.removeListener('data', onStderr);
+    ps.stdout.destroy();
+    ps.stderr.destroy();
+  };
+  captureProcess = { child: ps, closeReaders };
+  rl.on('line', onLine);
+  ps.stderr.on('data', onStderr);
+  ps.on('error', (err) => {
+    if (!captureStopping) log(`capture could not start (${cmd}): ${err.message}`);
   });
-  ps.stderr.on('data', (d) => log('capture stderr:', String(d).trim().slice(0, 300)));
-  ps.on('error', (err) => log(`capture could not start (${cmd}): ${err.message}`));
-  ps.on('close', (code) => {
+  ps.once('close', (code) => {
+    closeReaders();
+    if (captureProcess?.child === ps) captureProcess = null;
+    if (captureStopping) return;
+    if (code === 2) {
+      log('capture requires action (exit 2); resolve the compositor permission/setup error and restart the bridge. Run npm run probe to inspect direct game-window capture.');
+      return;
+    }
     log(`capture exited (${code}); restarting in 5 s`);
-    setTimeout(startCapture, 5000);
+    captureRestart = setTimeout(startCapture, 5000);
   });
 }
 

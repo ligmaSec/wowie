@@ -11,6 +11,7 @@
   "maxParallel": 3,
   "capture": {
     "enabled": true,
+    "backend": "auto",
     "processName": "Wow",
     "cellPx": 4,
     "cellsPerRow": 200,

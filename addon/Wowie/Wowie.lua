@@ -53,17 +53,17 @@ local tx = { active = "robust", interval = 0.5, reason = "" }
 local UI = {}
 Wowie.UI = UI
 UI.font = ChatFontNormal:GetFont()
-UI.titleFont = STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
+UI.titleFont = UI.font
 UI.colors = {
-	background = { 0.025, 0.025, 0.022, 0.92 }, surface = { 0.055, 0.055, 0.048, 0.52 },
-	raised = { 0.11, 0.105, 0.085, 0.62 }, input = { 0.018, 0.018, 0.015, 0.72 },
-	border = { 0.32, 0.30, 0.24, 0.38 }, hover = { 0.19, 0.17, 0.10, 0.76 },
-	primary = { 0.20, 0.16, 0.045, 0.84 }, text = { 0.94, 0.93, 0.88, 1 },
-	muted = { 0.64, 0.63, 0.58, 1 }, accent = { 1, 0.82, 0.18, 1 },
-	success = { 0.40, 0.77, 0.52, 1 }, warning = { 0.95, 0.66, 0.28, 1 },
-	danger = { 0.92, 0.37, 0.31, 1 }, highlight = { 1, 0.82, 0.18, 0.25 },
-	userBand = { 0.12, 0.105, 0.065, 0.42 }, replyBand = { 0.035, 0.035, 0.030, 0.25 },
-	noticeBand = { 0.085, 0.075, 0.050, 0.32 },
+	background = { 0.055, 0.065, 0.080, 1 }, surface = { 0.080, 0.095, 0.115, 1 },
+	raised = { 0.115, 0.135, 0.160, 1 }, input = { 0.035, 0.045, 0.060, 1 },
+	border = { 0.22, 0.25, 0.29, 1 }, hover = { 0.15, 0.18, 0.21, 1 },
+	primary = { 0.20, 0.18, 0.13, 1 }, text = { 0.92, 0.94, 0.97, 1 },
+	muted = { 0.64, 0.69, 0.75, 1 }, accent = { 0.90, 0.77, 0.50, 1 },
+	success = { 0.45, 0.80, 0.64, 1 }, warning = { 0.97, 0.72, 0.38, 1 },
+	danger = { 0.96, 0.48, 0.48, 1 }, highlight = { 0.50, 0.65, 0.85, 0.35 },
+	userBand = { 0.105, 0.130, 0.165, 1 }, replyBand = { 0.065, 0.080, 0.100, 1 },
+	noticeBand = { 0.10, 0.115, 0.135, 1 }, onAccent = { 0.055, 0.065, 0.080, 1 },
 }
 local BACKDROP = {
 	bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8",
@@ -88,11 +88,27 @@ end
 function UI.Window(frame, headerHeight)
 	UI.Surface(frame, "background")
 	local border = UI.colors.border
-	frame:SetBackdropBorderColor(border[1], border[2], border[3], 0.22)
-	local rule = UI.Rule(frame, "accent", 0.48)
-	rule:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, -(headerHeight or 44))
-	rule:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -14, -(headerHeight or 44))
+	frame:SetBackdropBorderColor(border[1], border[2], border[3], 1)
+	if headerHeight ~= 0 then
+		local rule = UI.Rule(frame, "border", 1)
+		rule:SetPoint("TOPLEFT", frame, "TOPLEFT", 1, -(headerHeight or 48))
+		rule:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -1, -(headerHeight or 48))
+	end
 	return frame
+end
+
+function UI.FitPanel(frame, width, height)
+	frame:SetSize(width, height)
+	frame:SetScale(math.min(1, math.max(1, UIParent:GetWidth() - 32) / width, math.max(1, UIParent:GetHeight() - 32) / height))
+end
+
+function UI.RaisePanel(frame)
+	frame:SetFrameStrata("FULLSCREEN_DIALOG")
+	frame:SetToplevel(true)
+	frame:Raise()
+	local parent = frame:GetParent()
+	UI.panelLevel = math.max(UI.panelLevel or 60, frame:GetFrameLevel(), parent and parent:GetFrameLevel() or 0) + 20
+	frame:SetFrameLevel(UI.panelLevel)
 end
 
 function UI.Label(parent, text, size, tone)
@@ -100,14 +116,14 @@ function UI.Label(parent, text, size, tone)
 	label:SetFont(UI.font, size or 12, "")
 	label:SetTextColor(unpack(UI.colors[tone or "text"]))
 	label:SetJustifyH("LEFT")
-	label:SetShadowColor(0, 0, 0, 0.7)
-	label:SetShadowOffset(0, -1)
+	label:SetShadowColor(0, 0, 0, 0)
+	label:SetShadowOffset(0, 0)
 	label:SetText(text or "")
 	return label
 end
 
 function UI.Title(parent, text, size)
-	local title = UI.Label(parent, text, size or 18, "accent")
+	local title = UI.Label(parent, text, size or 18, "text")
 	title:SetFont(UI.titleFont, size or 18, "")
 	return title
 end
@@ -137,7 +153,7 @@ end
 
 function UI.Button(parent, label, width, onClick, style, name)
 	local b = CreateFrame("Button", name, parent, "BackdropTemplate")
-	b:SetSize(width or 100, 30)
+	b:SetSize(width or 100, 32)
 	b.label = UI.Label(b, label, 12)
 	b.label:SetPoint("LEFT", b, "LEFT", 8, 0)
 	b.label:SetPoint("RIGHT", b, "RIGHT", -8, 0)
@@ -151,14 +167,14 @@ function UI.Button(parent, label, width, onClick, style, name)
 	b.selectionLine:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -8, 1)
 	local function Paint(self)
 		local enabled = self:IsEnabled()
-		local emphasized = style == "primary" or self.isSelected
-		local tone = self.pressed and "hover" or (emphasized and "primary" or (self.hover and "hover" or "surface"))
-		local fill, edge = UI.colors[tone], UI.colors[(emphasized or self.hover) and "accent" or "border"]
-		self:SetBackdropColor(fill[1], fill[2], fill[3], style == "quiet" and not self.hover and not self.isSelected and 0 or fill[4])
-		self:SetBackdropBorderColor(edge[1], edge[2], edge[3], emphasized and 0.52 or (self.hover and 0.34 or (style == "quiet" and 0 or 0.22)))
-		self.label:SetTextColor(unpack(UI.colors[not enabled and "muted" or (style == "danger" and "danger" or (emphasized and "accent" or "text"))]))
-		self.selectionLine:SetShown(enabled and emphasized and true or false)
-		self:SetAlpha(enabled and 1 or 0.45)
+		local tone = self.pressed and "hover" or (self.isSelected and "primary" or (self.hover and "hover" or "raised"))
+		local fill = UI.colors[style == "primary" and not self.pressed and "accent" or tone]
+		local edge = UI.colors[self.isSelected and "accent" or "border"]
+		self:SetBackdropColor(fill[1], fill[2], fill[3], style == "quiet" and not self.hover and not self.isSelected and 0 or 1)
+		self:SetBackdropBorderColor(edge[1], edge[2], edge[3], style == "quiet" and not self.hover and not self.isSelected and 0 or 1)
+		self.label:SetTextColor(unpack(UI.colors[not enabled and "muted" or (style == "primary" and not self.pressed and "onAccent" or (style == "danger" and "danger" or (self.isSelected and "accent" or "text")))]))
+		self.selectionLine:SetShown(enabled and self.isSelected and true or false)
+		self:SetAlpha(enabled and 1 or 0.6)
 	end
 	b.RefreshAppearance = Paint
 	b:HookScript("OnEnter", function(self) self.hover = true; Paint(self) end)
@@ -240,9 +256,9 @@ function UI.ScrollFrame(parent, name)
 end
 
 local ROLE_STYLE = {
-	user = { label = "You", color = UI.colors.text, bg = UI.colors.userBand },
-	assistant = { label = "AI", color = UI.colors.accent, bg = UI.colors.replyBand },
-	system = { label = "Notice", color = UI.colors.muted, bg = UI.colors.noticeBand },
+	user = { label = "You", color = UI.colors.muted, bg = UI.colors.userBand },
+	assistant = { label = "Assistant", color = UI.colors.accent, bg = UI.colors.replyBand },
+	system = { label = "Notice", color = UI.colors.warning, bg = UI.colors.noticeBand },
 }
 
 ---------------------------------------------------------------------------
@@ -350,15 +366,15 @@ end
 -- First few words of a message, as a chat title.
 local function AutoTitle(text)
 	local words = {}
-	for w in tostring(text or ""):gmatch("%S+") do
+	for w in tostring(text or ""):match("^[^\r\n]*"):gmatch("%S+") do
 		w = w:gsub("^[%p]+", ""):gsub("[%p]+$", "")
 		if w ~= "" then
 			table.insert(words, w)
-			if #words >= 5 then break end
+			if #words >= 9 then break end
 		end
 	end
 	local title = table.concat(words, " ")
-	if #title > 24 then title = title:sub(1, 24):gsub("%s+%S*$", "") end
+	if #title > 64 then title = title:sub(1, 64):gsub("%s+%S*$", "") end
 	if title == "" then return nil end
 	return title:sub(1, 1):upper() .. title:sub(2)
 end
@@ -479,8 +495,9 @@ local function InitDB()
 	if type(s.pixelVerified) ~= "table" then s.pixelVerified = {} end
 	s.interval = s.interval or 20
 	s.cwd = s.cwd or DEFAULT_CWD
-	s.width = s.width or 960
-	s.height = s.height or 640
+	s.width = s.width or 1020
+	s.height = s.height or 700
+	if s.replyFontSize ~= 13 and s.replyFontSize ~= 16 then s.replyFontSize = 14 end
 	db.lastSeq = db.lastSeq or 0
 	-- Chats deleted in game that the bridge hasn't confirmed forgetting yet.
 	db.forget = db.forget or {}
@@ -587,7 +604,11 @@ end
 ---------------------------------------------------------------------------
 
 local strip
-local cellPool = {}
+local cellPool, palettes = {}, {}
+local painter = CreateFrame("Frame", "WowieStripPainter", UIParent)
+local RefreshStrip
+local PAINT_CELLS = 2048
+local PAINT_MS = 2
 
 local function EnsureStrip()
 	local display = tx.probe and tx.probe.display or tx.active
@@ -609,54 +630,102 @@ local function EnsureStrip()
 		physH = h or physH
 	end
 	local dpiScale = GetScreenDPIScale and GetScreenDPIScale() or 1
-	strip:SetScale(768 / (physH * dpiScale))
-	if strip.cell ~= cell then
-		strip:SetSize(CELLS_PER_ROW * cell, MAX_ROWS * cell)
-		for i, t in ipairs(cellPool) do
-			t:SetSize(cell, cell)
-			t:ClearAllPoints()
-			t:SetPoint("TOPLEFT", strip, "TOPLEFT", ((i - 1) % CELLS_PER_ROW) * cell, -math.floor((i - 1) / CELLS_PER_ROW) * cell)
-		end
-	end
+	local scale = 768 / (physH * dpiScale)
+	if strip:GetScale() ~= scale then strip:SetScale(scale) end
+	if strip.cell ~= cell then strip:SetSize(CELLS_PER_ROW * cell, MAX_ROWS * cell) end
 	strip.cell, strip.display = cell, display
 	return strip
 end
 
 local function HideStrip()
-	if strip then strip:Hide(); strip.lastPayload = nil end
+	painter:SetScript("OnUpdate", nil)
+	if strip then strip:Hide(); strip.lastPayload, strip.paint = nil, nil end
 	run.stripShown = nil
 end
 
-local function ShowStrip(id, payload)
+local function PaintCurrent(job)
+	local display = tx.probe and tx.probe.display or tx.active
+	if not db or db.settings.mode ~= "pixel" or job.display ~= display then return false end
+	for id, rec in pairs(job.records) do
+		if run.outbound[id] ~= rec or rec.acked then return false end
+	end
+	return true
+end
+
+local function PaintStrip()
+	local s, job = strip, strip and strip.paint
+	if not job then return end
+	if not PaintCurrent(job) then
+		HideStrip()
+		RefreshStrip()
+		return
+	end
+	local started = debugprofilestop and debugprofilestop()
+	local last = math.min(job.stop, job.index + PAINT_CELLS - 1)
+	for i = job.index, last do
+		local t = cellPool[i]
+		if i <= job.total then
+			if not t then
+				t = s:CreateTexture(nil, "OVERLAY")
+				cellPool[i] = t
+			end
+			if t.wowieCell ~= s.cell then
+				t:SetSize(s.cell, s.cell)
+				t:ClearAllPoints()
+				t:SetPoint("TOPLEFT", s, "TOPLEFT", ((i - 1) % CELLS_PER_ROW) * s.cell, -math.floor((i - 1) / CELLS_PER_ROW) * s.cell)
+				t.wowieCell = s.cell
+			end
+			local value = job.cells[i] or 0
+			if t.wowieValue ~= value or t.wowieDisplay ~= job.display then
+				local color = job.palette[value]
+				t:SetColorTexture(color[1], color[2], color[3], 1)
+				t.wowieValue, t.wowieDisplay = value, job.display
+			end
+			if not t.wowieShown then t:Show(); t.wowieShown = true end
+		elseif t.wowieShown then
+			t:Hide()
+			t.wowieShown = false
+		end
+		job.index = i + 1
+		if started and i % 16 == 0 and debugprofilestop() - started >= PAINT_MS then break end
+	end
+	if job.index <= job.stop then return end
+	s.lastId, s.lastPayload, s.lastDisplay, s.lastScale = job.id, job.payload, job.display, s:GetScale()
+	s.paint = nil
+	painter:SetScript("OnUpdate", nil)
+	local probe = tx.probe
+	if probe and probe.id == job.id then
+		local now = GetTime()
+		probe.pollAt, probe.deadline = now + probe.pollDelay, now + probe.timeout
+	end
+	-- Keep a complete frame visible for the negotiated capture period. Partial
+	-- texture updates are hidden, and cannot look like a new packet to the bridge.
+	tx.nextFrameAt = GetTime() + tx.FramePeriod()
+	s:Show()
+	run.stripShown = true
+end
+
+local function ShowStrip(id, payload, records)
 	local s = EnsureStrip()
 	if s:IsShown() and s.lastId == id and s.lastPayload == payload and s.lastDisplay == s.display and s.lastScale == s:GetScale() then
+		tx.nextFrameAt = GetTime() + tx.FramePeriod()
 		run.stripShown = true
 		return
 	end
+	local palette = palettes[s.display]
+	if not palette then
+		palette = {}
+		for value = 0, 7 do palette[value] = { Codec.CellColor(value, s.display) } end
+		palettes[s.display] = palette
+	end
 	local cells = Codec.Encode(id % 65536, payload)
-	local cell = s.cell
-	local rows = math.ceil(#cells / CELLS_PER_ROW)
-	local total = rows * CELLS_PER_ROW
-	for i = 1, total do
-		local t = cellPool[i]
-		if not t then
-			t = s:CreateTexture(nil, "OVERLAY")
-			t:SetSize(cell, cell)
-			local c = (i - 1) % CELLS_PER_ROW
-			local r = math.floor((i - 1) / CELLS_PER_ROW)
-			t:SetPoint("TOPLEFT", s, "TOPLEFT", c * cell, -r * cell)
-			cellPool[i] = t
-		end
-		local cr, cg, cb = Codec.CellColor(cells[i] or 0, s.display)
-		t:SetColorTexture(cr, cg, cb, 1)
-		t:Show()
-	end
-	for i = total + 1, #cellPool do
-		cellPool[i]:Hide()
-	end
-	s.lastId, s.lastPayload, s.lastDisplay, s.lastScale = id, payload, s.display, s:GetScale()
-	s:Show()
-	run.stripShown = true
+	local total = math.ceil(#cells / CELLS_PER_ROW) * CELLS_PER_ROW
+	s:Hide()
+	run.stripShown = nil
+	s.paint = { id = id, payload = payload, display = s.display, records = records,
+		cells = cells, palette = palette, total = total, stop = math.max(total, #cellPool), index = 1 }
+	painter:SetScript("OnUpdate", PaintStrip)
+	PaintStrip()
 end
 
 -- Record: session, chat, id, cwd, flags, name, [context,] text. Several records
@@ -727,12 +796,15 @@ local function DataRecord(id, rec)
 end
 
 -- Redraw the strip from every outbound message the bridge hasn't acknowledged.
-local function RefreshStrip(prefer)
+RefreshStrip = function(prefer)
+	if strip and strip.paint then
+		if PaintCurrent(strip.paint) and (not prefer or strip.paint.records[prefer]) then return end
+		HideStrip()
+	end
 	if tx.probe then
 		local rec = run.outbound[tx.probe.id]
-		if rec then ShowStrip(tx.probe.id, RecordFor(tx.probe.id, rec)); return end
+		if rec then ShowStrip(tx.probe.id, RecordFor(tx.probe.id, rec), { [tx.probe.id] = rec }); return end
 	end
-	tx.nextFrameAt = GetTime() + tx.FramePeriod()
 	local ids = {}
 	for id, rec in pairs(run.outbound) do
 		if not rec.acked then table.insert(ids, id) end
@@ -751,18 +823,19 @@ local function RefreshStrip(prefer)
 		run.dataOwner = index
 		local id = ids[index]
 		local rec = run.outbound[id]
-		ShowStrip(id, rec.parts and DataRecord(id, rec) or RecordFor(id, rec))
+		ShowStrip(id, rec.parts and DataRecord(id, rec) or RecordFor(id, rec), { [id] = rec })
 		return
 	end
 	-- Newest first; drop the oldest if the frame would overflow.
-	local parts, size, latest = {}, 0, ids[#ids]
+	local parts, records, size, latest = {}, {}, 0, ids[#ids]
 	for i = #ids, 1, -1 do
 		local r = RecordFor(ids[i], run.outbound[ids[i]])
 		if size + #r + 1 > Codec.MAX_PAYLOAD then break end
 		table.insert(parts, 1, r)
+		records[ids[i]] = run.outbound[ids[i]]
 		size = size + #r + 1
 	end
-	ShowStrip(latest, table.concat(parts, RS))
+	ShowStrip(latest, table.concat(parts, RS), records)
 end
 
 function tx.FramePeriod()
@@ -837,7 +910,7 @@ function tx.MaybeCalibrate()
 	local nonce, now = NewNonce(), GetTime()
 	local pollDelay = math.max(1, (tx.captureInterval or 0.25) * 2 + 0.25)
 	tx.probe = { id = db.lastSeq, nonce = nonce, display = display, preference = preference, startedEpoch = time(),
-		pollAt = now + pollDelay, deadline = now + math.max(4, pollDelay + 2) }
+		pollDelay = pollDelay, timeout = math.max(4, pollDelay + 2) }
 	local c = ActiveChat()
 	local rec = { chat = c and c.id or "", cwd = "", flags = "h;nonce=" .. nonce .. ";calibration=" .. display,
 		name = "", text = "", hello = true, calibration = true, nonce = nonce, sentAt = now }
@@ -896,6 +969,7 @@ end
 function tx.Invalidate()
 	if tx.probe then run.outbound[tx.probe.id] = nil end
 	tx.active, tx.probe, tx.failed, tx.retryDisplay, tx.reason = "robust", nil, nil, nil, ""
+	HideStrip()
 	RefreshStrip()
 	tx.UpdateSettings()
 end
@@ -1202,6 +1276,7 @@ function Wowie.UpdateConnect()
 	local c = ActiveChat()
 	ui.send:SetText(c and c.pendingId and "Check reply" or "Send")
 	if ui.cancel then ui.cancel:SetShown((c and c.pendingId ~= nil) or run.sendOnConnect ~= nil) end
+	if ui.statusArea then ui.statusArea:SetPoint("RIGHT", ui.cancel and ui.cancel:IsShown() and ui.cancel or ui.send, "LEFT", -12, 0) end
 end
 
 -- Prove the sound-file trick actually distinguishes empty from valid files on this
@@ -1479,11 +1554,11 @@ local function TransportTick()
 		end
 	end
 	local probe = tx.probe
-	if probe and not probe.polled and now >= probe.pollAt and not read then
+	if probe and probe.pollAt and not probe.polled and now >= probe.pollAt and not read then
 		probe.polled = true
 		TryLoadSlot("calibration")
 	end
-	if tx.probe and now >= tx.probe.deadline then tx.Fail("Display check timed out; using Robust. Save again to retry.") end
+	if tx.probe and tx.probe.deadline and now >= tx.probe.deadline then tx.Fail("Display check timed out; using Robust. Save again to retry.") end
 	Wowie.CheckConnection()
 	tx.MaybeCalibrate()
 	if not tx.probe and (not tx.nextFrameAt or now + 0.001 >= tx.nextFrameAt) then
@@ -2147,6 +2222,7 @@ function Wowie.SaveDefaults()
 			or (reasoning ~= "" and ChatChoice(c, "reasoning", nextDefaults) == "")) then c.resetNext = true end
 	end
 	db.settings.defaults = nextDefaults
+	db.settings.replyFontSize = draft.replyFontSize or db.settings.replyFontSize
 	ui.defaultsPanel:Hide()
 	tx.SetPreference(draft.pixelDisplay)
 	Wowie.Render()
@@ -2484,30 +2560,22 @@ function Wowie.UpdateStatus()
 	else
 		s = "Ready"
 	end
-	ui.status:SetText(s)
+	local short = s
+	if not (c and c.pendingId) then
+		short = run.connectingAt and "Checking bridge..." or (run.connectFailed and "Bridge unavailable" or (c and c.draft and c.draft ~= "" and "Draft saved" or "Ready to send"))
+	elseif s:find("Reading shared context", 1, true) then short = "Reading selected information..."
+	elseif c.progress then short = ChatAgentName(c) .. " is working..."
+	elseif run.slotsMissing or run.slotsExhausted then short = "Reply slots need attention"
+	elseif run.pixelFailed then short = "Delivery needs attention" end
+	ui.status:SetText(short)
 	run.statusText = s
 	Wowie.UpdateDot()
 	Wowie.UpdateConnect()
 	if ui.title then ui.title:SetText(c and Display(c.name) or "Conversation") end
-	local cwdText
-	if c and c.cwd ~= "" then
-		cwdText = Display(c.cwd)
-	elseif run.bridgeCwd then
-		cwdText = Display(run.bridgeCwd) .. " (bridge default)"
-	else
-		cwdText = "Bridge default · choose a working folder in Chat ..."
-	end
-	local agentText
-	if c and c.agent and c.agent ~= "" then
-		agentText = AgentName(c.agent)
-	elseif db.settings.defaults.agent ~= "" then
-		agentText = AgentName(DefaultAgent()) .. " (addon default)"
-	elseif run.bridgeAgent then
-		agentText = AgentName(run.bridgeAgent) .. " (bridge default)"
-	else
-		agentText = "(bridge default)"
-	end
-	ui.cwd:SetText(cwdText .. " · " .. agentText)
+	local folder = ChatFolder(c)
+	local folderName = FolderName(folder)
+	ui.cwd:SetText(folderName ~= "" and ("Workspace: " .. Display(folderName)) or "Ask about your character or work with your agent")
+	if ui.cwdArea then ui.cwdArea.path = folder end
 	Wowie.UpdateSelectors()
 	Wowie.UpdateMini()
 end
@@ -2519,44 +2587,35 @@ local function GetBubble(i)
 	b = CreateFrame("Frame", nil, ui.content)
 	b.bg = b:CreateTexture(nil, "BACKGROUND")
 	b.bg:SetAllPoints()
-	b.accent = b:CreateTexture(nil, "BORDER")
-	b.accent:SetPoint("TOPLEFT", b, "TOPLEFT", 0, 0)
-	b.accent:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 0, 0)
-	b.accent:SetWidth(1)
-	b.rule = UI.Rule(b, "border", 0.30)
-	b.rule:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 10, 0)
-	b.rule:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -10, 0)
+	b.rule = UI.Rule(b, "border", 0.5)
+	b.rule:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 16, 0)
+	b.rule:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -16, 0)
 	b.who = UI.Label(b, "", 12)
-	b.who:SetPoint("TOPLEFT", b, "TOPLEFT", 10, -8)
-	b.who:SetPoint("RIGHT", b, "RIGHT", -64, 0)
+	b.who:SetPoint("TOPLEFT", b, "TOPLEFT", 16, -14)
+	b.who:SetPoint("RIGHT", b, "RIGHT", -140, 0)
 	b.who:SetWordWrap(false)
+	b.copy = UI.Button(b, "Copy", 56, function() Wowie.ShowCopy(b.text or "") end, "quiet", "WowieMessageCopy" .. i)
+	b.copy:SetHeight(24)
+	b.copy:SetPoint("TOPRIGHT", b, "TOPRIGHT", -10, -8)
+	UI.Tooltip(b.copy, "Copy full reply", "Opens the original text, including sources and details. You can also select any visible paragraph directly.")
 	b.when = UI.Label(b, "", 10, "muted")
-	b.when:SetPoint("TOPRIGHT", b, "TOPRIGHT", -10, -10)
-	b.body = CreateFrame("EditBox", "WowieMessageText" .. i, b)
-	b.body:SetMultiLine(true)
-	b.body:SetAutoFocus(false)
-	b.body:SetFont(UI.font, 15, "")
-	b.body:SetTextInsets(0, 0, 0, 0)
-	b.body:SetSpacing(2)
-	b.body:SetMaxLetters(0)
-	b.body:SetJustifyH("LEFT")
-	b.body:SetJustifyV("TOP")
-	b.body:SetPoint("TOPLEFT", b.who, "BOTTOMLEFT", 0, -6)
-	b.body:SetHighlightColor(unpack(UI.colors.highlight))
-	b.body.messageText = ""
-	b.body:SetScript("OnTextChanged", function(self)
-		if self:GetText() == self.messageText then return end
-		local cursor = self:GetCursorPosition()
-		self:SetText(self.messageText)
-		self:SetCursorPosition(math.min(cursor, #self.messageText))
+	b.when:SetPoint("RIGHT", b.copy, "LEFT", -10, 0)
+	b.body = Wowie.ReplyView.Create(b, "WowieMessageText" .. i)
+	b.body:SetPoint("TOPLEFT", b, "TOPLEFT", 16, -42)
+	b.layoutOptions = { onResize = function() Wowie.Render() end }
+	b.allow = UI.Button(b, "Approve tools & retry", 180, function(self) Wowie.Allow(self.chatId, self.rules) end, "primary")
+	b.allow:SetPoint("TOPLEFT", b.body, "BOTTOMLEFT", 0, -12)
+	b.allow:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:SetText("Approve these host tools and retry")
+		GameTooltip:AddLine(Display(table.concat(self.rules or {}, "\n")), 0.92, 0.94, 0.97, true)
+		GameTooltip:AddLine("Adds these rules to the agent configuration.", 0.97, 0.72, 0.38, true)
+		GameTooltip:Show()
 	end)
-	b.body:SetScript("OnEscapePressed", function(self) self:ClearFocus(); self:ClearHighlightText() end)
-	b.body:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
-	b.allow = UI.Button(b, "", 180, function(self) Wowie.Allow(self.chatId, self.rules) end, "primary")
-	b.allow:SetPoint("TOPLEFT", b.body, "BOTTOMLEFT", 0, -10)
+	b.allow:SetScript("OnLeave", function() GameTooltip:Hide() end)
 	b.allow:Hide()
 	b.macroBtns = {}
-	b:SetScript("OnHide", function() b.body:ClearFocus(); b.body:ClearHighlightText() end)
+	b:SetScript("OnHide", function() b.body:ClearSelection() end)
 	ui.bubbles[i] = b
 	return b
 end
@@ -2584,47 +2643,25 @@ function Wowie.Render()
 			local st = ROLE_STYLE[role] or ROLE_STYLE.system
 			b:SetWidth(width)
 			b.bg:SetColorTexture(st.bg[1], st.bg[2], st.bg[3], st.bg[4])
-			b.accent:SetColorTexture(st.color[1], st.color[2], st.color[3], 0.40)
 			b.who:SetText(st == ROLE_STYLE.assistant and ReplyAgentName(c, agent) or st.label)
 			b.who:SetTextColor(st.color[1], st.color[2], st.color[3])
 			b.when:SetText(when or "")
 			if b.record ~= record or b.chatId ~= c.id then
-				b.body:ClearFocus()
-				b.body:ClearHighlightText()
+				b.body:ClearSelection()
 				b.record, b.chatId = record, c.id
 			end
-			local bodyWidth = width - 20
-			local layoutChanged = b.bodyWidth ~= bodyWidth or b.text ~= text
-			if b.bodyWidth ~= bodyWidth then b.body:SetWidth(bodyWidth); b.bodyWidth = bodyWidth end
-			b.body.messageText = text
-			-- A no-op redraw must preserve the native selection and caret.
-			if b.text ~= text then b.body:SetText(text); b.body:SetCursorPosition(0) end
-			if dim then
-				b.body:SetTextColor(unpack(UI.colors.muted))
-			else
-				b.body:SetTextColor(unpack(UI.colors.text))
-			end
-			if layoutChanged then
-				-- Point size times EditBox line count is not the painted extent.
-				-- Measure wrapped glyphs with identical font, width and spacing.
-				local measure = ui.messageMeasure
-				measure:SetFont(b.body:GetFont())
-				measure:SetSpacing(b.body:GetSpacing())
-				measure:SetWidth(bodyWidth)
-				measure:SetText(text:find("|", 1, true) and text:gsub("|", "||") or text)
-				b.bodyHeight = math.max(18, math.ceil(measure:GetStringHeight()) + 4)
-				b.body:SetHeight(b.bodyHeight)
-			end
-			local h = b.bodyHeight
+			local options = b.layoutOptions
+			options.formatted, options.muted = role == "assistant" and not dim, dim
+			options.identity, options.fontSize = record, db.settings.replyFontSize or 14
+			local h = Wowie.ReplyView.Layout(b.body, text, math.max(80, width - 32), options)
+			b.copy:SetShown(not dim)
 			local extra = 0
 			if denied then
-				local label = "Allow " .. table.concat(denied, ", ") .. " & retry"
-				b.allow:SetText(label)
-				b.allow:SetWidth(math.min(width - 24, math.max(160, b.allow:GetFontString():GetStringWidth() + 30)))
+				b.allow:SetWidth(math.min(width - 32, 180))
 				b.allow.chatId = c.id
 				b.allow.rules = denied
 				b.allow:Show()
-				extra = 38
+				extra = 44
 			else
 				b.allow:Hide()
 			end
@@ -2645,20 +2682,20 @@ function Wowie.Render()
 				end
 				mb.macro = m
 				mb:SetText(Wowie.MacroLabel(m))
-				mb:SetWidth(math.min(width - 24, math.max(160, mb:GetFontString():GetStringWidth() + 30)))
+				mb:SetWidth(math.min(width - 32, math.max(160, mb:GetFontString():GetStringWidth() + 30)))
 				mb:ClearAllPoints()
-				mb:SetPoint("TOPLEFT", b.body, "BOTTOMLEFT", 0, -10 - extra)
+				mb:SetPoint("TOPLEFT", b.body, "BOTTOMLEFT", 0, -12 - extra)
 				mb:Show()
-				extra = extra + 38
+				extra = extra + 44
 				shownMacros = k
 			end
 			for k = shownMacros + 1, #b.macroBtns do b.macroBtns[k]:Hide() end
-			b:SetHeight(8 + 14 + 6 + h + 8 + extra)
+			b:SetHeight(42 + h + 16 + extra)
 			b:ClearAllPoints()
 			b:SetPoint("TOPLEFT", ui.content, "TOPLEFT", 0, -y)
 			b.text = text
 			b:Show()
-			y = y + b:GetHeight() + 8
+			y = y + b:GetHeight() + 16
 		end
 		local last = #c.history
 		for i, m in ipairs(c.history) do
@@ -2695,15 +2732,20 @@ end
 function Wowie.ShowCopy(text)
 	if not ui.copy then
 		local cf = CreateFrame("Frame", "WowieCopy", UIParent, "BackdropTemplate")
-		cf:SetSize(560, 320)
+		UI.FitPanel(cf, 600, 380)
 		cf:SetPoint("CENTER")
 		cf:SetFrameStrata("FULLSCREEN_DIALOG")
 		cf:SetMovable(true)
 		cf:SetClampedToScreen(true)
 		cf:EnableMouse(true)
-		cf:RegisterForDrag("LeftButton")
-		cf:SetScript("OnDragStart", cf.StartMoving)
-		cf:SetScript("OnDragStop", cf.StopMovingOrSizing)
+		local drag = CreateFrame("Frame", nil, cf)
+		drag:SetPoint("TOPLEFT", cf, "TOPLEFT")
+		drag:SetPoint("TOPRIGHT", cf, "TOPRIGHT", -80, 0)
+		drag:SetHeight(44)
+		drag:EnableMouse(true)
+		drag:RegisterForDrag("LeftButton")
+		drag:SetScript("OnDragStart", function() cf:StartMoving() end)
+		drag:SetScript("OnDragStop", function() cf:StopMovingOrSizing() end)
 		UI.Window(cf, 44)
 		tinsert(UISpecialFrames, "WowieCopy")
 
@@ -2730,6 +2772,7 @@ function Wowie.ShowCopy(text)
 	end
 	ui.copyBox:SetText(text)
 	ui.copy:Show()
+	UI.RaisePanel(ui.copy)
 	ui.copyBox:SetFocus()
 	ui.copyBox:HighlightText()
 end
@@ -2755,12 +2798,12 @@ function Wowie.RenderChatList()
 			btn.selectedLine:SetShown(c.id == db.activeChat)
 			btn.label:SetTextColor(unpack(UI.colors[c.id == db.activeChat and "accent" or "text"]))
 			btn:ClearAllPoints()
-			btn:SetPoint("TOPLEFT", ui.chatContent, "TOPLEFT", 0, -(n - 1) * 56)
+			btn:SetPoint("TOPLEFT", ui.chatContent, "TOPLEFT", 0, -(n - 1) * 66)
 			btn:Show()
 		end
 	end
 	for i = n + 1, #ui.chatButtons do ui.chatButtons[i]:Hide(); ui.chatButtons[i].chatId = nil end
-	ui.chatContent:SetHeight(math.max(n * 56, 36))
+	ui.chatContent:SetHeight(math.max(n * 66, 36))
 	ui.chatEmpty:SetShown(n == 0)
 	ui.chatCount:SetText(#db.chats .. "/" .. MAX_CHATS)
 	ui.newChat:SetEnabled(#db.chats < MAX_CHATS)
@@ -3169,6 +3212,7 @@ local function MakeSelectors(parent)
 		search:SetText("")
 		RenderChoices()
 		menu:Show()
+		UI.RaisePanel(menu)
 	end
 	return row
 end
@@ -3198,50 +3242,117 @@ function Wowie.UpdateSelectors()
 	if ui.defaultsDraft and ui.defaultsRow then UpdateSelectorRow(ui.defaultsRow, ui.defaultsDraft, true) end
 end
 
+function Wowie.ShowReplyPreview()
+	if not ui.replyPreview then
+		local preview = UI.Window(CreateFrame("Frame", "WowieReplyPreview", UIParent, "BackdropTemplate"), 48)
+		UI.FitPanel(preview, 660, 560)
+		preview:SetPoint("CENTER", UIParent, "CENTER")
+		preview:SetClampedToScreen(true)
+		preview:EnableMouse(true)
+		local title = UI.Title(preview, "Reply preview", 18)
+		title:SetPoint("TOPLEFT", preview, "TOPLEFT", 20, -16)
+		local close = UI.Button(preview, "Back to Settings", 150, function() preview:Hide() end, "secondary", "WowieReplyPreviewClose")
+		close:SetPoint("TOPRIGHT", preview, "TOPRIGHT", -12, -8)
+		local note = UI.Label(preview, "Formatting example only. Nothing is sent to an AI or saved in your chats.", 12, "muted")
+		note:SetPoint("TOPLEFT", preview, "TOPLEFT", 20, -62)
+		note:SetWidth(620)
+		local scroll = UI.ScrollFrame(preview, "WowieReplyPreviewScroll")
+		scroll:SetPoint("TOPLEFT", preview, "TOPLEFT", 20, -94)
+		scroll:SetPoint("BOTTOMRIGHT", preview, "BOTTOMRIGHT", -36, 20)
+		local body = Wowie.ReplyView.Create(scroll, "WowieReplyPreviewText")
+		scroll:SetScrollChild(body)
+		preview.body, preview.scroll = body, scroll
+		preview.sample = "## A clearer answer\nStart with the important part. Longer explanations are split into readable sections instead of one dense block.\n\n### Your next steps\n1. Review the information you want to share.\n2. Ask a question in the conversation.\n3. Follow directions yourself; Wowie does not play for you.\n\n> You can drag-select any paragraph or code block directly.\n\n### A code example\n```lua\nlocal greeting = \"Hello, adventurer\"\nprint(greeting)\n```\n\n[Example source](https://example.com/guide)\n\nTL;DR:\nReadable sections, selectable text and compact sources.\n\n[bridge] Example technical detail, kept separate from the answer."
+		preview.options = { formatted = true, identity = preview, onResize = function() Wowie.ShowReplyPreview() end }
+		preview:SetScript("OnHide", function()
+			body:ClearSelection()
+			if ui.previewReturn and ui.defaultsDraft and ui.frame and ui.frame:IsShown() then
+				ui.previewReturn = nil
+				ui.defaultsPanel:Show()
+				UI.RaisePanel(ui.defaultsPanel)
+			end
+		end)
+		tinsert(UISpecialFrames, "WowieReplyPreview")
+		ui.replyPreview = preview
+	end
+	local preview = ui.replyPreview
+	if ui.defaultsPanel and ui.defaultsPanel:IsShown() then
+		ui.previewReturn, ui.previewTransition = true, true
+		ui.defaultsPanel:Hide()
+		ui.previewTransition = nil
+	end
+	preview.options.fontSize = ui.defaultsDraft and ui.defaultsDraft.replyFontSize or db.settings.replyFontSize
+	UI.FitPanel(preview, 660, 560)
+	Wowie.ReplyView.Layout(preview.body, preview.sample, 604, preview.options)
+	preview:Show()
+	UI.RaisePanel(preview)
+	preview.scroll:UpdateScrollChildRect()
+end
+
 local function MakeDefaultsPanel(parent)
-	local panel = UI.Window(CreateFrame("Frame", "WowieDefaults", parent, "BackdropTemplate"), 44)
-	panel:SetSize(590, 430)
-	panel:SetPoint("CENTER")
-	panel:SetFrameStrata("DIALOG")
+	local panel = UI.Window(CreateFrame("Frame", "WowieDefaults", parent, "BackdropTemplate"), 48)
+	UI.FitPanel(panel, 620, 540)
+	panel:SetPoint("CENTER", UIParent, "CENTER")
 	panel:SetToplevel(true)
 	panel:SetClampedToScreen(true)
 	panel:EnableMouse(true)
 	panel:SetMovable(true)
-	panel:RegisterForDrag("LeftButton")
-	panel:SetScript("OnDragStart", panel.StartMoving)
-	panel:SetScript("OnDragStop", panel.StopMovingOrSizing)
+	local drag = CreateFrame("Frame", nil, panel)
+	drag:SetPoint("TOPLEFT", panel, "TOPLEFT")
+	drag:SetPoint("TOPRIGHT", panel, "TOPRIGHT")
+	drag:SetHeight(46)
+	drag:EnableMouse(true)
+	drag:RegisterForDrag("LeftButton")
+	drag:SetScript("OnDragStart", function() panel:StartMoving() end)
+	drag:SetScript("OnDragStop", function() panel:StopMovingOrSizing() end)
 	tinsert(UISpecialFrames, "WowieDefaults")
-	local title = UI.Title(panel, "Settings", 17)
-	title:SetPoint("TOPLEFT", panel, "TOPLEFT", 18, -18)
-	local description = UI.Label(panel, "Chats set to Default inherit these choices, then the bridge / CLI defaults.\nChoose an explicit agent before setting its model or reasoning.", 12, "muted")
-	description:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -14)
-	description:SetWidth(550)
+	local title = UI.Title(panel, "Settings", 18)
+	title:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -16)
+	local description = UI.Label(panel, "Assistant defaults", 14)
+	description:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -68)
 	local row = MakeSelectorRow(panel, "WowieDefaultSelectors", true)
-	row:SetPoint("TOPLEFT", panel, "TOPLEFT", 18, -100)
-	row:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -18, -100)
-	local note = UI.Label(panel, "Applies to future messages only. Pending requests keep their original settings.\nNew chats inherit the current chat's choices. Bridge configuration is unchanged.", 11, "muted")
-	note:SetPoint("TOPLEFT", row, "BOTTOMLEFT", 0, -14)
-	note:SetWidth(550)
+	row:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -96)
+	row:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -20, -96)
+	local note = UI.Label(panel, "Used by chats set to Default. Choose an agent before its model or reasoning.\nCurrent requests and bridge configuration stay unchanged.", 12, "muted")
+	note:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -158)
+	note:SetWidth(580)
+	note:SetHeight(34)
 	local transportTitle = UI.Label(panel, "Pixel display", 14)
-	transportTitle:SetPoint("TOPLEFT", panel, "TOPLEFT", 18, -212)
+	transportTitle:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -210)
 	ui.pixelButtons = {}
 	for i, display in ipairs({ "robust", "compact", "quiet" }) do
-		local button = UI.Button(panel, Codec.DISPLAYS[display].label, 174, function()
+		local button = UI.Button(panel, Codec.DISPLAYS[display].label, 188, function()
 			if ui.defaultsDraft then ui.defaultsDraft.pixelDisplay = display; tx.UpdateSettings() end
 		end, "secondary", "WowiePixelDisplay" .. Codec.DISPLAYS[display].label)
-		button:SetPoint("TOPLEFT", panel, "TOPLEFT", 18 + (i - 1) * 182, -238)
+		button:SetPoint("TOPLEFT", panel, "TOPLEFT", 20 + (i - 1) * 196, -238)
 		ui.pixelButtons[display] = button
 	end
-	local transportNote = UI.Label(panel, "Compact uses 2px cells. Quiet uses dark colors, with 4px if 2px is not reliable.\nSave verifies a full-size captured frame before applying the mode.", 12, "muted")
-	transportNote:SetPoint("TOPLEFT", panel, "TOPLEFT", 18, -280)
-	transportNote:SetWidth(550)
+	local transportNote = UI.Label(panel, "Robust favors reliability. Compact is smaller. Quiet uses dark colors.\nSave checks the display before enabling a different mode.", 12, "muted")
+	transportNote:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -282)
+	transportNote:SetWidth(580)
 	transportNote:SetHeight(34)
-	ui.pixelStatus = UI.Label(panel, "", 12, "muted")
-	ui.pixelStatus:SetPoint("TOPLEFT", panel, "TOPLEFT", 18, -322)
-	ui.pixelStatus:SetWidth(550)
-	ui.pixelStatus:SetHeight(42)
+	ui.pixelStatus = UI.Label(panel, "", 11, "muted")
+	ui.pixelStatus:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -324)
+	ui.pixelStatus:SetWidth(580)
+	ui.pixelStatus:SetHeight(38)
+	local appearance = UI.Label(panel, "Reading", 14)
+	appearance:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -386)
+	local sizes = {}
+	local function UpdateReading()
+		for value, button in pairs(sizes) do UI.SetSelected(button, ui.defaultsDraft and ui.defaultsDraft.replyFontSize == value) end
+	end
+	for i, spec in ipairs({ {13, "Small"}, {14, "Medium"}, {16, "Large"} }) do
+		local value = spec[1]
+		local button = UI.Button(panel, spec[2], 102, function()
+			if ui.defaultsDraft then ui.defaultsDraft.replyFontSize = value; UpdateReading() end
+		end, "secondary", "WowieReadingSize" .. value)
+		button:SetPoint("TOPLEFT", panel, "TOPLEFT", 20 + (i - 1) * 110, -414)
+		sizes[value] = button
+	end
+	local preview = UI.Button(panel, "Preview formatting", 168, Wowie.ShowReplyPreview, "secondary", "WowiePreviewFormatting")
+	preview:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -20, -414)
 	local reset = UI.Button(panel, "Use bridge defaults", 156, function()
-		ui.defaultsDraft = { agent = "", model = "", reasoning = "", pixelDisplay = ui.defaultsDraft.pixelDisplay }
+		ui.defaultsDraft = { agent = "", model = "", reasoning = "", pixelDisplay = ui.defaultsDraft.pixelDisplay, replyFontSize = ui.defaultsDraft.replyFontSize }
 		if ui.selectionMenu then ui.selectionMenu:Hide() end
 		Wowie.UpdateSelectors()
 	end, "secondary", "WowieDefaultsReset")
@@ -3252,17 +3363,25 @@ local function MakeDefaultsPanel(parent)
 	cancel:SetPoint("RIGHT", save, "LEFT", -8, 0)
 	panel:Hide()
 	panel:SetScript("OnHide", function()
+		if ui.previewTransition then return end
+		ui.previewReturn = nil
 		if ui.selectionMenu and ui.selectionMenu.defaults then ui.selectionMenu:Hide() end
+		if ui.replyPreview then ui.replyPreview:Hide() end
 		ui.defaultsDraft = nil
 	end)
 	ui.defaultsPanel, ui.defaultsRow = panel, row
 
 	function Wowie.ShowDefaults()
+		ui.previewReturn = nil
+		if ui.replyPreview then ui.replyPreview:Hide() end
 		local d = db.settings.defaults
-		ui.defaultsDraft = { agent = d.agent, model = d.model, reasoning = d.reasoning, pixelDisplay = db.settings.pixelDisplay }
+		ui.defaultsDraft = { agent = d.agent, model = d.model, reasoning = d.reasoning, pixelDisplay = db.settings.pixelDisplay, replyFontSize = db.settings.replyFontSize }
 		if ui.selectionMenu then ui.selectionMenu:Hide() end
 		Wowie.Toggle(true)
 		panel:Show()
+		UI.FitPanel(panel, 620, 540)
+		UI.RaisePanel(panel)
+		UpdateReading()
 		Wowie.UpdateSelectors()
 		tx.UpdateSettings()
 	end
@@ -3290,7 +3409,10 @@ function Wowie.UpdateSharingSummary()
 	if not ui.sharingSummary then return end
 	local summary = WowieContextUI and WowieContextUI.Summary and WowieContextUI.Summary()
 	if summary then
-		ui.sharingSummary:SetText((summary.enabled and "Sharing on" or "Sharing paused") .. " · " .. summary.selected .. " selected")
+		local selected = WowieContext.GetPreset()
+		local preset = selected == "recommended" and "Recommended" or (selected == "minimal" and "Minimal" or "Custom")
+		local delivery = WowieContext.GetDelivery() == "smart" and "Smart" or "Full snapshot"
+		ui.sharingSummary:SetText((summary.enabled and ("Sharing: " .. preset) or "Sharing paused") .. "\n" .. delivery .. " · " .. summary.selected .. " sources")
 		ui.sharingSummary:SetTextColor(unpack(UI.colors[summary.enabled and "muted" or "warning"]))
 	else ui.sharingSummary:SetText("Choose what the AI may read") end
 end
@@ -3304,6 +3426,16 @@ StaticPopupDialogs["WOWIE_CLEAR"] = {
 	end,
 }
 
+function Wowie.LayoutWorkspace()
+	if not ui.contentEdge then return end
+	local collapsed = db.settings.sidebarCollapsed == true
+	ui.sidebar:SetShown(not collapsed)
+	ui.contentEdge:ClearAllPoints()
+	ui.contentEdge:SetPoint("TOPLEFT", ui.frame, "TOPLEFT", collapsed and 0 or PANEL_W + 12, -60)
+	ui.contentEdge:SetPoint("BOTTOMLEFT", ui.frame, "BOTTOMLEFT", collapsed and 0 or PANEL_W + 12, 12)
+	UI.SetSelected(ui.sidebarToggle, not collapsed)
+end
+
 local function BuildUI()
 	if ui.frame then return end
 	local s = db.settings
@@ -3312,7 +3444,7 @@ local function BuildUI()
 	local minW, minH = 720, 500
 	local maxW, maxH = screenW / scale, screenH / scale
 	s.width, s.height = math.min(maxW, math.max(minW, s.width)), math.min(maxH, math.max(minH, s.height))
-	local f = UI.Window(CreateFrame("Frame", "WowieFrame", UIParent, "BackdropTemplate"), 44)
+	local f = UI.Window(CreateFrame("Frame", "WowieFrame", UIParent, "BackdropTemplate"), 52)
 	ui.frame = f
 	f:SetScale(scale)
 	f:SetSize(s.width, s.height)
@@ -3326,7 +3458,7 @@ local function BuildUI()
 	local drag = CreateFrame("Frame", "WowieDragHeader", f)
 	drag:SetPoint("TOPLEFT", f, "TOPLEFT", 0, 0)
 	-- The right edge is anchored to Navigation once the header actions exist.
-	drag:SetHeight(42)
+	drag:SetHeight(50)
 	drag:EnableMouse(true)
 	drag:RegisterForDrag("LeftButton")
 	drag:SetScript("OnDragStart", function() f:StartMoving() end)
@@ -3340,6 +3472,15 @@ local function BuildUI()
 
 	local identity = UI.Title(f, "Wowie", 19)
 	identity:SetPoint("TOPLEFT", f, "TOPLEFT", 18, -16)
+	identity:SetTextColor(unpack(UI.colors.accent))
+	local chatsToggle = UI.Button(f, "Chats", 58, function()
+		s.sidebarCollapsed = not s.sidebarCollapsed
+		Wowie.LayoutWorkspace()
+		Wowie.Render()
+	end, "quiet", "WowieToggleSidebar")
+	chatsToggle:SetPoint("TOPLEFT", f, "TOPLEFT", 96, -10)
+	ui.sidebarToggle = chatsToggle
+	UI.Tooltip(chatsToggle, "Show or hide conversations", "Hide the sidebar to give the current conversation more room.")
 	local function MakeDot(parent)
 		local holder = CreateFrame("Frame", nil, parent)
 		holder:SetSize(14, 14)
@@ -3355,7 +3496,7 @@ local function BuildUI()
 		return holder, dot
 	end
 	local dotHolder, dot = MakeDot(f)
-	dotHolder:SetPoint("LEFT", identity, "RIGHT", 18, 0)
+	dotHolder:SetPoint("LEFT", chatsToggle, "RIGHT", 14, 0)
 	ui.dot = dot
 	ui.connection = UI.Label(f, "Idle / not verified", 12, "muted")
 	ui.connection:SetPoint("LEFT", dotHolder, "RIGHT", 5, 0)
@@ -3366,13 +3507,13 @@ local function BuildUI()
 	local minimize = UI.Button(f, "—", 30, function() Wowie.Minimize(true) end, "quiet", "WowieMinimize")
 	minimize:SetPoint("RIGHT", close, "LEFT", -6, 0)
 	UI.Tooltip(minimize, "Minimize · Esc", "Keep waiting in the compact bar without taking keyboard focus.")
-	local settings = UI.Button(f, "Settings", 80, function() Wowie.ShowDefaults() end, "quiet", "WowieSettings")
-	settings:SetPoint("RIGHT", minimize, "LEFT", -12, 0)
-	local sharing = UI.Button(f, "Sharing", 80, function()
+	local settings = UI.Button(f, "Settings", 70, function() Wowie.ShowDefaults() end, "quiet", "WowieSettings")
+	settings:SetPoint("RIGHT", minimize, "LEFT", -8, 0)
+	local sharing = UI.Button(f, "Sharing", 70, function()
 		if WowieContextUI then WowieContextUI.Show() end
 	end, "quiet", "WowieSharing")
 	sharing:SetPoint("RIGHT", settings, "LEFT", -6, 0)
-	local navigation = UI.Button(f, "Navigation", 160, function()
+	local navigation = UI.Button(f, "Navigation", 110, function()
 		local map = WowieMap
 		if map and type(map.ShowNavigation) == "function" and type(map.GetNavigationState) == "function" then
 			map.ShowNavigation()
@@ -3393,6 +3534,9 @@ local function BuildUI()
 	Wowie.UpdateNavigation()
 
 	f:SetScript("OnHide", function()
+		ui.previewReturn = nil
+		if ui.replyPreview then ui.replyPreview:Hide() end
+		ui.defaultsDraft = nil
 		if ui.input then ui.input:ClearFocus() end
 		if ui.selectionMenu then ui.selectionMenu:Hide() end
 		if ui.chatMenu then ui.chatMenu:Hide() end
@@ -3406,23 +3550,28 @@ local function BuildUI()
 	end)
 
 	local panel = UI.Surface(CreateFrame("Frame", "WowieConversations", f, "BackdropTemplate"))
-	panel:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -54)
+	panel:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -60)
 	panel:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, 12)
 	panel:SetWidth(PANEL_W)
 	panel:SetBackdropBorderColor(0, 0, 0, 0)
+	ui.sidebar = panel
+	local edge = CreateFrame("Frame", "WowieContentEdge", f)
+	edge:SetWidth(1)
+	ui.contentEdge = edge
+	Wowie.LayoutWorkspace()
 	local sidebarRule = UI.Rule(panel, "border", 0.55, true)
 	sidebarRule:ClearAllPoints()
 	sidebarRule:SetPoint("TOPRIGHT", panel, "TOPRIGHT", 0, 0)
 	sidebarRule:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 0)
 	sidebarRule:SetWidth(1)
-	local heading = UI.Label(panel, "Conversations", 13)
+	local heading = UI.Label(panel, "Conversations", 12)
 	heading:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -14)
 	ui.chatCount = UI.Label(panel, "", 11, "muted")
 	ui.chatCount:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -12, -15)
 	local newChat = UI.Button(panel, "+ New chat", PANEL_W - 20, function() Wowie.NewChat() end, "primary", "WowieNewChat")
 	newChat:SetPoint("TOPLEFT", panel, "TOPLEFT", 10, -38)
 	ui.newChat = newChat
-	local searchBg, search = EditField(panel, "WowieChatSearch", "Search conversations...")
+	local searchBg, search = EditField(panel, "WowieChatSearch", "Search chats")
 	searchBg:SetPoint("TOPLEFT", newChat, "BOTTOMLEFT", 0, -10)
 	searchBg:SetPoint("TOPRIGHT", newChat, "BOTTOMRIGHT", 0, -10)
 	ui.chatSearch = search
@@ -3488,12 +3637,13 @@ local function BuildUI()
 		menu:ClearAllPoints()
 		menu:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -4)
 		menu:Show()
+		UI.RaisePanel(menu)
 	end
 
 	ui.chatButtons = {}
 	for i = 1, MAX_CHATS do
 		local b = CreateFrame("Button", "WowieChatRow" .. i, chatContent)
-		b:SetSize(PANEL_W - 38, 54)
+		b:SetSize(PANEL_W - 38, 62)
 		b.selected = b:CreateTexture(nil, "BACKGROUND")
 		b.selected:SetAllPoints()
 		b.selected:SetColorTexture(unpack(UI.colors.primary))
@@ -3506,10 +3656,11 @@ local function BuildUI()
 		hover:SetColorTexture(UI.colors.accent[1], UI.colors.accent[2], UI.colors.accent[3], 0.055)
 		b.label = UI.Label(b, "", 12)
 		b.label:SetPoint("TOPLEFT", b, "TOPLEFT", 7, -8)
-		b.label:SetPoint("RIGHT", b, "RIGHT", -30, 0)
-		b.label:SetWordWrap(false)
+		b.label:SetPoint("TOPRIGHT", b, "TOPRIGHT", -28, -8)
+		b.label:SetHeight(30)
+		b.label:SetWordWrap(true)
 		b.detail = UI.Label(b, "", 10, "muted")
-		b.detail:SetPoint("TOPLEFT", b.label, "BOTTOMLEFT", 0, -5)
+		b.detail:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 7, 8)
 		b.detail:SetPoint("RIGHT", b, "RIGHT", -7, 0)
 		b.detail:SetWordWrap(false)
 		b.menu = UI.Button(b, "...", 27, function() Wowie.ShowChatMenu(b.chatId, b) end, "quiet", "WowieChatRowMenu" .. i)
@@ -3521,41 +3672,58 @@ local function BuildUI()
 			if button == "RightButton" then Wowie.ShowChatMenu(self.chatId, self) else Wowie.SwitchChat(self.chatId) end
 		end)
 		b:SetScript("OnDoubleClick", function(self) Wowie.SwitchChat(self.chatId); Wowie.RenamePrompt(self.chatId) end)
+		b:SetScript("OnEnter", function(self)
+			local chat = FindChat(self.chatId)
+			if not chat then return end
+			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+			GameTooltip:SetText(Display(chat.name), 0.92, 0.94, 0.97, 1, true)
+			GameTooltip:AddLine(Display(ChatFolder(chat)), 0.64, 0.69, 0.75, true)
+			GameTooltip:Show()
+		end)
+		b:SetScript("OnLeave", function() GameTooltip:Hide() end)
 		b:Hide()
 		ui.chatButtons[i] = b
 	end
 
 	ui.title = UI.Label(f, "", 17)
-	ui.title:SetPoint("TOPLEFT", panel, "TOPRIGHT", 16, -2)
-	ui.title:SetPoint("TOPRIGHT", f, "TOPRIGHT", -232, -56)
+	ui.title:SetPoint("TOPLEFT", edge, "TOPRIGHT", 16, -4)
+	ui.title:SetPoint("TOPRIGHT", f, "TOPRIGHT", -194, -64)
 	ui.title:SetWordWrap(false)
-	local chatActions = UI.Button(f, "Chat ...", 90, function(self)
+	local chatActions = UI.Button(f, "Chat options", 100, function(self)
 		local c = ActiveChat(); if c then Wowie.ShowChatMenu(c.id, self) end
 	end, "quiet", "WowieChatActions")
-	chatActions:SetPoint("TOPRIGHT", f, "TOPRIGHT", -16, -54)
+	chatActions:SetPoint("TOPRIGHT", f, "TOPRIGHT", -16, -60)
 	ui.cwd = UI.Label(f, "", 11, "muted")
-	ui.cwd:SetPoint("TOPLEFT", panel, "TOPRIGHT", 16, -28)
+	ui.cwd:SetPoint("TOPLEFT", edge, "TOPRIGHT", 16, -28)
 	ui.cwd:SetPoint("RIGHT", f, "RIGHT", -24, 0)
 	ui.cwd:SetWordWrap(false)
+	local cwdArea = CreateFrame("Frame", "WowieWorkspacePath", f)
+	cwdArea:SetPoint("TOPLEFT", ui.cwd, "TOPLEFT")
+	cwdArea:SetPoint("BOTTOMRIGHT", ui.cwd, "BOTTOMRIGHT")
+	cwdArea:EnableMouse(true)
+	cwdArea:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:SetText("Agent working folder")
+		GameTooltip:AddLine(Display(self.path ~= "" and self.path or "Uses the bridge default. Change it in Chat options."), 0.92, 0.94, 0.97, true)
+		GameTooltip:Show()
+	end)
+	cwdArea:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	ui.cwdArea = cwdArea
 	local selectors = MakeSelectors(f)
-	selectors:SetPoint("TOPLEFT", panel, "TOPRIGHT", 16, -44)
-	selectors:SetPoint("TOPRIGHT", f, "TOPRIGHT", -16, -98)
+	selectors:SetPoint("TOPLEFT", edge, "TOPRIGHT", 16, -48)
+	selectors:SetPoint("TOPRIGHT", f, "TOPRIGHT", -16, -108)
 	MakeDefaultsPanel(f)
 
 	local scroll = UI.ScrollFrame(f, "WowieScroll")
-	scroll:SetPoint("TOPLEFT", panel, "TOPRIGHT", 16, -84)
-	scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -34, 110)
+	scroll:SetPoint("TOPLEFT", edge, "TOPRIGHT", 16, -88)
+	scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -34, 126)
 	ui.scroll = scroll
 	local content = CreateFrame("Frame", "WowieContent", scroll)
 	content:SetSize(500, 1)
 	scroll:SetScrollChild(content)
 	ui.content, ui.bubbles, ui.chatScrollPositions = content, {}, {}
-	ui.messageMeasure = UI.Label(content, "", 14)
-	ui.messageMeasure:SetWordWrap(true)
-	ui.messageMeasure:SetNonSpaceWrap(true)
-	ui.messageMeasure:Hide()
 	scroll:HookScript("OnSizeChanged", function() if f:IsShown() then Wowie.Render() end end)
-	local latest = UI.Button(f, "Latest ↓", 102, function()
+	local latest = UI.Button(f, "Latest", 70, function()
 		scroll:SetVerticalScroll(scroll:GetVerticalScrollRange())
 		if ui.renderedChat then ui.chatScrollPositions[ui.renderedChat] = nil end
 		ui.latest:Hide()
@@ -3569,13 +3737,13 @@ local function BuildUI()
 	local empty = CreateFrame("Frame", "WowieEmptyState", content)
 	empty:SetSize(460, 184)
 	empty:SetPoint("TOPLEFT", content, "TOPLEFT", 14, -18)
-	local welcome = UI.Title(empty, "What would you like to work on?", 18)
+	local welcome = UI.Title(empty, "How can I help?", 22)
 	welcome:SetPoint("TOPLEFT", empty, "TOPLEFT")
 	welcome:SetPoint("RIGHT", empty, "RIGHT")
-	local explain = UI.Label(empty, "Ask about your character, plan a task, or work with your local agent.\nSharing controls what the AI may read. Prompts below only fill your draft.", 12, "muted")
+	local explain = UI.Label(empty, "Ask about your character, items or quests.\nThe assistant can read the information you allow in Sharing.", 13, "muted")
 	explain:SetPoint("TOPLEFT", welcome, "BOTTOMLEFT", 0, -12)
 	explain:SetPoint("RIGHT", empty, "RIGHT")
-	for i, prompt in ipairs({ "Help me plan my next steps.", "Explain this item or quest.", "Help me write a macro." }) do
+	for i, prompt in ipairs({ "What should I work on next?", "Explain my action bars.", "Help me write a macro." }) do
 		local b = UI.Button(empty, prompt, 330, function() ui.input:SetText(prompt); ui.input:SetFocus() end, "quiet", "WowieStarter" .. i)
 		b:SetPoint("TOPLEFT", empty, "TOPLEFT", 0, -76 - (i - 1) * 34)
 		b:SetPoint("RIGHT", empty, "RIGHT", -8, 0)
@@ -3583,12 +3751,12 @@ local function BuildUI()
 	ui.empty = empty
 
 	local inputBg = CreateFrame("Frame", "WowieComposer", f, "BackdropTemplate")
-	inputBg:SetPoint("BOTTOMLEFT", panel, "BOTTOMRIGHT", 16, 36)
-	inputBg:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -16, 48)
-	inputBg:SetHeight(50)
+	inputBg:SetPoint("BOTTOMLEFT", edge, "BOTTOMRIGHT", 16, 40)
+	inputBg:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -16, 52)
+	inputBg:SetHeight(62)
 	local inScroll = UI.ScrollFrame(inputBg, "WowieInputScroll")
-	inScroll:SetPoint("TOPLEFT", inputBg, "TOPLEFT", 10, -6)
-	inScroll:SetPoint("BOTTOMRIGHT", inputBg, "BOTTOMRIGHT", -24, 6)
+	inScroll:SetPoint("TOPLEFT", inputBg, "TOPLEFT", 12, -10)
+	inScroll:SetPoint("BOTTOMRIGHT", inputBg, "BOTTOMRIGHT", -24, 10)
 	local input = CreateFrame("EditBox", "WowieInput", inScroll)
 	UI.Input(inputBg, input)
 	input:SetMultiLine(true)
@@ -3613,7 +3781,7 @@ local function BuildUI()
 	end)
 	inputBg:SetScript("OnMouseDown", function() input:SetFocus() end)
 	ui.input = input
-	ui.placeholder = UI.Label(inputBg, "Message your agent... Shift-click items, spells or quests to add a link.", 12, "muted")
+	ui.placeholder = UI.Label(inputBg, "Ask a question... Shift-click an item, spell or quest to include it.", 12, "muted")
 	ui.placeholder:SetPoint("TOPLEFT", inputBg, "TOPLEFT", 12, -12)
 	ui.placeholder:SetPoint("RIGHT", inputBg, "RIGHT", -30, 0)
 	ui.placeholder:SetWordWrap(true)
@@ -3625,27 +3793,30 @@ local function BuildUI()
 	end)
 	UI.Tooltip(inputBg, "Message composer", "Enter sends. Shift+Enter inserts a newline. Esc releases focus. While waiting, Enter checks the reply and keeps your next-message draft.")
 	local actionsRow = CreateFrame("Frame", "WowieActions", f)
-	actionsRow:SetPoint("BOTTOMLEFT", panel, "BOTTOMRIGHT", 16, 0)
+	actionsRow:SetPoint("BOTTOMLEFT", edge, "BOTTOMRIGHT", 16, 0)
 	actionsRow:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -16, 12)
-	actionsRow:SetHeight(28)
+	actionsRow:SetHeight(32)
 	local send = UI.Button(actionsRow, "Send", 106, Wowie.SendFromInput, "primary", "WowieSend")
-	send:SetHeight(28)
+	send:SetHeight(32)
 	send:SetPoint("RIGHT", actionsRow, "RIGHT", 0, 0)
 	ui.send = send
-	local cancel = UI.Button(actionsRow, "Cancel wait", 106, function() SlashCmdList.WOWIE("cancel") end, "secondary", "WowieCancelWait")
-	cancel:SetHeight(28)
+	local cancel = UI.Button(actionsRow, "Stop waiting", 100, function() SlashCmdList.WOWIE("cancel") end, "secondary", "WowieCancelWait")
+	cancel:SetHeight(32)
 	cancel:SetPoint("RIGHT", send, "LEFT", -8, 0)
 	UI.Tooltip(cancel, "Stop waiting for this reply", "This forgets the pending reply locally. It does not stop the external agent or undo actions already taken.")
 	ui.cancel = cancel
 	local reconnect = UI.Button(actionsRow, "Reconnect", 76, Wowie.Connect, "secondary", "WowieReconnect")
-	reconnect:SetHeight(28)
+	reconnect:SetHeight(32)
 	reconnect:SetPoint("LEFT", actionsRow, "LEFT", 0, 0)
 	reconnect.label:SetPoint("LEFT", reconnect, "LEFT", 3, 0)
 	reconnect.label:SetPoint("RIGHT", reconnect, "RIGHT", -3, 0)
 	UI.Tooltip(reconnect, "Verify local bridge", "Send a fresh connection challenge. This does not send a question by itself.")
 	ui.reconnect = reconnect
-	local recovery = UI.Button(actionsRow, "...", 28, function() ui.recoveryMenu:SetShown(not ui.recoveryMenu:IsShown()) end, "quiet", "WowieRecovery")
-	recovery:SetHeight(28)
+	local recovery = UI.Button(actionsRow, "...", 28, function()
+		ui.recoveryMenu:SetShown(not ui.recoveryMenu:IsShown())
+		if ui.recoveryMenu:IsShown() then UI.RaisePanel(ui.recoveryMenu) end
+	end, "quiet", "WowieRecovery")
+	recovery:SetHeight(32)
 	recovery:SetPoint("LEFT", reconnect, "RIGHT", 4, 0)
 	UI.Tooltip(recovery, "Connection recovery", "Check replies, retry delivery, reload or show diagnostics.")
 	local statusArea = CreateFrame("Frame", "WowieStatus", actionsRow)
@@ -3653,6 +3824,7 @@ local function BuildUI()
 	statusArea:SetPoint("RIGHT", cancel, "LEFT", -8, 0)
 	statusArea:SetHeight(20)
 	statusArea:EnableMouse(true)
+	ui.statusArea = statusArea
 	ui.status = UI.Label(statusArea, "", 11, "muted")
 	ui.status:SetAllPoints()
 	ui.status:SetWordWrap(false)
@@ -3689,8 +3861,11 @@ local function BuildUI()
 	local grip = CreateFrame("Button", "WowieResize", f)
 	grip:SetSize(14, 14)
 	grip:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -1, 1)
-	local gripLabel = UI.Label(grip, "◢", 13, "muted")
-	gripLabel:SetAllPoints()
+	for i = 1, 3 do
+		local line = UI.Rule(grip, "muted", 0.7)
+		line:SetWidth(i * 3)
+		line:SetPoint("BOTTOMRIGHT", grip, "BOTTOMRIGHT", -3, 3 + (i - 1) * 3)
+	end
 	grip:SetScript("OnMouseDown", function() f:StartSizing("BOTTOMRIGHT") end)
 	grip:SetScript("OnMouseUp", function() f:StopMovingOrSizing(); s.width, s.height = f:GetSize() end)
 
@@ -4078,6 +4253,7 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 		if not db then InitDB() end
 		BuildUI()
 		run = { outbound = {} }
+		HideStrip()
 		tx.active, tx.probe, tx.failed, tx.retryDisplay, tx.reason = "robust", nil, nil, nil, ""
 		tx.interval, tx.displays, tx.captureInterval, tx.nextFrameAt, tx.lastSignalCheck = 0.5, nil, nil, nil, nil
 		SelfTestSignals()

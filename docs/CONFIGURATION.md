@@ -38,13 +38,27 @@ A `config.json` from before agents existed kept Claude's settings at the top lev
 
 The addon's **Defaults...** panel saves an agent/model/reasoning tuple in `WowieDB.settings.defaults`; **Save** applies it, **Cancel** discards edits, and **Bridge defaults → Save** clears it. Per-chat selectors take precedence, followed by addon defaults for that agent, these bridge settings, and finally CLI defaults. The addon sends resolved choices on both transports without changing `config.json`. New chats inherit the current chat's choices. Explicit model/effort selections override matching `extraArgs`; unrelated arguments remain. Default-agent changes preserve provider-specific chat overrides on their original agent. Clearing an override starts a fresh session when needed; pending requests, including resends after `/reload`, keep their original selection.
 
-Information-sharing choices live separately in `WowieDB.settings.sharing` (category ID → boolean); `WowieDB.settings.context` is the master switch. Common character categories default on, sensitive/broad data and `api:<namespace>` scopes default off. Pausing the master preserves choices. Scope descriptions disclose overlap and window dependencies. Mail-body access has an additional explicit default-off permission because the game's read API marks messages as read. Snapshots reflect permissions when the question was sent; additional queries check current permissions. Already-sent data cannot be recalled, and these controls do not change the agent CLI's host-file/tool permissions.
+## Reading and workspace (addon)
+
+`WowieDB.settings.replyFontSize` stores Small (13), Medium (14, default) or Large (16) reply text. **Settings → Reading** edits it with the same Save/Cancel behavior as assistant defaults. **Preview formatting** temporarily replaces Settings; Back preserves the unsaved draft. It is local-only and changes no chat or provider state. `WowieDB.settings.sidebarCollapsed` stores the **Chats** sidebar toggle. Existing window size, drafts and conversations are retained.
+
+`ReplyView.lua` formats assistant messages into native selectable blocks. Raw transcripts stay unchanged. URLs open a copy box, not a browser; summaries and routine bridge notes are disclosures, while errors remain visible. This new module requires a full WoW restart after installation; `/reload` alone cannot discover it.
+
+## Information sharing (addon)
+
+Information-sharing choices live in `WowieDB.settings.sharing` (category ID → boolean); `WowieDB.settings.context` is the independent master switch. **Sharing → Recommended** permits useful ordinary built-ins, including action bars/keybinds, current interactions, travel, cached lockouts and optional Auctionator prices. **Minimal** selects only identity and location. Presets replace selections and leave private/advanced permissions off; opening the UI or upgrading does not overwrite existing explicit choices.
+
+`WowieDB.settings.contextDelivery` is `"smart"` by default or `"full"`. Smart sends only small enabled identity/location/money data plus the enabled-source catalog; the AI requests other sections with `wowcontext` queries. Full includes selected snapshot providers with every question. Auctionator and advanced API namespaces are always query-only. Change delivery under **Customize**; it does not change permissions, pause state or a pending request's immutable snapshot.
+
+Private/social scopes, raw UI/addon tables and advanced API namespaces default off. Macro bodies require `macros` consent, including advanced macro-body readers. Mail-body access separately requires `mail_body` consent because the game's read API marks messages as read. Pausing keeps selections; current queries recheck consent. Already-sent information cannot be recalled, and these controls do not restrict the CLI's host-file/tool permissions.
+
+The `auctionator` category reads recognized active cached price tables without invoking scans, addon database methods or trading actions. Query up to 50 exact base item IDs, for example `{"op":"snapshot","category":"auctionator","itemIDs":[2592,2770]}`. Results use copper, with `minimumCopper` and raw scan-day histories. Database pages accept `limit` 1–100 and sequential `offset` values from `nextOffset`; no whole-database copy/sort is needed. Each history field has its own `complete`/`nextOffset`; fetch more with the same `itemIDs`, `historyOffset` and optional `historyLimit` 1–100. Start from zero and follow cursors sequentially; caches can change between reads. Unsupported/serialized caches are unavailable, not guessed prices. Optional-source availability never silently grants consent.
 
 ## Runs
 
 | Key | Default | Meaning |
 |---|---|---|
-| `gameContext` | `true` | Allow the selected short context, full information snapshots and permission-gated addon queries. `false` excludes all of them from agent input and disables query requests. The addon also has a master switch and individual **Sharing...** checkboxes. |
+| `gameContext` | `true` | Allow selected short context, Smart/Full information envelopes and permission-gated addon queries. `false` excludes all of them from agent input and disables query requests. The addon also has its own Sharing master switch, presets and customization. |
 | `primerFile` | `"docs/WOW-ADDON-PRIMER.md"` | A markdown file appended to the system prompt together with the game context, whatever folder the chat works in: how to write addons and macros for this client. Relative to the Wowie folder, or absolute. Re-read on every run, so edits count at once. `""` sends none. Off whenever the context is off. |
 | `maxParallel` | `3` | How many chats may run an agent at the same time. Further messages queue per chat. |
 | `timeoutMs` | `1800000` (30 min) | A run longer than this is killed (with its children) and reported as an error in game. |
@@ -57,18 +71,19 @@ Keys under `capture`:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | Run `capture.ps1` (Windows), `capture_mac.py` (macOS) or `capture_x11.py` (Linux). With `false` only the reload path works (`/wowie mode reload` in game). |
-| `processName` | `"Wow"` | The game executable without `.exe`. `setup.js` sets it from the `Wow*.exe` it finds in the client folder (on macOS, from the binary inside the `.app` bundle). On Windows the capture also skips a game running from a different client folder than `addonDir`, because retail's exe has the same name. Proton runtimes (Steam, umu-launcher, Faugus) ignore it: they set `WM_CLASS` to `steam_app_<appid>` for every window in the prefix, and the Linux capture matches the client by its "World of Warcraft" title instead. |
+| `enabled` | `true` | Run `capture.ps1` (Windows), `capture_mac.py` (macOS), `capture_wayland.py` (Linux/Wayland) or `capture_x11.py` (Linux/X11). With `false` only the reload path works (`/wowie mode reload` in game). |
+| `backend` | `"auto"` | Linux: `"auto"` uses direct Wayland capture when `WAYLAND_DISPLAY` is set or `XDG_SESSION_TYPE=wayland`, otherwise X11. `"wayland"` forces libwayland-client capture on a compatible compositor; `"x11"` forces libX11 and requires an X11/Xwayland game window. There is no portal fallback or automatic X11 fallback on Wayland failure. |
+| `processName` | `"Wow"` | The game executable without `.exe`; also used to match Wayland app IDs. `setup.js` sets it from the `Wow*.exe` it finds in the client folder (on macOS, from the binary inside the `.app` bundle). On Windows the capture also skips a game running from a different client folder than `addonDir`, because retail's exe has the same name. Generic Steam/Faugus app IDs and Proton X11 classes are matched by the game's "World of Warcraft" title. |
 | `cellPx` | `4` | Robust capture geometry. Decoders also discover 2-pixel Compact/Quiet and 4-pixel Quiet fallback; choose optional modes in the in-game Settings panel rather than changing this for appearance. |
 | `cellsPerRow` | `200` | Cells per strip row. Must match the addon. |
 | `maxRows` | `48` | Maximum strip rows captured. Must match the addon. |
 | `intervalMs` | `50` | Capture period. The bridge advertises a frame period of at least twice this value, with a 100 ms floor; slower custom capture values are preserved. |
 | `pacingVersion` | `1` | Installer migration marker. The old 250 ms default upgrades to 50 ms once; later explicit choices and pre-existing non-default rates are kept. |
-| `python` | `"python3"` | Linux and macOS: interpreter for `capture_x11.py` / `capture_mac.py`. |
-| `windowName` | `""` | Linux and macOS: find the game window by title substring instead of by process name (on Linux, by WM_CLASS `<processName>.exe`, or by the game title for Proton's `steam_app_<appid>` windows). |
-| `keepComposited` | `false` | Linux: set `_NET_WM_BYPASS_COMPOSITOR=2` on the game window so the compositor keeps drawing it. Try it if `npm run probe` sees a black or stale strip in borderless fullscreen. |
+| `python` | `"python3"` | Linux and macOS: capture interpreter. Wayland needs only Python's standard library and the system libwayland-client library. |
+| `windowName` | `""` | Linux (X11 and Wayland) and macOS: find the game window by title substring instead of the default process/app-ID matching. |
+| `keepComposited` | `false` | X11 only: set `_NET_WM_BYPASS_COMPOSITOR=2` on the game window so the compositor keeps drawing it. Try it if `npm run probe` sees a black or stale strip in borderless fullscreen. |
 
-The capture region covers `cellsPerRow × cellPx` by `maxRows × cellPx` pixels (800 × 192 by default), plus the backend's bounded alignment search. Optional 2-pixel modes fit inside that region. Profile discovery does not make clipped or checksum-failing frames valid.
+X11/Windows region capture covers `cellsPerRow × cellPx` by `maxRows × cellPx` pixels (800 × 192 by default), plus bounded alignment search. Direct Wayland capture automatically follows the current/new matching game window through a persistent connection and reusable native-resolution shared-memory buffer, without spawning a screenshot process per frame. It searches for the strip and caches verified geometry; `npm run probe` saves the whole game window to `bridge/probe.png`, or use `npm run probe -- output.png`. Optional 2-pixel modes fit inside the strip region. Profile discovery does not make clipped or checksum-failing frames valid. See [Linux installation](INSTALL-LINUX.md) for required compositor protocols and permission setup.
 
 ## Slot pool and signal files
 

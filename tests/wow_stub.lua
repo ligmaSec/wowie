@@ -24,6 +24,7 @@ local FrameMT = {
 
 local function NewObject(kind, name, parent)
 	local o = setmetatable({ kind = kind, name = name, parent = parent, scripts = {}, hooks = {}, events = {}, shown = true, textures = {}, children = {} }, FrameMT)
+	if kind == "EditBox" then o.SetNonSpaceWrap = false end -- FontString-only API; EditBoxes already wrap nonspaces.
 	if name then _G[name] = o end
 	if parent and type(parent) == "table" and parent.children then table.insert(parent.children, o) end
 	return o
@@ -223,9 +224,16 @@ function STUB.Tick()
 	for _, fn in ipairs(STUB.tickers) do fn() end
 end
 
+function STUB.RenderFrame()
+	for _, frame in ipairs(STUB.frames) do
+		if frame.shown and frame.scripts.OnUpdate then frame.scripts.OnUpdate(frame, 1 / 60) end
+	end
+end
+
 -- Advance native-like timer deadlines for transport latency/slot-budget scenarios.
 function STUB.Advance(seconds)
 	local finish, epsilon = STUB.now + seconds, 0.0000001
+	local nextFrame = STUB.now + 1 / 60
 	while true do
 		local deadline
 		for _, timer in ipairs(STUB.timers) do
@@ -233,6 +241,16 @@ function STUB.Advance(seconds)
 		end
 		for _, ticker in ipairs(STUB.tickerTimers) do
 			if not ticker.cancelled and ticker.at <= finish + epsilon and (not deadline or ticker.at < deadline) then deadline = ticker.at end
+		end
+		local frameAt
+		for _, frame in ipairs(STUB.frames) do
+			if frame.shown and frame.scripts.OnUpdate then
+				if nextFrame <= finish + epsilon then
+					frameAt = nextFrame
+					if not deadline or frameAt < deadline then deadline = frameAt end
+				end
+				break
+			end
 		end
 		if not deadline then STUB.now = finish; return end
 		STUB.now = deadline
@@ -248,6 +266,10 @@ function STUB.Advance(seconds)
 			end
 		end
 		for _, callback in ipairs(callbacks) do callback() end
+		if frameAt and math.abs(frameAt - deadline) < epsilon then
+			nextFrame = deadline + 1 / 60
+			STUB.RenderFrame()
+		end
 	end
 end
 

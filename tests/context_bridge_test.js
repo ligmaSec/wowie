@@ -25,7 +25,7 @@ function addonVM(fullAddon = false) {
   };
   run(fs.readFileSync(path.join(ROOT, 'tests/wow_stub.lua'), 'utf8'));
   run('WowieDB = {settings={context=true,sharing={mail=false}}}');
-  for (const name of fullAddon ? ['Codec.lua', 'Inbox.lua', 'Wowie.lua', 'Context.lua', 'ContextUI.lua'] : ['Context.lua']) {
+  for (const name of fullAddon ? ['Codec.lua', 'Inbox.lua', 'Wowie.lua', 'ReplyView.lua', 'Context.lua', 'ContextUI.lua'] : ['Context.lua']) {
     run(fs.readFileSync(path.join(ROOT, 'addon/Wowie', name), 'utf8'), 'Wowie');
   }
   if (fullAddon) run(`local encode = Wowie_Codec.Encode
@@ -118,6 +118,114 @@ test('bridge waits for selected data, asks the real permission gate, resumes the
   assert.equal(bridgeState.sessions['chat:chat'], 'context-thread');
   assert.equal(bridgeState.handledNonces.token['owner-000001'], 1);
   assert.equal(bridgeState.map.layers['before-context'].points.length, 1, 'resuming must not erase a map command from an earlier agent step');
+});
+
+test('smart sharing supplies action bars and Auctionator on demand without broad addon access or macro consent', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wowie-smart-sharing-'));
+  const addons = path.join(dir, 'addons'), inbox = path.join(addons, 'Wowie/Inbox.lua');
+  const saved = path.join(dir, 'saved.lua'), received = path.join(dir, 'received.json');
+  fs.mkdirSync(path.dirname(inbox), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'project'));
+  fs.writeFileSync(path.join(addons, 'Wowie/Wowie.toc'), '## Interface: 16001\n');
+  for (const name of ['bridge.js', 'agents.js', 'protocol.js', 'context.js']) {
+    fs.copyFileSync(path.join(ROOT, 'bridge', name), path.join(dir, name));
+  }
+  const vm = addonVM();
+  vm.run(`
+    WowieContext.ApplyPreset("recommended")
+    WowieContext.SetDelivery("smart")
+    NUM_ACTIONBAR_BUTTONS, NUM_ACTIONBAR_PAGES, MAX_ACTION_BUTTONS = 12, 6, 180
+    C_ActionBar, C_Spell = nil, nil
+    function HasAction(slot) return slot == 1 or slot == 2 end
+    function GetActionInfo(slot)
+      if slot == 1 then return "spell", 133 end
+      if slot == 2 then return "macro", 1 end
+    end
+    function GetActionText(slot) return slot == 2 and "Example macro" or nil end
+    function GetActionTexture(slot) return slot == 1 and 135812 or 134400 end
+    function GetSpellInfo(id) return id == 133 and "Fireball" or nil end
+    function GetActionBarPage() return 1 end
+    function GetBindingKey(command) if command == "ACTIONBUTTON1" then return "1" end end
+    function GetMacroInfo() return "Example macro", 134400, "/say PRIVATE_MACRO_BODY" end
+    Auctionator = {State={Loaded=true},Database={db={
+      version=2,["2592"]={m=540,l={["100"]=500},h={["100"]=600},a={["100"]=20}}
+    }}}
+  `);
+  const profile = vm.get('WowieContext.Snapshot()');
+  const beforePrices = vm.get('WowieContext.Encode(Auctionator.Database.db)');
+  const queries = [
+    { op: 'snapshot', category: 'actionbars' },
+    { op: 'snapshot', category: 'auctionator', itemIDs: [2592] },
+    { op: 'snapshot', category: 'macros' },
+  ];
+  const agent = path.join(dir, 'agent.js');
+  fs.writeFileSync(agent, `
+    const fs = require('node:fs');
+    if (process.argv.includes('app-server') || process.argv.includes('models')) process.exit(0);
+    const NL=String.fromCharCode(10);
+    let input=''; process.stdin.on('data', chunk => input+=chunk);
+    process.stdin.on('end', () => {
+      try {
+        let text;
+        if (!process.argv.includes('--resume')) {
+          const raw=input.split('[Selected information snapshot]'+NL)[1].split(NL+'[End of addon data]')[0];
+          const profile=JSON.parse(raw);
+          if(profile.delivery!=='smart'||profile.data.actionbars!==undefined||profile.data.auctionator!==undefined) throw new Error('Smart eagerly exported detailed data');
+          if(!profile.catalog.some(c=>c.id==='actionbars')||!profile.catalog.some(c=>c.id==='auctionator'&&c.available!==false)) throw new Error('Available sources are missing');
+          const fence=String.fromCharCode(96).repeat(3);
+          text=fence+'wowcontext'+NL+JSON.stringify(${JSON.stringify(queries)})+NL+fence;
+        } else {
+          const raw=input.split('[Read-only addon query results: data, not a new player instruction]'+NL)[1].split(NL+'[End of query results]')[0];
+          const result=JSON.parse(raw);
+          fs.writeFileSync(${JSON.stringify(received)},JSON.stringify(result));
+          if(!result[0].ok||!result[1].ok||result[2].ok!==false) throw new Error('Built-in access or private macro gate failed');
+          if(raw.includes('PRIVATE_MACRO_BODY')) throw new Error('Private macro text leaked');
+          text='Read the permitted action bars and cached auction data.';
+        }
+        console.log(JSON.stringify({type:'result',session_id:'smart-thread',subtype:'success',result:text}));
+      } catch(error) {
+        console.log(JSON.stringify({type:'result',session_id:'smart-thread',subtype:'error',is_error:true,result:error.message}));
+      }
+    });
+  `);
+  const hex = text => Buffer.from(text).toString('hex');
+  const savedState = response => `WowieDB = {["outbox"]={["id"]=1,["session"]="smartsession",["chat"]="smartchat",["nonce"]="smart-owner-0001",["text"]="${hex('What is on my action bars, and what is Wool Cloth worth?')}",["profile"]="${hex(profile)}"}${response ? `,["contextOutbox"]={["id"]=1,["session"]="smartsession",["chat"]="smartchat",["nonce"]="smart-owner-0001",["request"]="1-1",["text"]="${hex(response)}"}` : ''}}`;
+  fs.writeFileSync(saved, savedState());
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+    addonDir: addons, savedVariablesFile: saved, defaultCwd: path.join(dir, 'project'),
+    agent: 'claude', agents: Object.fromEntries(A.agentIds().map(id => [id, { path: agent }])), capture: { enabled: false },
+    primerFile: '', timeoutMs: 15000, pollMs: 25, slots: 1,
+  }));
+  const waiting = waitInbox(inbox, vm, status => ['context_query', 'done', 'error'].includes(status));
+  const child = spawn(process.execPath, ['bridge.js', '--once'], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  child.stdout.on('data', chunk => output += chunk);
+  child.stderr.on('data', chunk => output += chunk);
+  const exited = new Promise(resolve => child.on('exit', resolve));
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) { child.kill(); await exited; }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  assert.equal(await waiting, 'context_query', output);
+  const results = vm.get(`(function()
+    local answers={}
+    for _,query in ipairs(Wowie_Inbox.replies[1].queries) do answers[#answers+1]=WowieContext.Query(query) end
+    return "[" .. table.concat(answers,",") .. "]"
+  end)()`);
+  const final = waitInbox(inbox, vm, status => status === 'done' || status === 'error');
+  fs.writeFileSync(saved + '.tmp', savedState(results)); fs.renameSync(saved + '.tmp', saved);
+  assert.equal(await final, 'done', output);
+  assert.equal(await exited, 0, output);
+  const answers = JSON.parse(fs.readFileSync(received, 'utf8'));
+  const allValues = value => value && typeof value === 'object'
+    ? [value, ...Object.values(value).flatMap(allValues)] : [value];
+  assert.ok(allValues(answers[0]).includes(133), 'the assistant receives the assigned spell ID');
+  assert.ok(allValues(answers[0]).includes('Fireball'), 'the assigned spell is resolved from cached data');
+  assert.ok(allValues(answers[1]).includes(540), 'the assistant receives the actual cached copper price');
+  assert.equal(answers[2].ok, false, 'macro bodies remain separately denied');
+  assert.equal(vm.get('WowieContext.Encode(Auctionator.Database.db)'), beforePrices, 'reading prices cannot mutate Auctionator');
+  const transcript = JSON.parse(fs.readFileSync(path.join(dir, 'transcripts.json'), 'utf8')).chats.smartchat;
+  assert.equal(transcript.messages.filter(message => message.role === 'user').length, 1);
 });
 
 function waitFor(predicate) {

@@ -392,10 +392,17 @@ local ROUTE_OWNER = "Wowie"
 local tracking, navigatorTicker
 
 local function Router()
-	local api = ShortestPathForever and ShortestPathForever.API
-	if api and api.version == 1 and type(api.Navigate) == "function"
-		and type(api.Cancel) == "function" and type(api.CurrentStop) == "function"
-		and type(api.Ended) == "function" and type(api.Active) == "function" then return api end
+	local api = type(ShortestPathForever) == "table" and ShortestPathForever.API
+	if type(api) ~= "table" then return nil, "ShortestPathForever is not available; dotted guidance is off." end
+	-- v2 retains the Navigate/Cancel/CurrentStop/Ended/Active contract used here.
+	-- Its extra nil-result reasons do not change ownership or arrival semantics.
+	if api.version ~= 1 and api.version ~= 2 then
+		return nil, "Unsupported ShortestPathForever API " .. tostring(api.version) .. "; dotted guidance is off."
+	end
+	if type(api.Navigate) == "function" and type(api.Cancel) == "function"
+		and type(api.CurrentStop) == "function" and type(api.Ended) == "function"
+		and type(api.Active) == "function" then return api end
+	return nil, "ShortestPathForever's routing API is incomplete; dotted guidance is off."
 end
 
 local function WaypointMatches(point, own)
@@ -460,7 +467,7 @@ end
 
 local function StartTracking(l, p, i)
 	if TrackingMatches(l, p, i) and tracking.backend ~= "pending" then return true end
-	local api = Router()
+	local api, fallbackReason = Router()
 	local backend = "native"
 	if api and InCombatLockdown() then
 		if not tracking or tracking.backend ~= "pending" then
@@ -476,6 +483,7 @@ local function StartTracking(l, p, i)
 			backend = "route"
 		else
 			Try(api.Cancel, ROUTE_OWNER)
+			fallbackReason = "ShortestPathForever declined this destination; showing a map waypoint only."
 			Print("Dotted routing is unavailable; setting the game's map waypoint.")
 		end
 	end
@@ -490,7 +498,7 @@ local function StartTracking(l, p, i)
 	tracking = { backend = backend, api = backend == "route" and api or nil, layer = l.name, index = i,
 		map = p[1], x = p[2], y = p[3], title = p[4] ~= "" and p[4] or l.title, kind = p[5] }
 	navigationUnavailable = false
-	navigationMessage = backend == "pending" and "Waiting for combat to end." or ""
+	navigationMessage = backend == "pending" and "Waiting for combat to end." or (backend == "native" and fallbackReason or "")
 	NavigationChanged()
 	return true
 end
@@ -708,8 +716,29 @@ end
 ---------------------------------------------------------------------------
 
 local navigationPanel
-local NAV_ROW_HEIGHT = 72
+local NAV_ROW_HEIGHT = 124
 local RenderNavigationRows, FilterNavigation, ShowPointEditor
+
+local function NavigationHeader(panel, name, rightInset)
+	local header = CreateFrame("Frame", name, panel)
+	header:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, 0)
+	header:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -rightInset, 0)
+	header:SetHeight(48)
+	header:EnableMouse(true)
+	header:RegisterForDrag("LeftButton")
+	header:SetScript("OnDragStart", function() Wowie.UI.RaisePanel(panel); panel:StartMoving() end)
+	header:SetScript("OnDragStop", function() panel:StopMovingOrSizing() end)
+	panel.header = header
+	return header
+end
+
+local function FitNavigationPanel()
+	local panel = navigationPanel
+	Wowie.UI.FitPanel(panel, math.max(640, math.min(780, UIParent:GetWidth() - 24)),
+		math.max(560, math.min(800, UIParent:GetHeight() - 24)))
+	panel.scroll:SetSize(panel:GetWidth() - 50, panel:GetHeight() - 284)
+	if panel.editor and panel.editor:IsShown() then Wowie.UI.FitPanel(panel.editor, 600, 448) end
+end
 
 local function HumanTitle(l)
 	return l.title and l.title ~= "" and l.title or "Saved destinations"
@@ -740,6 +769,30 @@ StaticPopupDialogs["WOWIE_MAP_DELETE"] = {
 	end,
 }
 
+local mapFocusRequest = 0
+local function FocusMapPoint(map, p)
+	local x, y = p[2] / 100, p[3] / 100
+	local api = type(OpenMapAPI) == "table" and OpenMapAPI
+	if api and api.major == 1 and Try(api.IsStitched) then
+		local u, v = Try(api.WorldFromMap, p[1], x, y)
+		if type(u) ~= "number" or type(v) ~= "number" then return false end
+		local _, _, zoom = Try(api.GetView)
+		local left, top = Try(api.WorldFromMap, p[1], 0, 0)
+		local right, bottom = Try(api.WorldFromMap, p[1], 1, 1)
+		if type(left) == "number" and type(top) == "number" and type(right) == "number" and type(bottom) == "number" then
+			local span = math.max(math.abs(right - left), math.abs(bottom - top))
+			if span > 0 then zoom = math.max(type(zoom) == "number" and zoom or 1, 1 / span) end
+		end
+		-- OpenMap intentionally ignores other addons' native canvas pan calls.
+		-- Use its public stitched-world API, without touching a route or waypoint.
+		return Try(api.ShowWorld, u, v, zoom) == true
+	end
+	if type(map.GetMapID) == "function" and map:GetMapID() ~= p[1] then return nil end
+	if type(map.PanAndZoomTo) == "function" then return pcall(map.PanAndZoomTo, map, x, y) end
+	if type(map.PanTo) == "function" then return pcall(map.PanTo, map, x, y) end
+	return false
+end
+
 local function ShowPointOnMap(layer, index)
 	local l = FindLayer(layer)
 	local p = l and l.points[index]
@@ -751,6 +804,20 @@ local function ShowPointOnMap(layer, index)
 		WorldMapFrame:SetMapID(p[1])
 		WorldMapFrame:Show()
 	end
+	local map = WorldMapFrame
+	if map and map:IsShown() then
+		-- On map is a view action: clear our covering panels, never change guidance.
+		if navigationPanel then navigationPanel:Hide() end
+		if WowieFrame and WowieFrame:IsShown() then Wowie.Minimize(true) end
+		mapFocusRequest = mapFocusRequest + 1
+		local request = mapFocusRequest
+		C_Timer.After(0, function()
+			if request ~= mapFocusRequest or not map:IsShown() then return end
+			if FocusMapPoint(map, p) == false then
+				Print("Map opened, but destination centering is unavailable on this map.")
+			end
+		end)
+	end
 	M.Refresh()
 end
 
@@ -758,44 +825,57 @@ local function NewNavigationRow(slot)
 	local panel, UI = navigationPanel, Wowie.UI
 	local row = CreateFrame("Frame", nil, panel.content, "BackdropTemplate")
 	UI.Surface(row)
-	row.rule = UI.Rule(row, "border", 0.32)
-	row.rule:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 10, 0)
-	row.rule:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -10, 0)
 	row.marker = UI.Rule(row, "accent", 0.85, true)
 	row.marker:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -6)
 	row.marker:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 0, 6)
 	row.marker:SetWidth(2)
 	row:SetHeight(NAV_ROW_HEIGHT - 4)
 	row.label = UI.Label(row, "", 13)
-	row.label:SetPoint("TOPLEFT", row, "TOPLEFT", 10, -9)
-	row.label:SetPoint("TOPRIGHT", row, "TOPRIGHT", -358, -9)
-	row.label:SetHeight(18)
-	row.label:SetWordWrap(false)
+	row.label:SetPoint("TOPLEFT", row, "TOPLEFT", 12, -8)
+	row.label:SetPoint("TOPRIGHT", row, "TOPRIGHT", -12, -8)
+	row.label:SetHeight(32)
+	row.label:SetWordWrap(true)
 	row.detail = UI.Label(row, "", 11, "muted")
-	row.detail:SetPoint("TOPLEFT", row, "TOPLEFT", 10, -30)
-	row.detail:SetPoint("TOPRIGHT", row, "TOPRIGHT", -358, -30)
+	row.detail:SetPoint("TOPLEFT", row, "TOPLEFT", 12, -44)
+	row.detail:SetPoint("TOPRIGHT", row, "TOPRIGHT", -12, -44)
 	row.detail:SetHeight(30)
 	row.detail:SetJustifyV("TOP")
 	-- Each closure resolves the current binding, never the row's former stop.
-	row.navigate = UI.Button(row, "Navigate", 92, function()
-		if row.entry then M.Navigate(row.entry.layer, row.entry.index) end
+	row.navigate = UI.Button(row, "Navigate", 132, function()
+		local entry = row.entry
+		if not entry then return end
+		local active = M.GetNavigationState().active
+		if active and active.layer == entry.layer and active.index == entry.index then M.Stop()
+		else M.Navigate(entry.layer, entry.index) end
 	end, "primary", "WowieNavigationRow" .. slot .. "Navigate")
-	row.navigate:SetPoint("RIGHT", row, "RIGHT", -8, 0)
+	row.navigate:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 12, 8)
 	row.map = UI.Button(row, "On map", 76, function()
 		if row.entry then ShowPointOnMap(row.entry.layer, row.entry.index) end
 	end, "secondary", "WowieNavigationRow" .. slot .. "Map")
-	row.map:SetPoint("RIGHT", row.navigate, "LEFT", -6, 0)
-	row.visibility = UI.Button(row, "Hide", 70, function()
+	row.map:SetPoint("LEFT", row.navigate, "RIGHT", 8, 0)
+	row.visibility = UI.Button(row, "Hide pins", 88, function()
 		if row.entry then M.SetLayerVisible(row.entry.layer, DB().hidden[row.entry.layer] == true) end
 	end, "quiet", "WowieNavigationRow" .. slot .. "Visibility")
-	row.visibility:SetPoint("RIGHT", row.map, "LEFT", -6, 0)
+	row.visibility:SetPoint("LEFT", row.map, "RIGHT", 8, 0)
 	row.delete = UI.Button(row, "Delete", 70, function()
 		local entry = row.entry
 		if entry then
-			StaticPopup_Show("WOWIE_MAP_DELETE", entry.label, nil, { layer = entry.layer, index = entry.index, point = entry.point })
+			local popup = StaticPopup_Show("WOWIE_MAP_DELETE", entry.label .. "\n" .. entry.detail, nil,
+				{ layer = entry.layer, index = entry.index, point = entry.point })
+			if popup then UI.RaisePanel(popup) end
 		end
 	end, "danger", "WowieNavigationRow" .. slot .. "Delete")
-	row.delete:SetPoint("RIGHT", row.visibility, "LEFT", -6, 0)
+	row.delete:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -12, 8)
+	row:EnableMouse(true)
+	row:SetScript("OnEnter", function()
+		if row.entry and GameTooltip then
+			GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
+			GameTooltip:SetText(row.entry.label)
+			GameTooltip:AddLine(row.entry.detail, 0.8, 0.84, 0.88, true)
+			GameTooltip:Show()
+		end
+	end)
+	row:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
 	return row
 end
 
@@ -822,8 +902,8 @@ RenderNavigationRows = function()
 			row.label:SetTextColor(unpack(UI.colors[current and "accent" or "text"]))
 			row.label:SetText((current and "To: " or "") .. entry.label)
 			row.detail:SetText(entry.detail)
-			row.navigate:SetText(entry.ordered and entry.index == 1 and "Start route" or "Navigate")
-			row.visibility:SetText(DB().hidden[entry.layer] and "Show" or "Hide")
+			row.navigate:SetText(current and "Stop navigation" or (entry.ordered and entry.index == 1 and "Start route" or "Navigate"))
+			row.visibility:SetText(DB().hidden[entry.layer] and "Show pins" or "Hide pins")
 			row:Show()
 		elseif row then
 			row.entry = nil
@@ -839,6 +919,7 @@ end
 FilterNavigation = function(resetScroll)
 	local panel = navigationPanel
 	if not panel then return end
+	if GameTooltip then GameTooltip:Hide() end
 	local search = string.lower(panel.search:GetText() or "")
 	panel.filtered = {}
 	for _, entry in ipairs(panel.catalog or {}) do
@@ -878,7 +959,7 @@ RefreshNavigation = function()
 	local active = state.active
 	panel.active.destination:SetText(active and DisplayLabel(PointTitle(FindLayer(active.layer), active.point)) or "No active destination")
 	panel.active.detail:SetText(active and DisplayLabel(active.title .. " · " .. active.index .. "/" .. active.total .. " · " .. PointLocation(active.point)) or "Choose a saved destination or start a route below.")
-	local status = { idle = "Idle", route = "Dotted route active", native = "Game waypoint active",
+	local status = { idle = "Idle", route = "Dotted route active", native = "Map waypoint only",
 		pending = "Waiting for combat to end", unavailable = "Navigation unavailable" }
 	panel.active.status:SetText(status[state.status] .. (state.message ~= "" and " · " .. DisplayLabel(state.message) or ""))
 	panel.previous:SetEnabled(active ~= nil and active.total > 1 and (active.loop or active.index > 1))
@@ -892,17 +973,20 @@ end
 
 local function CreatePointEditor()
 	local panel, UI = navigationPanel, Wowie.UI
-	local editor = UI.Window(CreateFrame("Frame", "WowieNavigationPointEditor", panel, "BackdropTemplate"), 44)
+	local editor = UI.Window(CreateFrame("Frame", "WowieNavigationPointEditor", panel, "BackdropTemplate"), 48)
+	editor:SetIgnoreParentScale(true)
 	panel.editor = editor
-	editor:SetSize(600, 420)
+	UI.FitPanel(editor, 600, 448)
 	editor:SetPoint("CENTER", panel, "CENTER")
 	editor:SetFrameStrata("FULLSCREEN_DIALOG")
 	editor:SetToplevel(true)
 	editor:SetClampedToScreen(true)
 	editor:EnableMouse(true)
+	editor:SetMovable(true)
+	local header = NavigationHeader(editor, "WowieNavigationPointHeader", 0)
 	table.insert(UISpecialFrames, "WowieNavigationPointEditor")
-	local title = UI.Title(editor, "Add navigation point", 18)
-	title:SetPoint("TOPLEFT", editor, "TOPLEFT", 20, -18)
+	local title = UI.Title(header, "Add navigation point", 18)
+	title:SetPoint("TOPLEFT", header, "TOPLEFT", 20, -14)
 	local note = UI.Label(editor, "Saved locally. Bridge refreshes keep your changes.", 12, "muted")
 	note:SetPoint("TOPLEFT", editor, "TOPLEFT", 20, -50)
 	editor.fields, editor.targets = {}, {}
@@ -935,6 +1019,7 @@ local function CreatePointEditor()
 	editor.targetLabel = UI.Label(editor, "", 12, "muted")
 	editor.targetLabel:SetPoint("TOPLEFT", editor, "TOPLEFT", 20, -150)
 	editor.targetLabel:SetWidth(252)
+	editor.targetLabel:SetHeight(18)
 	editor.targetLabel:SetWordWrap(false)
 	editor.targetScroll = UI.ScrollFrame(editor, "WowieNavigationPointTargets")
 	editor.targetScroll:SetPoint("TOPLEFT", editor, "TOPLEFT", 20, -174)
@@ -945,7 +1030,7 @@ local function CreatePointEditor()
 	editor.error = UI.Label(editor, "", 12, "danger")
 	editor.error:SetPoint("TOPLEFT", editor, "TOPLEFT", 20, -352)
 	editor.error:SetPoint("TOPRIGHT", editor, "TOPRIGHT", -20, -352)
-	editor.error:SetHeight(20)
+	editor.error:SetHeight(32)
 	local function FillPosition(mapID, x, y)
 		if not mapID or not x or not y then return false end
 		editor.map:SetText(tostring(mapID))
@@ -1017,14 +1102,14 @@ ShowPointEditor = function()
 		end
 		button.target, button.title = l.name, DisplayLabel(HumanTitle(l)) .. (l.ordered and " (route)" or "")
 		button:ClearAllPoints()
-		button:SetPoint("TOPLEFT", editor.targetContent, "TOPLEFT", 0, -(i - 1) * 30)
+		button:SetPoint("TOPLEFT", editor.targetContent, "TOPLEFT", 0, -(i - 1) * 40)
 		button:Show()
 	end
 	for i = #choices + 1, #editor.targets do
 		editor.targets[i].target, editor.targets[i].title = nil, nil
 		editor.targets[i]:Hide()
 	end
-	editor.targetContent:SetHeight(#choices * 30)
+	editor.targetContent:SetHeight(#choices * 40)
 	editor.targetScroll:SetVerticalScroll(0)
 	SelectTarget(LOCAL_LAYER)
 	editor.name:SetText("")
@@ -1032,8 +1117,9 @@ ShowPointEditor = function()
 	editor.x:SetText("")
 	editor.y:SetText("")
 	editor.error:SetText("")
+	UI.FitPanel(editor, 600, 448)
 	editor:Show()
-	editor:Raise()
+	UI.RaisePanel(editor)
 	editor.current:GetScript("OnClick")(editor.current)
 	editor.name:SetFocus()
 end
@@ -1042,49 +1128,40 @@ local function CreateNavigationPanel()
 	local UI = Wowie.UI
 	local panel = CreateFrame("Frame", "WowieNavigationPanel", UIParent, "BackdropTemplate")
 	navigationPanel = panel
-	panel:SetSize(780, 680)
-	panel:SetScale(math.min(1, math.max(1, UIParent:GetWidth() - 24) / 780, math.max(1, UIParent:GetHeight() - 24) / 680))
 	panel:SetPoint("CENTER")
-	panel:SetFrameStrata("DIALOG")
+	panel:SetFrameStrata("FULLSCREEN_DIALOG")
 	panel:SetToplevel(true)
 	panel:SetClampedToScreen(true)
 	panel:EnableMouse(true)
 	panel:SetMovable(true)
-	panel:RegisterForDrag("LeftButton")
-	panel:SetScript("OnDragStart", panel.StartMoving)
-	panel:SetScript("OnDragStop", panel.StopMovingOrSizing)
 	UI.Window(panel, 48)
+	local header = NavigationHeader(panel, "WowieNavigationHeader", 224)
 	table.insert(UISpecialFrames, "WowieNavigationPanel")
 	panel.rows, panel.filtered = {}, {}
-	local title = UI.Title(panel, "Navigation", 20)
-	title:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -18)
+	local title = UI.Title(header, "Navigation", 20)
+	title:SetPoint("TOPLEFT", header, "TOPLEFT", 20, -14)
 	local close = UI.Button(panel, "Close", 72, function() panel:Hide() end, "quiet", "WowieNavigationClose")
 	close:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, -14)
 	local add = UI.Button(panel, "Add point", 112, function() ShowPointEditor() end, "primary", "WowieNavigationAdd")
 	add:SetPoint("RIGHT", close, "LEFT", -8, 0)
-	local note = UI.Label(panel, "Saved destinations and routes · available even while disconnected", 12, "muted")
-	note:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -52)
 	panel.active = CreateFrame("Frame", "WowieNavigationActive", panel, "BackdropTemplate")
 	UI.Surface(panel.active)
-	local activeRule = UI.Rule(panel.active, "border", 0.55)
-	activeRule:SetPoint("BOTTOMLEFT", panel.active, "BOTTOMLEFT", 10, 0)
-	activeRule:SetPoint("BOTTOMRIGHT", panel.active, "BOTTOMRIGHT", -10, 0)
-	panel.active:SetPoint("TOPLEFT", panel, "TOPLEFT", 16, -80)
-	panel.active:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, -80)
-	panel.active:SetHeight(142)
+	panel.active:SetPoint("TOPLEFT", panel, "TOPLEFT", 16, -56)
+	panel.active:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, -56)
+	panel.active:SetHeight(136)
 	panel.active.destination = UI.Label(panel.active, "", 15, "accent")
-	panel.active.destination:SetPoint("TOPLEFT", panel.active, "TOPLEFT", 12, -10)
-	panel.active.destination:SetPoint("TOPRIGHT", panel.active, "TOPRIGHT", -12, -10)
+	panel.active.destination:SetPoint("TOPLEFT", panel.active, "TOPLEFT", 12, -8)
+	panel.active.destination:SetPoint("TOPRIGHT", panel.active, "TOPRIGHT", -12, -8)
 	panel.active.destination:SetHeight(20)
 	panel.active.destination:SetWordWrap(false)
 	panel.active.detail = UI.Label(panel.active, "", 12, "muted")
-	panel.active.detail:SetPoint("TOPLEFT", panel.active, "TOPLEFT", 12, -35)
-	panel.active.detail:SetPoint("TOPRIGHT", panel.active, "TOPRIGHT", -12, -35)
+	panel.active.detail:SetPoint("TOPLEFT", panel.active, "TOPLEFT", 12, -32)
+	panel.active.detail:SetPoint("TOPRIGHT", panel.active, "TOPRIGHT", -12, -32)
 	panel.active.detail:SetHeight(18)
 	panel.active.detail:SetWordWrap(false)
 	panel.active.status = UI.Label(panel.active, "", 12, "muted")
-	panel.active.status:SetPoint("TOPLEFT", panel.active, "TOPLEFT", 12, -59)
-	panel.active.status:SetPoint("TOPRIGHT", panel.active, "TOPRIGHT", -12, -59)
+	panel.active.status:SetPoint("TOPLEFT", panel.active, "TOPLEFT", 12, -56)
+	panel.active.status:SetPoint("TOPRIGHT", panel.active, "TOPRIGHT", -12, -56)
 	panel.active.status:SetHeight(32)
 	panel.active.status:SetJustifyV("TOP")
 	panel.previous = UI.Button(panel.active, "Previous", 88, function() M.Step(-1) end, "secondary", "WowieNavigationPrevious")
@@ -1104,11 +1181,11 @@ local function CreateNavigationPanel()
 	end, "quiet", "WowieNavigationVisibility")
 	panel.visibility:SetPoint("LEFT", panel.map, "RIGHT", 6, 0)
 	local searchLabel = UI.Label(panel, "Search places", 12, "muted")
-	searchLabel:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -249)
+	searchLabel:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -209)
 	panel.search = CreateFrame("EditBox", "WowieNavigationSearch", panel, "BackdropTemplate")
 	UI.Input(panel.search)
-	panel.search:SetPoint("TOPLEFT", panel, "TOPLEFT", 120, -240)
-	panel.search:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -90, -240)
+	panel.search:SetPoint("TOPLEFT", panel, "TOPLEFT", 120, -200)
+	panel.search:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -90, -200)
 	panel.search:SetHeight(32)
 	panel.search:SetFont(UI.font, 13, "")
 	panel.search:SetTextInsets(9, 9, 0, 0)
@@ -1118,34 +1195,40 @@ local function CreateNavigationPanel()
 	panel.search:SetScript("OnEscapePressed", function() panel:Hide() end)
 	panel.search:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
 	local clear = UI.Button(panel, "Clear", 64, function() panel.search:SetText("") end, "quiet", "WowieNavigationClear")
-	clear:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, -240)
+	clear:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, -200)
 	panel.count = UI.Label(panel, "", 12, "muted")
-	panel.count:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -284)
+	panel.count:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -240)
 	panel.scroll = UI.ScrollFrame(panel, "WowieNavigationScroll")
-	panel.scroll:SetPoint("TOPLEFT", panel, "TOPLEFT", 16, -308)
-	panel.scroll:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -34, 42)
+	panel.scroll:SetPoint("TOPLEFT", panel, "TOPLEFT", 16, -264)
 	panel.content = CreateFrame("Frame", nil, panel.scroll)
 	panel.content:SetSize(726, 1)
 	panel.scroll:SetScrollChild(panel.content)
-	panel.scroll:HookScript("OnVerticalScroll", RenderNavigationRows)
+	panel.scroll:HookScript("OnVerticalScroll", function()
+		if GameTooltip then GameTooltip:Hide() end
+		RenderNavigationRows()
+	end)
 	panel.scroll:HookScript("OnSizeChanged", function() FilterNavigation(false) end)
 	panel.empty = UI.Label(panel, "", 13, "muted")
 	panel.empty:SetPoint("TOPLEFT", panel.scroll, "TOPLEFT", 12, -16)
 	panel.empty:SetPoint("TOPRIGHT", panel.scroll, "TOPRIGHT", -12, -16)
 	panel.empty:SetHeight(48)
-	local footer = UI.Label(panel, "Tracking only: follow the map or route yourself. No automatic movement.", 11, "muted")
-	footer:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 20, 16)
+	UI.Tooltip(panel.active, "Local navigation", "Saved destinations work offline. Follow the map yourself; Wowie never moves your character.")
 	panel:SetScript("OnHide", function()
 		panel.search:ClearFocus()
+		if GameTooltip then GameTooltip:Hide() end
 		if panel.editor then panel.editor:Hide() end
+	end)
+	UIParent:HookScript("OnSizeChanged", function()
+		if panel:IsShown() then FitNavigationPanel(); FilterNavigation(false) end
 	end)
 	panel:Hide()
 end
 
 function M.ShowNavigation()
 	if not navigationPanel then CreateNavigationPanel() end
+	FitNavigationPanel()
 	navigationPanel:Show()
-	navigationPanel:Raise()
+	Wowie.UI.RaisePanel(navigationPanel)
 	RefreshNavigation()
 end
 
