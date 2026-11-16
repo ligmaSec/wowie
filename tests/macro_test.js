@@ -45,11 +45,11 @@ test('bodies over 255 bytes, empty ones and extra macros get no button; code-run
   assert.ok(r.text.includes('Macro "Long":'), 'rejected macros stay readable');
 });
 
-test('a macro block after TL;DR stays out of the game-chat summary', () => {
+test('a macro block after a voluntary TL;DR remains an ordinary macro', () => {
   const reply = 'Made it.\n\nTL;DR:\nCharge macro ready.\n```wowmacro Charge\n#showtooltip\n/cast Charge\n```';
-  const { text, summary } = P.splitSummary(reply);
-  assert.equal(P.stripMacroBlocks(summary), 'Charge macro ready.');
-  assert.equal(P.extractMacros(text).macros.length, 1);
+  const result = P.extractMacros(reply);
+  assert.equal(result.macros.length, 1);
+  assert.equal(result.text, 'Made it.\n\nTL;DR:\nCharge macro ready.\nMacro "Charge":\n#showtooltip\n/cast Charge');
 });
 
 test('slot files carry macros on the reply record', () => {
@@ -132,8 +132,8 @@ function deliver(vm, macrosLua) {
   vm.run(`
     local c = WowieDB.chats[1]
     c.pendingId = 5
-    c.request = { nonce = "macro-reply-5" }
-    Wowie_Inbox = { requestProtocol = 1, replies = { { chat = c.id, id = 5, nonce = c.request.nonce, status = "done", text = "Here you go.", macros = ${macrosLua} } } }
+    c.request = { nonce = "macro-reply-5", generation = c.generation }
+    Wowie_Inbox = { requestProtocol = 2, replies = { { chat = c.id, id = 5, nonce = c.request.nonce, status = "done", text = "Here you go.", macros = ${macrosLua} } } }
     STUB.FireEvent("PLAYER_LOGIN")
     Wowie.Toggle(true)
     Wowie.Render()`);

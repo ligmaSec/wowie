@@ -1,6 +1,7 @@
 # machine-specific / runtime state
 bridge/config.json
 bridge/state.json
+bridge/requests.json
 bridge/transcripts.json
 bridge/bridge.log
 bridge/tmp/

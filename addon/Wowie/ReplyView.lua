@@ -4,6 +4,10 @@ local unpack = unpack or table.unpack
 local ReplyView = {}
 Wowie.ReplyView = ReplyView
 
+local accent = UI.colors.accent
+local ACCENT_COLOR = string.format("|cff%02x%02x%02x",
+	math.floor(accent[1] * 255 + 0.5), math.floor(accent[2] * 255 + 0.5), math.floor(accent[3] * 255 + 0.5))
+
 local function Trim(text)
 	return (text:gsub("^%s+", ""):gsub("%s+$", ""))
 end
@@ -34,18 +38,26 @@ local function Balanced(text, start, opening, closing)
 	end
 end
 
-local function Inline(text, result, depth)
-	depth = depth or 0
+local function Inline(text, result, depth, color)
+	depth, color = depth or 0, color or "|r"
 	if depth > 16 then return text end
-	local out, i = {}, 1
-	local function Source(label, url)
+	local out, display, i, styled, linked = {}, {}, 1, false, false
+	local function Append(value, rendered, hasLinks)
+		out[#out + 1] = value
+		display[#display + 1] = rendered or Literal(value)
+		styled, linked = styled or rendered ~= nil, linked or hasLinks == true
+	end
+	local function Source(label, url, labelText)
 		local index = result.linkIndex[url]
 		if not index then
 			index = #result.links + 1
 			result.linkIndex[url] = index
 			result.links[index] = { label = label, url = url }
 		end
-		return label .. " [" .. index .. "]"
+		local reference = "[" .. index .. "]"
+		local prefix = label:match("^%d+$") and "" or label .. " "
+		local displayPrefix = prefix == "" and "" or (labelText or Literal(label)) .. " "
+		return prefix .. reference, displayPrefix .. ACCENT_COLOR .. "|HwowieSource:" .. index .. "|h" .. reference .. "|h" .. color, true
 	end
 	while i <= #text do
 		local c, consumed = text:sub(i, i), false
@@ -53,34 +65,34 @@ local function Inline(text, result, depth)
 			local run = text:match("^`+", i)
 			local close = text:find(run, i + #run, true)
 			if close then
-				out[#out + 1] = text:sub(i + #run, close - 1)
+				Append(text:sub(i + #run, close - 1))
 				i, consumed = close + #run, true
 			else
-				out[#out + 1] = run
+				Append(run)
 				i, consumed = i + #run, true
 			end
 		elseif c == "[" then
 			local labelEnd = Balanced(text, i, "[", "]")
-			if not labelEnd then out[#out + 1] = text:sub(i); break end
+			if not labelEnd then Append(text:sub(i)); break end
 			if labelEnd and text:sub(labelEnd + 1, labelEnd + 1) == "(" then
 				local finish = Balanced(text, labelEnd + 1, "(", ")")
 				if finish then
 					local url = text:sub(labelEnd + 2, finish - 1)
 					if WebURL(url) then
-						local label = text:sub(i + 1, labelEnd - 1)
+						local label, labelText = text:sub(i + 1, labelEnd - 1)
 						if label == "" or WebURL(label) then label = Host(url)
-						else label = Inline(label, result, depth + 1) end
-						out[#out + 1] = Source(label, url)
+						else label, labelText = Inline(label, result, depth + 1, color) end
+						Append(Source(label, url, labelText))
 					else
 						-- Unsupported schemes are inert and remain copyable verbatim.
-						out[#out + 1] = text:sub(i, finish)
+						Append(text:sub(i, finish))
 					end
 					i, consumed = finish + 1, true
-				else out[#out + 1] = text:sub(i); break end
+				else Append(text:sub(i)); break end
 			else
 				-- Consume a literal balanced span once, including deeply nested
 				-- brackets; rescanning at each opening bracket is quadratic.
-				out[#out + 1] = text:sub(i, labelEnd)
+				Append(text:sub(i, labelEnd))
 				i, consumed = labelEnd + 1, true
 			end
 		end
@@ -95,7 +107,7 @@ local function Inline(text, result, depth)
 						url, closes = url:sub(1, -2), closes - 1
 					end
 				end
-				out[#out + 1] = Source(Host(url), url)
+				Append(Source(Host(url), url))
 				i = i + #url
 			elseif c == "*" or c == "_" then
 				local double = text:sub(i, i + 1) == c .. c
@@ -104,23 +116,15 @@ local function Inline(text, result, depth)
 				-- Single underscores inside identifiers are not emphasis.
 				local boundary = c ~= "_" or i == 1 or not text:sub(i - 1, i - 1):match("[%w_]")
 				if boundary and close and close > i + #mark and not text:sub(i + #mark, i + #mark):match("%s") then
-					out[#out + 1] = Inline(text:sub(i + #mark, close - 1), result, depth + 1)
+					local value, rendered, hasLinks = Inline(text:sub(i + #mark, close - 1), result, depth + 1, double and ACCENT_COLOR or color)
+					if double then rendered = ACCENT_COLOR .. (rendered or Literal(value)) .. color end
+					Append(value, rendered, hasLinks)
 					i = close + #mark
-				else out[#out + 1], i = c, i + 1 end
-			else out[#out + 1], i = c, i + 1 end
+				else Append(c); i = i + 1 end
+			else Append(c); i = i + 1 end
 		end
 	end
-	return table.concat(out)
-end
-
-local function SummaryLine(line)
-	local value = Trim(line):gsub("^#+%s*", "")
-	value = value:gsub("^%*%*", ""):gsub("^__", "")
-	local _, finish = value:upper():find("^TL;?DR%s*:?")
-	if not finish then return nil end
-	local nextChar = value:sub(finish + 1, finish + 1)
-	if nextChar ~= "" and not nextChar:match("[%s:*_#]") and value:sub(finish, finish) ~= ":" then return nil end
-	return Trim(value:sub(finish + 1):gsub("^%*%*", ""):gsub("^__", ""):gsub("%s+#+$", ""))
+	return table.concat(out), styled and table.concat(display) or nil, linked
 end
 
 local function Fence(line)
@@ -179,7 +183,7 @@ end
 
 function ReplyView.Parse(text, formatted)
 	text = tostring(text or "")
-	local result = { blocks = {}, links = {}, summary = {}, details = {}, source = text, linkIndex = {} }
+	local result = { blocks = {}, links = {}, details = {}, source = text, linkIndex = {} }
 	if formatted == false then
 		result.blocks[1] = { kind = "paragraph", text = text, raw = text }
 		return result
@@ -199,7 +203,6 @@ function ReplyView.Parse(text, formatted)
 		local line = lines[i]:gsub("\r$", "")
 		local fence, language = Fence(line)
 		local heading, level = Heading(line)
-		local summary = SummaryLine(line)
 		local bulletIndent, bullet, item = line:match("^(%s*)([-+*])%s+(.+)$")
 		local numberIndent, number, step = line:match("^(%s*)(%d+[.)])%s+(.+)$")
 		if fence then
@@ -223,7 +226,6 @@ function ReplyView.Parse(text, formatted)
 			end
 			local note = table.concat(notes, "\n")
 			Add("detail", note, { error = ErrorNote(note) and true or false, navigation = note:lower():match("^map:") ~= nil })
-		elseif summary ~= nil then Flush(); Add("summaryMarker", summary)
 		elseif Trim(line) == "" then Flush()
 		elseif lines[i + 1] and TableSeparator(lines[i + 1]) and TableCells(line) then
 			Flush()
@@ -245,7 +247,7 @@ function ReplyView.Parse(text, formatted)
 		elseif heading then Flush(); Add("heading", heading, { level = level })
 		elseif bullet or number then
 			Flush()
-			Add("list", (number or "•") .. " " .. (step or item), { indent = #(numberIndent or bulletIndent), ordered = number ~= nil })
+			Add("list", step or item, { marker = number or "•", indent = #(numberIndent or bulletIndent), ordered = number ~= nil })
 		elseif line:match("^%s*>") then
 			Flush()
 			local quote = { (line:gsub("^%s*>%s?", "")) }
@@ -257,35 +259,36 @@ function ReplyView.Parse(text, formatted)
 		i = i + 1
 	end
 	Flush()
-	local summaryAt
-	for index, block in ipairs(tokens) do
-		if block.kind == "summaryMarker" then summaryAt = index
-		elseif summaryAt and block.kind == "heading" then summaryAt = nil end
-	end
-	local mainExists = false
-	for index, block in ipairs(tokens) do
-		if (not summaryAt or index < summaryAt) and block.kind ~= "detail" and block.kind ~= "rule" and Trim(block.text) ~= "" then mainExists = true; break end
-	end
-	for index, block in ipairs(tokens) do
+	for _, block in ipairs(tokens) do
 		local target = result.blocks
 		if block.kind == "detail" then
 			target = result.details
 			result.navigation = result.navigation or block.navigation
 			result.hasErrors = result.hasErrors or block.error
-		elseif summaryAt and index >= summaryAt and mainExists then target = result.summary end
-		if block.kind == "summaryMarker" then
-			block.kind = "paragraph"
-			if index ~= summaryAt then block.text = "TL;DR: " .. block.text end
 		end
-		if block.kind ~= "code" then block.text = Inline(block.text, result) end
+		if block.kind ~= "code" then block.text, block.displayText, block.hasLinks = Inline(block.text, result) end
 		if block.text ~= "" or block.kind == "code" or block.kind == "rule" then target[#target + 1] = block end
 	end
 	return result
 end
 
+local function SourceAt(body, link)
+	local index = type(link) == "string" and tonumber(link:match("^wowieSource:(%d+)$"))
+	return index and body.sourceLinks and body.sourceLinks[index], index
+end
+
+local function HideSourceTooltip(body)
+	if body.sourceHovered then
+		body.sourceHovered = nil
+		GameTooltip:Hide()
+	end
+end
+
 local function Release(row)
 	row.body:ClearFocus()
 	row.body:ClearHighlightText()
+	HideSourceTooltip(row.body)
+	row.body.sourceLinks = nil
 	row:Hide()
 end
 
@@ -312,10 +315,29 @@ local function Row(view, index)
 	body:SetScript("OnMouseWheel", ScrollParent)
 	body:SetMaxLetters(0)
 	body:SetTextInsets(0, 0, 0, 0)
-	body:SetSpacing(2)
+	body:SetSpacing(3)
 	body:SetJustifyH("LEFT")
 	body:SetJustifyV("TOP")
 	body:SetHyperlinksEnabled(false)
+	body:SetScript("OnHyperlinkEnter", function(self, link)
+		local source, sourceIndex = SourceAt(self, link)
+		if not source then return end
+		self.sourceHovered = true
+		GameTooltip:SetOwner(self, "ANCHOR_CURSOR_RIGHT")
+		GameTooltip:SetText("Source [" .. sourceIndex .. "]")
+		GameTooltip:AddLine(Literal(source.label), 0.92, 0.94, 0.97, true)
+		GameTooltip:AddLine(Literal(source.url), 0.64, 0.69, 0.75, true)
+		GameTooltip:AddLine("Click to copy URL.", 0.64, 0.69, 0.75, true)
+		GameTooltip:Show()
+	end)
+	body:SetScript("OnHyperlinkLeave", HideSourceTooltip)
+	body:SetScript("OnHyperlinkClick", function(self, link, _, button)
+		local source = SourceAt(self, link)
+		if source and button == "LeftButton" then
+			HideSourceTooltip(self)
+			Wowie.ShowCopy(source.url)
+		end
+	end)
 	body:SetHighlightColor(unpack(UI.colors.highlight))
 	body.messageText = ""
 	body:SetScript("OnTextChanged", function(self)
@@ -326,7 +348,10 @@ local function Row(view, index)
 	end)
 	body:SetScript("OnEscapePressed", function(self) self:ClearFocus(); self:ClearHighlightText() end)
 	body:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
-	row:SetScript("OnHide", function() body:ClearFocus(); body:ClearHighlightText() end)
+	row:SetScript("OnHide", function()
+		body:ClearFocus(); body:ClearHighlightText()
+		HideSourceTooltip(body)
+	end)
 	row.rule = UI.Rule(row)
 	row.rule:SetPoint("LEFT", row, "LEFT", 0, 0)
 	row.rule:SetPoint("RIGHT", row, "RIGHT", 0, 0)
@@ -334,9 +359,9 @@ local function Row(view, index)
 	return row
 end
 
-local function Fold(view, section)
+local function Fold(view)
 	local button = UI.Button(view, "", 120, function()
-		view[section .. "Open"] = not view[section .. "Open"]
+		view.detailsOpen = not view.detailsOpen
 		view.dirty = true
 		ReplyView.Layout(view, view.text, view.width, view.options)
 		if view.onResize then view.onResize() end
@@ -349,7 +374,7 @@ end
 
 function ReplyView.Create(parent, name)
 	local view = CreateFrame("Frame", nil, parent)
-	view.bodyName, view.blocks, view.sources = name, {}, {}
+	view.bodyName, view.blocks = name, {}
 	view:EnableMouseWheel(true)
 	view:SetScript("OnMouseWheel", ScrollParent)
 	view.measure = UI.Label(view, "", 14)
@@ -358,11 +383,13 @@ function ReplyView.Create(parent, name)
 	view.measure:SetJustifyV("TOP")
 	view.measure:Hide()
 	function view:ClearSelection()
-		for _, row in ipairs(self.blocks) do row.body:ClearFocus(); row.body:ClearHighlightText() end
+		for _, row in ipairs(self.blocks) do
+			row.body:ClearFocus(); row.body:ClearHighlightText()
+			HideSourceTooltip(row.body)
+		end
 	end
 	view:SetScript("OnHide", function(self) self:ClearSelection() end)
-	view.summaryButton = Fold(view, "summary")
-	view.detailsButton = Fold(view, "details")
+	view.detailsButton = Fold(view)
 	view.navigationButton = UI.Button(view, "Navigation", 120, function()
 		if WowieMap and WowieMap.ShowNavigation then WowieMap.ShowNavigation() end
 	end, "secondary")
@@ -390,7 +417,7 @@ function ReplyView.Layout(view, text, width, options)
 	view.options, view.onResize = options, options.onResize
 	if identityChanged then
 		view:ClearSelection()
-		view.summaryOpen, view.detailsOpen = false, false
+		view.detailsOpen = false
 		view.identity = options.identity
 	end
 	if not identityChanged and not contentChanged and not view.dirty and view.width == width and view.fontSize == fontSize and view.muted == muted and view.navigationAvailable == navigation then
@@ -399,25 +426,62 @@ function ReplyView.Layout(view, text, width, options)
 	if contentChanged then
 		view:ClearSelection()
 		view.parsed = ReplyView.Parse(text, formatted)
-		view.summaryOpen, view.detailsOpen = false, false
+		view.detailsOpen = false
 	end
 	view.text, view.formatted, view.width, view.fontSize, view.muted = text, formatted, width, fontSize, muted
 	view.navigationAvailable, view.dirty = navigation, false
 	local parsed, y, used = view.parsed, 0, 0
+	local contentWidth = formatted and math.min(width, fontSize * 46) or width
 	local function PlaceBlock(block, visible)
 		used = used + 1
 		local row = view.blocks[used] or Row(view, used)
 		if not visible then Release(row); return end
 		local body = row.body
-		local inset = (block.kind == "code" or block.kind == "quote" or block.kind == "table") and math.min(8, width / 4) or 0
-		local indent = block.kind == "list" and math.min((block.indent or 0) * 4, width / 4) or 0
-		local bodyWidth = math.max(1, width - inset * 2 - indent)
-		local size = block.kind == "heading" and fontSize + (block.level == 1 and 6 or block.level == 2 and 3 or 1) or fontSize
-		-- A client can register a bundled fixed-width font without assuming an
-		-- OS font path is available in the game's virtual filesystem.
-		local font = block.kind == "code" and UI.monoFont or UI.font
+		local blockWidth = block.kind == "code" and width or contentWidth
+		local inset = (block.kind == "code" or block.kind == "quote" or block.kind == "table") and math.min(8, blockWidth / 4) or 0
+		local indent = block.kind == "list" and math.min((block.indent or 0) * 4, blockWidth / 4) or 0
+		local size = block.kind == "heading" and fontSize + (block.level == 1 and 6 or block.level == 2 and 4 or 2) or fontSize
+		local font, spacing = UI.font, math.max(3, math.floor(fontSize * 0.22 + 0.5))
+		local gutter = 0
+		if block.marker then
+			local marker = row.markerLabel
+			if not marker then
+				marker = UI.Label(row, "", size, "muted")
+				marker:SetWordWrap(false)
+				marker:SetJustifyH("RIGHT")
+				marker:SetJustifyV("TOP")
+				row.markerLabel = marker
+			end
+			if row.marker ~= block.marker or row.fontSize ~= size then
+				marker:SetFont(font, size, "")
+				marker:SetWidth(0)
+				marker:SetText(block.marker)
+				row.markerWidth = math.ceil(marker:GetStringWidth())
+			end
+			local markerWidth = math.min(row.markerWidth, blockWidth / 3)
+			gutter = markerWidth + 8
+			marker:ClearAllPoints()
+			marker:SetPoint("TOPLEFT", row, "TOPLEFT", indent, 0)
+			marker:SetSize(markerWidth, size + spacing + 4)
+			marker:Show()
+		elseif row.markerLabel then row.markerLabel:Hide() end
+		row.marker = block.marker
+		local bodyWidth = math.max(1, blockWidth - inset * 2 - indent - gutter)
+		body:SetSpacing(spacing)
+		local label = row.displayLabel
+		if block.displayText and not label then
+			-- The overlay adds emphasis and citations without changing selectable text.
+			label = UI.Label(body, "", size)
+			label:SetPoint("TOPLEFT", body, "TOPLEFT")
+			label:SetJustifyV("TOP")
+			label:SetSpacing(spacing)
+			label:SetWordWrap(true)
+			label:SetNonSpaceWrap(true)
+			row.displayLabel = label
+		end
 		if row.font ~= font or row.fontSize ~= size then
-			if not body:SetFont(font, size, "") then font = UI.font; body:SetFont(font, size, "") end
+			body:SetFont(font, size, "")
+			if label then label:SetFont(font, size, "") end
 		end
 		if row.text ~= block.text then
 			body:ClearFocus(); body:ClearHighlightText()
@@ -425,24 +489,38 @@ function ReplyView.Layout(view, text, width, options)
 			body:SetText(block.text)
 			body:SetCursorPosition(0)
 		end
+		if label then
+			if row.displayText ~= block.displayText then label:SetText(block.displayText or "") end
+			label:SetSpacing(spacing)
+			label:SetShown(block.displayText ~= nil)
+		end
+		row.displayText = block.displayText
+		body.sourceLinks = block.hasLinks and parsed.links or nil
+		body:SetHyperlinksEnabled(block.hasLinks == true)
 		if row.text ~= block.text or row.bodyWidth ~= bodyWidth or row.font ~= font or row.fontSize ~= size or row.kind ~= block.kind then
 			row.bodyHeight = block.kind == "rule" and 1 or Measure(view, block.text, bodyWidth, font, size, body:GetSpacing())
 		end
 		row.text, row.bodyWidth, row.font, row.fontSize, row.kind = block.text, bodyWidth, font, size, block.kind
-		body:SetTextColor(unpack(UI.colors[block.error and "danger" or muted and "muted" or "text"]))
+		local color = UI.colors[block.error and "danger" or muted and "muted" or block.kind == "heading" and "accent" or "text"]
+		body:SetTextColor(color[1], color[2], color[3], block.displayText and 0 or color[4])
 		body:SetSize(bodyWidth, row.bodyHeight)
 		body:ClearAllPoints()
-		body:SetPoint("TOPLEFT", row, "TOPLEFT", inset + indent, -inset)
+		body:SetPoint("TOPLEFT", row, "TOPLEFT", inset + indent + gutter, -inset)
+		if label then
+			label:SetSize(bodyWidth, row.bodyHeight)
+			label:SetTextColor(unpack(color))
+		end
 		body:SetShown(block.kind ~= "rule")
 		row.rule:SetShown(block.kind == "rule")
 		if inset > 0 then UI.Surface(row, "input")
 		else row:SetBackdropColor(0, 0, 0, 0); row:SetBackdropBorderColor(0, 0, 0, 0) end
 		local height = row.bodyHeight + inset * 2
-		row:SetSize(width, height)
+		if block.kind == "heading" and y > 0 then y = y + 14 end
+		row:SetSize(blockWidth, height)
 		row:ClearAllPoints()
 		row:SetPoint("TOPLEFT", view, "TOPLEFT", 0, -y)
 		row:Show()
-		y = y + height + (block.kind == "list" and 4 or 8)
+		y = y + height + (block.kind == "list" and 6 or block.kind == "heading" and 8 or 10)
 	end
 	for _, block in ipairs(parsed.blocks) do PlaceBlock(block, true) end
 	local controlX, controlY, controls = 0, y, 0
@@ -458,33 +536,12 @@ function ReplyView.Layout(view, text, width, options)
 		button:Show()
 		controlX, controls = controlX + buttonWidth + 8, controls + 1
 	end
-	if #parsed.summary > 0 then PlaceControl(view.summaryButton, (view.summaryOpen and "− " or "+ ") .. "Summary", 100) else view.summaryButton:Hide() end
 	if #parsed.details > 0 then PlaceControl(view.detailsButton, (view.detailsOpen and "− " or "+ ") .. "Details", 84) else view.detailsButton:Hide() end
 	if parsed.navigation and navigation then PlaceControl(view.navigationButton, "Navigation", 104) else view.navigationButton:Hide() end
-	for index, link in ipairs(parsed.links) do
-		local button = view.sources[index]
-		if not button then
-			button = UI.Button(view, "", 100, function(self) if Wowie.ShowCopy then Wowie.ShowCopy(self.url) end end, "quiet")
-			view.sources[index] = button
-			button:SetScript("OnEnter", function(self)
-				GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-				GameTooltip:SetText("Copy source URL")
-				GameTooltip:AddLine(Literal(self.sourceLabel or ""), 0.92, 0.94, 0.97, true)
-				GameTooltip:AddLine(Literal(Host(self.url or "")), 0.64, 0.69, 0.75, true)
-				GameTooltip:AddLine("Opens a selectable URL, not a browser.", 0.64, 0.69, 0.75, true)
-				GameTooltip:Show()
-			end)
-			button:SetScript("OnLeave", function() GameTooltip:Hide() end)
-		end
-		button.url, button.sourceLabel = link.url, link.label
-		PlaceControl(button, "Source " .. index, 84)
-	end
 	if controls > 0 then y = controlY + 36 end
-	for _, block in ipairs(parsed.summary) do PlaceBlock(block, view.summaryOpen) end
 	-- Errors remain visible even while routine receipts stay folded.
 	for _, block in ipairs(parsed.details) do PlaceBlock(block, view.detailsOpen or block.error) end
 	for index = used + 1, #view.blocks do Release(view.blocks[index]) end
-	for index = #parsed.links + 1, #view.sources do view.sources[index]:Hide(); view.sources[index].url = nil end
 	view.height = math.max(1, y)
 	view:SetSize(width, view.height)
 	return view.height

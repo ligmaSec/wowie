@@ -2,6 +2,8 @@
 
 The agent can mark your world map. What it draws are **layers**: a named list of points (`uiMapID`, x, y in map percent, a label, a kind), optionally **ordered** (a route: numbered pins joined by lines) and **looping** (a farming circuit).
 
+Answers that recommend going somewhere also create saved navigation points, even if you did not ask for a map or route. A single destination gets a one-point layer; sequential travel stops form an ordered route, while alternative destinations remain an unordered collection. Passing mentions do not create points, and an explicit request not to mark a destination is respected. Existing active routes are not interrupted.
+
 ## How marks get from the agent to the game
 
 1. For every run, whatever the agent, the bridge sets `WOWIE_MAP_FILE` to a fresh file in `bridge/mapjobs/`. Tools append commands there, one JSON object per line:
@@ -12,7 +14,7 @@ The agent can mark your world map. What it draws are **layers**: a named list of
    {"op":"clearall"}
    ```
 
-   The agent can also put a few marks in its reply inside a ```` ```wowmap ```` block; the bridge takes the block out of the text. The system prompt that goes with the game context explains both ways, so any agent can draw without extra tooling: `set` replaces a layer, `clear` removes one, `clearall` removes them all; `kind` is one of `ore`, `herb`, `quest`, `turnin`, `kill`, `loot`, `object`, `explore`, `npc`, `trainer`, `vendor`, `dungeon`, `flight`, `poi`.
+   The agent can also put a few marks in its reply inside a ```` ```wowmap ```` block; the bridge takes the block out of the text. Every run's system prompt explains both ways, independently of character sharing, so known destinations can be marked without sending player information: `set` replaces a layer, `clear` removes one, `clearall` removes them all; `kind` is one of `ore`, `herb`, `quest`, `turnin`, `kill`, `loot`, `object`, `explore`, `npc`, `trainer`, `vendor`, `dungeon`, `flight`, `poi`.
 2. When the run ends the bridge validates the commands (`protocol.js`: sanitized labels, coordinates clamped to 0-100, at most 400 points per layer, 1500 in total, 12 layers with the oldest dropped first), applies them to the layers it keeps in `state.json`, and bumps a version number. The reply gets a `[bridge] map: ...` line saying what changed.
 3. The next slot files carry the whole set (`map = { epoch, version, layers }`) for three minutes after a change (on progress publishes only while the set is small), and again after every hello. The addon replaces its copy when the version is newer (or the bridge's state was reset). A mark can't be applied twice, and a client that lost its saved data gets the layers back when it says hello.
 
@@ -46,5 +48,7 @@ The native integration uses the client's [`C_Map.SetUserWaypoint`](https://githu
 ## Where the data comes from
 
 The bridge ships no game data: the agent has to know where things are. With just the system prompt it can place marks it knows or that you tell it about. For real routes, point the chat at a folder (`/wowie cd`) that holds game data and tools to query it, and describe them in that folder's `CLAUDE.md` (or the equivalent for your agent): quests, NPCs, objects and gathering spawns with their `uiMapID` and coordinates, and a script that appends `set` commands to `$WOWIE_MAP_FILE`. Such datasets exist (QuestieDB, AtlasLootClassic, the vmangos world database) but their licences don't allow redistributing them here, so that folder stays yours.
+
+The agent must resolve a destination's actual `uiMapID` and map-percent coordinates from reliable data before marking it. It must not substitute the player's current map for another location, confuse legacy area IDs with `uiMapID`, or claim a marker was created when it could not locate the destination. The bridge does not guess coordinates by scraping answer prose.
 
 The optional `Wowie_Nodes` addon is the same idea for the in-game node pins: a separate addon that sets the global `WowieNodes = { kinds = { { name, "mining"|"herbalism", requiredSkill }, ... }, maps = { [uiMapID] = { [kindIndex] = "xxxyyyxxxyyy..." } } }`, where each point is x and y in tenths of a percent, three digits each. `Map.lua` reads it if it is there and says so in `/wowie map` if it is not.

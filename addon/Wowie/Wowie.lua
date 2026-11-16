@@ -25,6 +25,7 @@ local unpack = unpack or table.unpack
 local DEFAULT_CWD = "" -- empty = the bridge's configured defaultCwd
 local MAX_HISTORY = 200
 local MAX_CHATS = 16
+local CHAT_ROW_HEIGHT, CHAT_ROW_GAP = 44, 4
 
 local SLOT_COUNT = 200
 local SLOT_PREFIX = "Wowie_S"
@@ -41,7 +42,6 @@ local CONNECT_WAIT = 15 -- seconds to wait for a fresh nonce acknowledgement
 local VERIFIED_SECONDS = 90 -- confirmation age, never renewed by clocks or sound hints
 local IDLE_POLL_SECONDS = 600 -- without recent presence progress, spend one idle slot this often
 local RS, US = "\30", "\31" -- record / unit separators in the strip payload
-local DATA_CHUNK_BASE64 = Codec.MAX_PAYLOAD - 200 -- leave room for the record and multipart flags
 local CONTEXT_POLL_SECONDS = 15
 
 local db
@@ -52,7 +52,7 @@ local tx = { active = "robust", interval = 0.5, reason = "" }
 
 local UI = {}
 Wowie.UI = UI
-UI.font = ChatFontNormal:GetFont()
+UI.font = STANDARD_TEXT_FONT
 UI.titleFont = UI.font
 UI.colors = {
 	background = { 0.055, 0.065, 0.080, 1 }, surface = { 0.080, 0.095, 0.115, 1 },
@@ -392,6 +392,10 @@ local function NewNonce()
 		math.random(0, 0xFFFF), math.random(0, 0xFFFF), math.random(0, 0xFFFF), nonceSeq)
 end
 
+local function ValidToken(value)
+	return type(value) == "string" and #value >= 8 and #value <= 64 and not value:find("[^%w_-]")
+end
+
 local function FromHex(text)
 	return text and (text:gsub("%x%x", function(byte) return string.char(tonumber(byte, 16)) end))
 end
@@ -450,6 +454,7 @@ local function AddChat(name, cwd)
 	local current = ActiveChat()
 	local c = {
 		id = NewId(),
+		generation = NewNonce(),
 		name = name or ("Chat " .. (#db.chats + 1)),
 		cwd = cwd or (current and current.cwd) or DEFAULT_CWD,
 		agent = (current and current.agent) or "",
@@ -482,14 +487,9 @@ local function InitDB()
 	if s.autoRefresh == nil then s.autoRefresh = true end
 	if s.signal == nil then s.signal = true end
 	if s.context == nil then s.context = true end -- tell the agent about the character, zone, etc.
-	-- How much of each reply to print in the game chat. "summary" (the agent's
-	-- closing TL;DR lines) replaced "full" as the default; an install that still
-	-- has the old default saved moves over once, any other choice is kept.
-	if not s.echoV2 then
-		s.echoV2 = true
-		if s.echo == "full" then s.echo = "summary" end
-	end
-	s.echo = s.echo or "summary"
+	-- Game chat previews the reply itself; detailed answers stay in the window.
+	if s.echo ~= "full" and s.echo ~= "short" and s.echo ~= "off" and not tonumber(s.echo) then s.echo = "short" end
+	s.echoV2 = nil
 	s.mode = s.mode or "pixel"
 	if not Codec.DISPLAYS[s.pixelDisplay] or Codec.DISPLAYS[s.pixelDisplay].family then s.pixelDisplay = "robust" end
 	if type(s.pixelVerified) ~= "table" then s.pixelVerified = {} end
@@ -501,6 +501,17 @@ local function InitDB()
 	db.lastSeq = db.lastSeq or 0
 	-- Chats deleted in game that the bridge hasn't confirmed forgetting yet.
 	db.forget = db.forget or {}
+	db.receipts = db.receipts or {}
+	local forget = {}
+	for key, info in pairs(db.forget) do
+		info.chat = info.chat or key
+		info.kind = "forget"
+		info.generation = info.generation or ("legacy-" .. info.chat)
+		info.nonce = info.nonce or NewNonce()
+		if not info.id then db.lastSeq = db.lastSeq + 1; info.id = db.lastSeq end
+		forget[info.nonce] = info
+	end
+	db.forget = forget
 	-- The session groups this installation's requests; each operation also has
 	-- its own nonce so rolling back the saved numeric counter is harmless.
 	if not db.session then
@@ -530,10 +541,42 @@ local function InitDB()
 		c.agent = c.agent or ""
 		c.model = c.model or ""
 		c.reasoning = c.reasoning or ""
+		if not c.generation then
+			c.generation = (c.request and c.request.generation) or ("legacy-" .. c.id)
+			for _, info in pairs(db.forget) do
+				if info.chat == c.id and info.generation == c.generation then
+					-- An old last-chat delete reused its ID. Its durable operation
+					-- token gives the replacement a stable, distinct incarnation.
+					c.generation, c.resetNext = info.nonce, true
+					break
+				end
+			end
+		end
+		local firstUser
 		for _, m in ipairs(c.history or {}) do
 			if m.role == "claude" then m.role, m.agent = "assistant", m.agent or "claude" end
+			if m.role == "user" and not firstUser then firstUser = m end
 		end
 		MigratePending(c)
+		if c.request and not c.request.generation then
+			c.request.generation = c.generation
+			c.request.flags = (c.request.flags and c.request.flags ~= "" and (c.request.flags .. ";") or "") .. "generation=" .. c.generation
+			c.resumePending = c.pendingId and true or nil
+		end
+		if db.outbox and db.outbox.chat == c.id and not db.outbox.generation then db.outbox.generation = c.generation end
+		if db.contextOutbox and db.contextOutbox.chat == c.id and not db.contextOutbox.generation then db.contextOutbox.generation = c.generation end
+		-- Repair only titles derived from an old, already-expanded named-color link.
+		-- Explicit renames, transcripts and pending request snapshots stay untouched.
+		if firstUser and c.name == AutoTitle(firstUser.text) then
+			local plain = firstUser.text:gsub("|cn[%w_]+:(%b[])|r", "%1")
+			if plain ~= firstUser.text then c.name = AutoTitle(plain) or c.name end
+		end
+	end
+	-- Older clients left completed/cancelled instructions in the singleton outbox.
+	for _, key in ipairs({ "outbox", "contextOutbox" }) do
+		local out = db[key]
+		local chat = out and FindChat(out.chat)
+		if out and (not chat or chat.pendingId ~= out.id or not chat.request or chat.request.nonce ~= out.nonce) then db[key] = nil end
 	end
 end
 
@@ -578,6 +621,7 @@ keyCatcher:SetScript("OnKeyDown", function(self, key)
 		and GetTime() >= (Wowie.nextAutoRefresh or 0)
 		and not InCombatLockdown() then
 		self:Hide()
+		Wowie.nextAutoRefresh = nil
 		ReloadUI()
 	end
 end)
@@ -585,9 +629,12 @@ end)
 -- Arm the keypress reload. In pixel mode this is only used once the slot pool
 -- is exhausted (a reload frees every slot) or the slots are not installed.
 function Wowie.ArmAutoRefresh()
-	keyCatcher:Hide()
-	if not AnyPending() or not db.settings.autoRefresh then return end
-	if db.settings.mode == "pixel" and not (run.slotsExhausted or run.slotsMissing or run.pixelFailed) then return end
+	if not AnyPending() or not db.settings.autoRefresh
+		or (db.settings.mode == "pixel" and not (run.slotsExhausted or run.slotsMissing or run.pixelFailed)) then
+		keyCatcher:Hide()
+		Wowie.nextAutoRefresh = nil
+		return
+	end
 	-- Propagation can't be changed in combat. Never show the catcher without it,
 	-- or it would eat every keypress. PLAYER_REGEN_ENABLED re-arms after combat.
 	if not keyCatcher.propagates then
@@ -595,7 +642,7 @@ function Wowie.ArmAutoRefresh()
 		keyCatcher:SetPropagateKeyboardInput(true)
 		keyCatcher.propagates = true
 	end
-	Wowie.nextAutoRefresh = GetTime() + db.settings.interval
+	Wowie.nextAutoRefresh = Wowie.nextAutoRefresh or (GetTime() + db.settings.interval)
 	keyCatcher:Show()
 end
 
@@ -742,6 +789,74 @@ local function RecordFor(id, rec)
 	return table.concat(fields, US)
 end
 
+local function ControlRecord(info)
+	local flags = "nonce=" .. info.nonce
+	if info.generation then flags = flags .. ";generation=" .. info.generation end
+	if info.kind == "forget" then flags = flags .. ";d"
+	else flags = flags .. ";receipt=" .. info.kind .. ";target=" .. info.target end
+	return { chat = info.chat, nonce = info.nonce, generation = info.generation, flags = flags,
+		name = "", text = "", control = true, forget = info.kind == "forget" and info.nonce or nil, sentAt = GetTime() }
+end
+
+local function RefreshControlOutbox()
+	local records = {}
+	for _, pending in ipairs({ db.forget, db.receipts }) do
+		for _, info in pairs(pending) do records[#records + 1] = RecordFor(info.id, ControlRecord(info)) end
+	end
+	db.controlOutbox = #records > 0 and ToHex(table.concat(records, RS)) or nil
+end
+
+local function SendControls()
+	RefreshControlOutbox()
+	if db.settings.mode ~= "pixel" or run.requestProtocol ~= 2 then return end
+	local changed = false
+	for _, pending in ipairs({ db.forget, db.receipts }) do
+		for _, info in pairs(pending) do
+			local rec = run.outbound[info.id]
+			if not rec or rec.nonce ~= info.nonce then
+				run.outbound[info.id] = ControlRecord(info)
+				changed = true
+			end
+		end
+	end
+	if next(db.forget) or next(db.receipts) then
+		run.controlsPollAt = run.controlsPollAt or (GetTime() + 5)
+	else run.controlsPollAt = nil end
+	if changed then RefreshStrip() end
+end
+
+local function QueueReceipt(kind, chat, generation, target)
+	if not ValidToken(target) then return end
+	for _, info in pairs(db.receipts) do
+		if info.kind == kind and info.chat == chat and info.target == target then SendControls(); return end
+	end
+	db.lastSeq = db.lastSeq + 1
+	local nonce = NewNonce()
+	db.receipts[nonce] = { id = db.lastSeq, nonce = nonce, kind = kind, chat = chat, generation = generation, target = target }
+	SendControls()
+end
+
+local function ApplyReceipts(receipts)
+	local changed = false
+	for _, ack in ipairs(type(receipts) == "table" and receipts or {}) do
+		if type(ack) == "table" and ack.session == db.session and ValidToken(ack.nonce) then
+			local info = db.forget[ack.nonce] or db.receipts[ack.nonce]
+			if info and ack.chat == info.chat and ack.kind == info.kind then
+				db.forget[ack.nonce], db.receipts[ack.nonce] = nil, nil
+				local rec = run.outbound[info.id]
+				if rec and rec.nonce == info.nonce then run.outbound[info.id] = nil end
+				changed = true
+			end
+		end
+	end
+	if changed then RefreshControlOutbox(); RefreshStrip() end
+end
+
+local function ForgetPending(chatId)
+	for _, info in pairs(db.forget) do if info.chat == chatId then return true end end
+	return false
+end
+
 local BASE64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 local function ToBase64(text)
 	if C_EncodingUtil and type(C_EncodingUtil.EncodeBase64) == "function" then
@@ -761,7 +876,14 @@ local function ToBase64(text)
 	return table.concat(parts)
 end
 
-local function PrepareData(rec)
+local function DataFlags(id, rec, part, parts)
+	local flags = "nonce=" .. rec.nonce .. ";generation=" .. rec.generation .. ";data=" .. (rec.dataKind or "profile") .. ";part=" .. part .. "/" .. parts
+	if rec.dataKind == "query" then flags = flags .. ";request=" .. rec.request
+	else flags = flags .. ";profile=" .. id end
+	return flags .. ";encoding=" .. rec.encoding
+end
+
+local function PrepareData(rec, id)
 	local text = rec.profile or rec.payload
 	if not text then return end
 	rec.encoding = "b64"
@@ -773,7 +895,10 @@ local function PrepareData(rec)
 			text, rec.encoding = compressed, "zlib64"
 		end
 	end
-	local encoded, chunk = ToBase64(text), DATA_CHUNK_BASE64
+	local encoded = ToBase64(text)
+	local overhead = #RecordFor(id, { chat = rec.chat, flags = DataFlags(id, rec, 4096, 4096), text = "" })
+	local chunk = math.floor((Codec.MAX_PAYLOAD - overhead) / 4) * 4
+	assert(chunk > 0, "Information-transfer envelope exceeds the pixel frame capacity")
 	local parts = {}
 	for i = 1, #encoded, chunk do parts[#parts + 1] = encoded:sub(i, i + chunk - 1) end
 	rec.parts = parts
@@ -786,10 +911,7 @@ local function DataRecord(id, rec)
 		rec.cursor = 1
 		return RecordFor(id, rec)
 	end
-	local flags = "nonce=" .. rec.nonce .. ";data=" .. (rec.dataKind or "profile") .. ";part=" .. cursor .. "/" .. #rec.parts
-	if rec.dataKind == "query" then flags = flags .. ";request=" .. rec.request
-	else flags = flags .. ";profile=" .. id end
-	if rec.encoding then flags = flags .. ";encoding=" .. rec.encoding end
+	local flags = DataFlags(id, rec, cursor, #rec.parts)
 	local text = RecordFor(id, { chat = rec.chat, flags = flags, text = rec.parts[cursor] })
 	rec.cursor = cursor == #rec.parts and (rec.dataKind and 1 or 0) or cursor + 1
 	return text
@@ -1361,6 +1483,30 @@ local function MarkAcked(id, nonce)
 	end
 end
 
+local function ReconcilePending()
+	if not run.reconcilePending or db.settings.mode ~= "pixel" or run.requestProtocol ~= 2 then return end
+	run.reconcilePending = nil
+	local sent = false
+	for _, chat in ipairs(db.chats) do
+		if chat.pendingId and chat.request then
+			-- Ask the durable journal about the original turn, not an orphaned cached
+			-- query response. A restored query wait republishes its exact batch.
+			local rec = {}
+			for key, value in pairs(chat.request) do rec[key] = value end
+			rec.sentAt = GetTime()
+			PrepareData(rec, chat.pendingId)
+			run.outbound[chat.pendingId] = rec
+			chat.resumePending = nil
+			sent = true
+		end
+	end
+	if sent then
+		run.sentAt, run.polls = GetTime(), 0
+		ScheduleNextPoll()
+		RefreshStrip()
+	end
+end
+
 local function ReplyToContext(c, r)
 	if type(r.request) ~= "string" or type(r.queries) ~= "table" then return end
 	local old = run.outbound[r.id]
@@ -1374,12 +1520,12 @@ local function ReplyToContext(c, r)
 		end
 		c.queryReply = { nonce = r.nonce, request = r.request, text = "[" .. table.concat(results, ",") .. "]" }
 	end
-	db.contextOutbox = { id = r.id, nonce = r.nonce, session = db.session, chat = c.id, request = r.request, text = ToHex(c.queryReply.text) }
+	db.contextOutbox = { id = r.id, nonce = r.nonce, generation = c.request.generation, session = db.session, chat = c.id, request = r.request, text = ToHex(c.queryReply.text) }
 	if db.settings.mode == "pixel" then
 		local rec = run.outbound[r.id]
 		if not rec or rec.nonce ~= r.nonce or rec.request ~= r.request then
-			rec = { chat = c.id, nonce = r.nonce, dataKind = "query", request = r.request, payload = c.queryReply.text, sentAt = GetTime() }
-			PrepareData(rec)
+			rec = { chat = c.id, nonce = r.nonce, generation = c.request.generation, dataKind = "query", request = r.request, payload = c.queryReply.text, sentAt = GetTime() }
+			PrepareData(rec, r.id)
 			run.outbound[r.id] = rec
 			RefreshStrip(r.id)
 		end
@@ -1394,7 +1540,8 @@ local function ApplyReplies(replies)
 	local matched = false
 	for _, r in ipairs(replies or {}) do
 		local c = FindChat(r.chat)
-		if c and c.pendingId and r.id == c.pendingId and c.request and type(c.request.nonce) == "string" and r.nonce == c.request.nonce then
+		if c and c.pendingId and r.id == c.pendingId and c.request and type(c.request.nonce) == "string" and r.nonce == c.request.nonce
+			and (r.generation == nil or r.generation == c.request.generation) then
 			matched = true
 			run.replyPhase = run.replyPhase or {}
 			run.replyPhase[c.id] = r.status
@@ -1404,7 +1551,7 @@ local function ApplyReplies(replies)
 			end
 			local denied = type(r.denied) == "table" and #r.denied > 0 and r.denied or nil
 			if r.status == "done" then
-				Finish(c, "assistant", r.text or "", denied, r.agent, r.summary, Wowie.CleanMacros(r.macros))
+				Finish(c, "assistant", r.text or "", denied, r.agent, Wowie.CleanMacros(r.macros))
 			elseif r.status == "error" then
 				Finish(c, "system", "Bridge error: " .. tostring(r.text), denied)
 			elseif r.status == "working" or r.status == "queued" then
@@ -1423,15 +1570,16 @@ end
 -- The bridge keeps every chat's transcript. After the client wipes our saved data,
 -- it sends them back once, addressed to our new session token.
 local function ImportRestore(r)
-	if type(r) ~= "table" or r.token ~= db.session or db.restored then return end
-	db.restored = true
+	if type(r) ~= "table" or r.token ~= db.session or not ValidToken(r.id) then return end
+	if db.restored == r.id then QueueReceipt("restore", "", nil, r.id); return end
 	local added = 0
 	local current = ActiveChat()
 	for _, rc in ipairs(r.chats or {}) do
 		-- Skip chats deleted here that the bridge hasn't been told about yet.
-		if type(rc) == "table" and rc.id and not FindChat(rc.id) and not db.forget[rc.id] and #db.chats < MAX_CHATS then
+		if type(rc) == "table" and rc.id and not FindChat(rc.id) and not ForgetPending(rc.id) and #db.chats < MAX_CHATS then
 			local chat = {
 				id = rc.id,
+				generation = ValidToken(rc.generation) and rc.generation or NewNonce(),
 				name = (rc.name and rc.name ~= "") and rc.name or ("Chat " .. (#db.chats + 1)),
 				cwd = rc.cwd or DEFAULT_CWD,
 				agent = "",
@@ -1452,6 +1600,8 @@ local function ImportRestore(r)
 			added = added + 1
 		end
 	end
+	db.restored = r.id
+	QueueReceipt("restore", "", nil, r.id)
 	run.restoring = nil
 	if added > 0 then
 		if current and #current.history <= 2 then
@@ -1488,17 +1638,22 @@ local function ApplyBridgeData(data)
 	if type(data.contextProtocol) == "number" then run.contextProtocol = data.contextProtocol end
 	run.requestProtocol = data.requestProtocol
 	run.contextEnabled = data.contextEnabled ~= false
+	if run.requestProtocol == 2 then ApplyReceipts(data.receipts) end
 	local matched = ApplyReplies(data.replies)
 	if data.restore then ImportRestore(data.restore) end
 	if data.map and WowieMap then WowieMap.Sync(data.map) end
+	SendControls()
+	ReconcilePending()
 	return matched
 end
 
 local function TryLoadSlot(why)
+	if (run.slotsExhausted or run.slotsMissing) and why ~= "manual" then return end
 	run.lastSlotPoll = GetTime()
 	local name = FreeSlot()
 	if not name then
 		run.slotsExhausted = true
+		run.nextPollAt, run.helloPollAt = nil, nil
 		Wowie.ArmAutoRefresh()
 		Wowie.UpdateStatus()
 		return
@@ -1509,11 +1664,14 @@ local function TryLoadSlot(why)
 		run.slotError = reason
 		if reason == "MISSING" or reason == "DISABLED" then
 			run.slotsMissing = true
+			run.nextPollAt, run.helloPollAt = nil, nil
 			Wowie.ArmAutoRefresh()
 		end
 		Wowie.UpdateStatus()
 		return
 	end
+	run.slotsExhausted, run.slotsMissing, run.slotError = nil, nil, nil
+	Wowie.ArmAutoRefresh()
 	run.polls = (run.polls or 0) + 1
 	ScheduleNextPoll()
 	local data = Wowie_SlotData
@@ -1531,7 +1689,7 @@ end
 local function TransportTick()
 	if not db or db.settings.mode ~= "pixel" then return end
 	local now, read = GetTime(), false
-	local busy = AnyPending() or run.connectingAt ~= nil or tx.probe ~= nil
+	local busy = AnyPending() or run.connectingAt ~= nil or tx.probe ~= nil or run.controlsPollAt ~= nil
 	if busy or not tx.lastSignalCheck or now - tx.lastSignalCheck >= TICK_SECONDS then
 		tx.lastSignalCheck = now
 		if PollPresence() and busy then
@@ -1580,7 +1738,7 @@ local function Tick()
 	if run.helloPollAt and now >= run.helloPollAt then
 		run.helloPollAt = nil
 		TryLoadSlot("hello")
-		if run.connectingAt and not Wowie.IsConnected() and now - run.connectingAt <= CONNECT_WAIT then
+		if not run.slotsExhausted and not run.slotsMissing and run.connectingAt and not Wowie.IsConnected() and now - run.connectingAt <= CONNECT_WAIT then
 			Wowie.SayHello()
 		end
 		-- Whatever that slot held, the wait is over.
@@ -1603,18 +1761,7 @@ local function Tick()
 	Wowie.CheckConnection()
 	Wowie.UpdateMini()
 	for id, rec in pairs(run.outbound) do
-		-- Numeric sound files are only delivery hints for forget operations.
-		if not rec.acked and rec.forget and CheckSignal("ack", id) then
-			NoteAcked(rec)
-			changed = true
-		end
-		-- Forget maintenance can use clock hints; hello requires its nonce ack.
-		if rec.forget and not rec.acked and run.bridgeSeen and run.bridgeSeen >= rec.sentAt + 2 then
-			NoteAcked(rec)
-			changed = true
-		end
 		if rec.acked then
-			if rec.forget then db.forget[rec.forget] = nil end
 			run.outbound[id] = nil
 			changed = true
 		elseif rec.hello and now - rec.sentAt >= 20 then
@@ -1626,8 +1773,8 @@ local function Tick()
 				-- Nobody picked it up: show it again.
 				rec.sentAt = now
 				changed = true
-			elseif rec.forget then
-				-- The bridge is away; db.forget keeps it for the next hello.
+			elseif rec.control then
+				-- Keep the durable control until its exact receipt, even while offline.
 				run.outbound[id] = nil
 				changed = true
 			else
@@ -1643,6 +1790,10 @@ local function Tick()
 		RefreshStrip()
 		Wowie.UpdateStatus()
 	end
+	if run.controlsPollAt and now >= run.controlsPollAt and not run.slotsExhausted and not run.slotsMissing then
+		run.controlsPollAt = now + 15
+		if not run.lastSlotPoll or now - run.lastSlotPoll >= 1 then TryLoadSlot("receipt") end
+	end
 	if not AnyPending() then return end
 	local moved = false
 	for _, c in ipairs(db.chats) do
@@ -1654,9 +1805,10 @@ local function Tick()
 	end
 end
 
-Finish = function(chat, role, text, denied, agent, summary, macros)
+Finish = function(chat, role, text, denied, agent, macros)
 	AddHistory(chat, role, text, chat.pendingId, denied, agent, macros)
-	if db.outbox and db.outbox.id == chat.pendingId and db.outbox.nonce == chat.request.nonce then db.outbox.profile = nil end
+	QueueReceipt("reply", chat.id, chat.request.generation, chat.request.nonce)
+	if db.outbox and db.outbox.id == chat.pendingId and db.outbox.nonce == chat.request.nonce then db.outbox = nil end
 	if db.contextOutbox and db.contextOutbox.id == chat.pendingId and db.contextOutbox.nonce == chat.request.nonce then db.contextOutbox = nil end
 	chat.queryReply, chat.snapshotAcked = nil, nil
 	chat.pendingId = nil
@@ -1669,12 +1821,13 @@ Finish = function(chat, role, text, denied, agent, summary, macros)
 	end
 	if not AnyPending() then
 		keyCatcher:Hide()
+		Wowie.nextAutoRefresh = nil
 	end
 	if visible and ui.input and chat.draft and chat.draft ~= "" and ui.input:GetText() ~= chat.draft then
 		ui.input:SetText(chat.draft)
 	end
 	Wowie.Render()
-	Wowie.Notify(chat, text, agent, summary)
+	Wowie.Notify(chat, text, agent)
 end
 
 ---------------------------------------------------------------------------
@@ -1806,8 +1959,9 @@ function Wowie.ExpandLinks(text)
 		end
 		return "[" .. name .. "]"
 	end
-	-- Coloured links first (|cAARRGGBB|H...|h[Name]|h|r), then bare ones.
-	local out = text:gsub("|c%x%x%x%x%x%x%x%x|H([^|]+)|h%[([^%]]*)%]|h|r", Take)
+	-- Consume color wrappers with their links, including the client's named colors.
+	local out = text:gsub("|cn[%w_]+:|H([^|]+)|h%[([^%]]*)%]|h|r", Take)
+	out = out:gsub("|c%x%x%x%x%x%x%x%x|H([^|]+)|h%[([^%]]*)%]|h|r", Take)
 	out = out:gsub("|H([^|]+)|h%[([^%]]*)%]|h", Take)
 	if #links == 0 then return text, 0 end
 	local blocks = {}
@@ -1850,7 +2004,7 @@ function Wowie.Send(text, allow)
 		Wowie.Toggle(true)
 		return
 	end
-	if run.requestProtocol ~= 1 then
+	if run.requestProtocol ~= 2 then
 		AddHistory(c, "system", "The bridge needs updating/restarting before it can receive new questions safely.")
 		if ui.input then ui.input:SetText(text) end
 		Wowie.Render()
@@ -1872,19 +2026,9 @@ function Wowie.Send(text, allow)
 	local agent = c.agent ~= "" and c.agent or db.settings.defaults.agent
 	local chosenModel, reasoning = ChatChoice(c, "model"), ChatChoice(c, "reasoning")
 	local model = chosenModel ~= "" and ToHex(chosenModel) or nil
-	local limit = Codec.MAX_PAYLOAD - 300 - #(model or "") - #reasoning
-	if #text > limit then
-		AddHistory(c, "system", "That message is too long for one send (" .. #text .. " chars, max ~" .. limit .. "). Split it up." .. (links > 0 and " Each linked item adds its tooltip to the message." or ""))
-		Wowie.Render()
-		return
-	end
-	-- The game context rides along when the bridge doesn't have this version yet.
-	local ctx = ContextToSend(limit - #text, summary)
-
-	db.lastSeq = db.lastSeq + 1
-	local id = db.lastSeq
+	local id = db.lastSeq + 1
 	local nonce = NewNonce()
-	local tokens = { "nonce=" .. nonce }
+	local tokens = { "nonce=" .. nonce, "generation=" .. c.generation }
 	if c.resetNext then table.insert(tokens, "n") end
 	if agent ~= "" then table.insert(tokens, "agent=" .. agent) end
 	if model then table.insert(tokens, "model=" .. model) end
@@ -1896,11 +2040,30 @@ function Wowie.Send(text, allow)
 		allowHex = ToHex(table.concat(allow, US))
 	end
 	local flags = table.concat(tokens, ";")
+	local name = c.name
+	if name:match("^Chat %d+$") then
+		local first = true
+		for _, m in ipairs(c.history) do if m.role == "user" then first = false; break end end
+		if first then name = AutoTitle(text) or name end
+	end
+	local envelope = { chat = c.id, cwd = c.cwd, flags = flags, name = name, text = "" }
+	local ctx = ContextToSend(nil, summary)
+	local limit = Codec.MAX_PAYLOAD - #RecordFor(id, envelope) - (ctx ~= nil and 3 or 0)
+	if #text > limit then
+		AddHistory(c, "system", "That message is too long for one send (" .. #text .. " bytes, max " .. math.max(0, limit) .. "). Split it up." .. (links > 0 and " Each linked item adds its tooltip to the message." or ""))
+		Wowie.Render()
+		return
+	end
+	-- The optional summary may wait, but a context-off field always fits its reserved header.
+	if ctx and #ctx > limit - #text then ctx = nil end
+	db.lastSeq = id
 	local newSession = c.resetNext and true or nil
 	c.resetNext = nil
 	db.outbox = {
 		id = id,
 		nonce = nonce,
+		generation = c.generation,
+		name = ToHex(name),
 		session = db.session,
 		chat = c.id,
 		text = ToHex(text),
@@ -1920,23 +2083,15 @@ function Wowie.Send(text, allow)
 	if run.replyPhase then run.replyPhase[c.id] = nil end
 	c.snapshotAcked, c.queryReply = nil, nil
 	AddHistory(c, "user", text, id)
-	-- A chat still carrying its default name takes its title from the first message
-	-- you send (system notes like "/wowie cd" before it don't count).
-	if c.name:match("^Chat %d+$") then
-		local first = true
-		for _, m in ipairs(c.history) do
-			if m.role == "user" and m.id ~= id then first = false break end
-		end
-		if first then c.name = AutoTitle(text) or c.name end
-	end
+	c.name = name
 	db.settings.shown = true
 	-- Snapshot the run settings: changing a selector only affects future sends,
 	-- including when the pending message is resent after a UI reload.
-	c.request = { chat = c.id, nonce = nonce, cwd = c.cwd, flags = flags, name = c.name, text = text, ctx = ctx, profile = profile }
+	c.request = { chat = c.id, nonce = nonce, generation = c.generation, cwd = c.cwd, flags = flags, name = c.name, text = text, ctx = ctx, profile = profile, startedAt = time() }
 
 	if db.settings.mode == "pixel" then
-		local rec = { chat = c.id, nonce = nonce, cwd = c.cwd, flags = flags, name = c.name, text = text, ctx = ctx, profile = profile, sentAt = GetTime() }
-		PrepareData(rec)
+		local rec = { chat = c.id, nonce = nonce, generation = c.generation, cwd = c.cwd, flags = flags, name = c.name, text = text, ctx = ctx, profile = profile, sentAt = GetTime() }
+		PrepareData(rec, id)
 		run.outbound[id] = rec
 		run.sentAt = GetTime()
 		run.polls = 0
@@ -1949,27 +2104,24 @@ function Wowie.Send(text, allow)
 	end
 end
 
--- Forget: a record with no text telling the bridge a chat was deleted, so it drops
--- the transcript (which a later restore would otherwise bring back) and the
--- agent session. db.forget keeps the id until the bridge acks, so a delete made
--- while the bridge was away is sent again with the next hello.
-local function SendForget(chatId)
-	if db.settings.mode ~= "pixel" then return end
-	for _, rec in pairs(run.outbound) do
-		if rec.forget == chatId and not rec.acked then return end
-	end
-	local info = db.forget[chatId] or {}
-	if not info.nonce then info.nonce = NewNonce() end
-	if not info.id then db.lastSeq = db.lastSeq + 1; info.id = db.lastSeq end
-	db.forget[chatId] = info
-	run.outbound[info.id] = { chat = chatId, nonce = info.nonce, cwd = info.cwd or "", flags = "d;nonce=" .. info.nonce, name = info.name or "", text = "", sentAt = GetTime(), forget = chatId }
-	RefreshStrip(info.id)
-end
-
+-- A durable deletion owns a particular chat incarnation, never its replacement.
 local function ForgetOnBridge(c)
 	if not c or not c.id then return end
-	db.forget[c.id] = { name = c.name, cwd = c.cwd }
-	SendForget(c.id)
+	for id, rec in pairs(run.outbound) do
+		if rec.chat == c.id and rec.generation == c.generation and not rec.forget then run.outbound[id] = nil end
+	end
+	for nonce, info in pairs(db.receipts) do
+		if info.chat == c.id and info.generation == c.generation then db.receipts[nonce] = nil end
+	end
+	if db.outbox and db.outbox.chat == c.id then db.outbox = nil end
+	if db.contextOutbox and db.contextOutbox.chat == c.id then db.contextOutbox = nil end
+	if run.sendOnConnect and run.sendOnConnect.chat == c.id then run.sendOnConnect = nil end
+	if run.act then run.act[c.id] = nil end
+	db.lastSeq = db.lastSeq + 1
+	local nonce = NewNonce()
+	db.forget[nonce] = { id = db.lastSeq, nonce = nonce, kind = "forget", chat = c.id, generation = c.generation }
+	SendControls()
+	RefreshStrip()
 end
 
 -- A hello is the connection challenge and also synchronizes selected context.
@@ -1998,8 +2150,8 @@ function Wowie.SayHello()
 	rec.sentAt = now
 	run.outbound[rec.id] = rec
 	run.helloPollAt = now + 5
-	-- Deletions the bridge never confirmed ride along with the hello.
-	for id in pairs(db.forget) do SendForget(id) end
+	-- Outstanding durable controls ride along once the bridge advertises protocol 2.
+	SendControls()
 	-- Fresh saved data: show "restoring" instead of an empty panel until we hear back.
 	if not db.restored then
 		local empty = true
@@ -2017,10 +2169,15 @@ function Wowie.Resend()
 	local c = ActiveChat()
 	if not c or not c.pendingId then return end
 	if not c.request then return end
+	if run.requestProtocol ~= 2 then
+		AddHistory(c, "system", "Update/restart the bridge before retrying this pending request safely.")
+		Wowie.Render()
+		return
+	end
 	local rec = {}
 	for k, v in pairs(c.request) do rec[k] = v end
 	rec.sentAt = GetTime()
-	PrepareData(rec)
+	PrepareData(rec, c.pendingId)
 	run.outbound[c.pendingId] = rec
 	run.sentAt = GetTime()
 	run.polls = 0
@@ -2324,10 +2481,14 @@ function Wowie.DeleteChat(id)
 	if #db.chats == 1 then
 		wipe(c.history)
 		c.pendingId, c.progress, c.unread, c.draft = nil, nil, 0, nil
+		c.request, c.queryReply, c.snapshotAcked = nil, nil, nil
+		c.generation, c.resetNext = NewNonce(), true
 		c.name = "Chat 1"
 		if ui.input then ui.input:SetText("") end
 		Wowie.Render()
 		Wowie.RenderChatList()
+		Wowie.ArmAutoRefresh()
+		if db.settings.mode ~= "pixel" then SafeReload() end
 		return
 	end
 	table.remove(db.chats, idx)
@@ -2336,6 +2497,8 @@ function Wowie.DeleteChat(id)
 	else
 		Wowie.RenderChatList()
 	end
+	Wowie.ArmAutoRefresh()
+	if db.settings.mode ~= "pixel" then SafeReload() end
 end
 
 -- The conversation menu asks before deleting; /wowie delete does not.
@@ -2580,6 +2743,20 @@ function Wowie.UpdateStatus()
 	Wowie.UpdateMini()
 end
 
+-- Only the activity strip animates; reply text and selections stay untouched.
+local function AnimateActivity(self, elapsed)
+	self.tick = self.tick + elapsed
+	if self.tick < 0.2 then return end
+	self.tick = self.tick % 0.2
+	self.step = self.step % 3 + 1
+	for i, dot in ipairs(self.dots) do dot:SetAlpha(i == self.step and 1 or 0.25) end
+	local seconds = math.max(0, time() - self.startedAt)
+	if self.seconds ~= seconds then
+		self.seconds = seconds
+		self.label:SetText(self.phaseText .. " · " .. seconds .. "s")
+	end
+end
+
 -- Message bodies are selectable in place; readonly guards never change history.
 local function GetBubble(i)
 	local b = ui.bubbles[i]
@@ -2603,6 +2780,23 @@ local function GetBubble(i)
 	b.body = Wowie.ReplyView.Create(b, "WowieMessageText" .. i)
 	b.body:SetPoint("TOPLEFT", b, "TOPLEFT", 16, -42)
 	b.layoutOptions = { onResize = function() Wowie.Render() end }
+	b.activity = CreateFrame("Frame", "WowieMessageActivity" .. i, b)
+	b.activity:SetPoint("TOPLEFT", b, "TOPLEFT", 16, -42)
+	b.activity:SetPoint("TOPRIGHT", b, "TOPRIGHT", -16, -42)
+	b.activity:SetHeight(24)
+	b.activity.dots = {}
+	for k = 1, 3 do
+		local dot = b.activity:CreateTexture(nil, "ARTWORK")
+		dot:SetColorTexture(unpack(UI.colors.accent))
+		dot:SetSize(5, 5)
+		dot:SetPoint("LEFT", b.activity, "LEFT", (k - 1) * 9, 0)
+		b.activity.dots[k] = dot
+	end
+	b.activity.label = UI.Label(b.activity, "", 14, "accent")
+	b.activity.label:SetPoint("LEFT", b.activity, "LEFT", 32, 0)
+	b.activity.label:SetPoint("RIGHT", b.activity, "RIGHT")
+	b.activity.label:SetWordWrap(false)
+	b.activity:Hide()
 	b.allow = UI.Button(b, "Approve tools & retry", 180, function(self) Wowie.Allow(self.chatId, self.rules) end, "primary")
 	b.allow:SetPoint("TOPLEFT", b.body, "BOTTOMLEFT", 0, -12)
 	b.allow:SetScript("OnEnter", function(self)
@@ -2615,7 +2809,13 @@ local function GetBubble(i)
 	b.allow:SetScript("OnLeave", function() GameTooltip:Hide() end)
 	b.allow:Hide()
 	b.macroBtns = {}
-	b:SetScript("OnHide", function() b.body:ClearSelection() end)
+	b:SetScript("OnHide", function()
+		b.body:ClearSelection()
+		b.activity:SetScript("OnUpdate", nil)
+	end)
+	b:SetScript("OnShow", function()
+		if b.activity:IsShown() then b.activity:SetScript("OnUpdate", AnimateActivity) end
+	end)
 	ui.bubbles[i] = b
 	return b
 end
@@ -2636,7 +2836,7 @@ function Wowie.Render()
 		if not width or width < 80 then width = 400 end
 		ui.content:SetWidth(width)
 		local y, n = 0, 0
-		local function Place(role, text, when, dim, denied, agent, macros, record)
+		local function Place(role, text, when, dim, denied, agent, macros, record, phaseText)
 			text = tostring(text or "")
 			n = n + 1
 			local b = GetBubble(n)
@@ -2650,10 +2850,31 @@ function Wowie.Render()
 				b.body:ClearSelection()
 				b.record, b.chatId = record, c.id
 			end
+			local activity = b.activity
+			if dim then
+				if activity.request ~= record or not activity.startedAt then
+					activity.request, activity.startedAt = record, record and record.startedAt or time()
+					activity.tick, activity.step, activity.seconds = 0.2, 0, nil
+				end
+				local label = Display(phaseText)
+				if activity.phaseText ~= label then
+					activity.phaseText, activity.seconds, activity.tick = label, nil, 0.2
+				end
+				AnimateActivity(activity, 0)
+			else
+				activity.request, activity.startedAt = nil, nil
+			end
+			activity:SetShown(dim)
+			activity:SetScript("OnUpdate", dim and AnimateActivity or nil)
+			local activityHeight = dim and 30 or 0
+			b.body:ClearAllPoints()
+			b.body:SetPoint("TOPLEFT", b, "TOPLEFT", 16, -42 - activityHeight)
 			local options = b.layoutOptions
 			options.formatted, options.muted = role == "assistant" and not dim, dim
 			options.identity, options.fontSize = record, db.settings.replyFontSize or 14
 			local h = Wowie.ReplyView.Layout(b.body, text, math.max(80, width - 32), options)
+			b.body:SetShown(not dim or text ~= "")
+			if dim and text == "" then h = 0 end
 			b.copy:SetShown(not dim)
 			local extra = 0
 			if denied then
@@ -2690,7 +2911,7 @@ function Wowie.Render()
 				shownMacros = k
 			end
 			for k = shownMacros + 1, #b.macroBtns do b.macroBtns[k]:Hide() end
-			b:SetHeight(42 + h + 16 + extra)
+			b:SetHeight(42 + activityHeight + h + 16 + extra)
 			b:ClearAllPoints()
 			b:SetPoint("TOPLEFT", ui.content, "TOPLEFT", 0, -y)
 			b.text = text
@@ -2712,8 +2933,10 @@ function Wowie.Render()
 			local p = c.progress
 			local rec = run.outbound[c.pendingId]
 			local phase = run.replyPhase and run.replyPhase[c.id]
-			local head = (phase == "context" or phase == "context_query") and "Reading shared context..." or (rec and not rec.acked and "Sending message..." or (ChatAgentName(c) .. " is working..."))
-			Place("assistant", (p and p ~= "") and (head .. "\n\n" .. p) or head, "", true, nil, ChatAgent(c), nil, c.request)
+			local head = (phase == "context" or phase == "context_query") and "Reading shared context"
+				or (phase == "queued" and ("Queued for " .. ChatAgentName(c)))
+				or (rec and not rec.acked and "Sending message" or (ChatAgentName(c) .. " is working"))
+			Place("assistant", p or "", "", true, nil, ChatAgent(c), nil, c.request, head)
 		end
 		for i = n + 1, #ui.bubbles do
 			ui.bubbles[i]:Hide()
@@ -2761,7 +2984,7 @@ function Wowie.ShowCopy(text)
 		local eb = CreateFrame("EditBox", "WowieCopyBox", sc)
 		eb:SetMultiLine(true)
 		eb:SetAutoFocus(false)
-		eb:SetFontObject(ChatFontNormal)
+		eb:SetFont(UI.font, 14, "")
 		eb:SetMaxLetters(0)
 		eb:SetSize(500, 260)
 		eb:SetScript("OnEscapePressed", function() cf:Hide() end)
@@ -2781,6 +3004,7 @@ function Wowie.RenderChatList()
 	if not ui.chatButtons then return end
 	local query = ui.chatSearch:GetText():lower()
 	local n = 0
+	local rowStep = CHAT_ROW_HEIGHT + CHAT_ROW_GAP
 	for _, c in ipairs(db.chats) do
 		local searchable = (c.name .. " " .. ChatFolder(c) .. " " .. ChatAgentName(c)):lower()
 		if query == "" or searchable:find(query, 1, true) then
@@ -2798,12 +3022,13 @@ function Wowie.RenderChatList()
 			btn.selectedLine:SetShown(c.id == db.activeChat)
 			btn.label:SetTextColor(unpack(UI.colors[c.id == db.activeChat and "accent" or "text"]))
 			btn:ClearAllPoints()
-			btn:SetPoint("TOPLEFT", ui.chatContent, "TOPLEFT", 0, -(n - 1) * 66)
+			btn:SetPoint("TOPLEFT", ui.chatContent, "TOPLEFT", 0, -(n - 1) * rowStep)
 			btn:Show()
 		end
 	end
 	for i = n + 1, #ui.chatButtons do ui.chatButtons[i]:Hide(); ui.chatButtons[i].chatId = nil end
-	ui.chatContent:SetHeight(math.max(n * 66, 36))
+	ui.chatContent:SetHeight(math.max(n * rowStep - CHAT_ROW_GAP, 36))
+	ui.chatScroll:UpdateScrollChildRect()
 	ui.chatEmpty:SetShown(n == 0)
 	ui.chatCount:SetText(#db.chats .. "/" .. MAX_CHATS)
 	ui.newChat:SetEnabled(#db.chats < MAX_CHATS)
@@ -2835,15 +3060,9 @@ local function ChatLinks(chat)
 	return "  |Hwowie:reply:" .. chat.id .. "|h|cff55ff55[reply]|r|h |Hwowie:open:" .. chat.id .. "|h|cff7ec8ff[open]|r|h"
 end
 
-local SUMMARY_LINES = 3 -- lines of the agent's TL;DR block printed in "summary" mode
-local SUMMARY_FALLBACK_LINES = 2 -- lines of the reply shown when it came without one
-
 -- Print a reply into the game chat: prefix on the first line, then the text line
 -- by line up to the limit, then clickable links. `short` prints one preview line.
--- `summary` (the default) prints the TL;DR block the bridge split off the reply,
--- or the first lines of the reply when the agent didn't write one; the full text
--- is in the window, behind [open].
-local function EchoToChat(chat, text, agent, summary)
+local function EchoToChat(chat, text, agent)
 	local mode = db.settings.echo
 	if mode == "off" then return end
 	local prefix = "|cff7ec8ff[" .. ReplyAgentName(chat, agent) .. " · " .. Display(chat.name) .. "]|r "
@@ -2852,25 +3071,6 @@ local function EchoToChat(chat, text, agent, summary)
 		local flat = (body:gsub("%s+", " "))
 		if #flat > 200 then flat = flat:sub(1, 200) .. " ..." end
 		print(prefix .. flat .. ChatLinks(chat))
-		return
-	end
-	if mode == "summary" then
-		local source, max = Display(summary or ""), SUMMARY_LINES
-		if not source:match("%S") then source, max = body, SUMMARY_FALLBACK_LINES end
-		local lines, total = {}, 0
-		for line in (source .. "\n"):gmatch("(.-)\n") do
-			if line:match("%S") then
-				total = total + 1
-				if total <= max then table.insert(lines, line) end
-			end
-		end
-		for i, line in ipairs(lines) do
-			print((i == 1 and prefix or "    ") .. line)
-		end
-		if total > max then
-			print("    |cff888888... click [open] to read it all|r")
-		end
-		print("    " .. ChatLinks(chat):sub(3))
 		return
 	end
 	local limit = tonumber(mode) or ECHO_DEFAULT
@@ -2891,13 +3091,13 @@ end
 
 -- A reply landed. Always play the sound and echo it to the game chat; if that
 -- chat isn't on screen, also flash the screen text and light up the mini bar.
-function Wowie.Notify(chat, text, agent, summary)
+function Wowie.Notify(chat, text, agent)
 	pcall(PlaySound, 3081)
 	Wowie.UpdateMini()
 	-- Until a real whisper arrives, /r replies to this chat.
 	run.lastMessenger = "agent"
 	run.lastReplyChat = chat.id
-	EchoToChat(chat, text, agent, summary)
+	EchoToChat(chat, text, agent)
 	if ui.frame and ui.frame:IsShown() and db.activeChat == chat.id then return end
 	if UIErrorsFrame then
 		UIErrorsFrame:AddMessage(ReplyAgentName(chat, agent) .. " replied in " .. Display(chat.name), 0.5, 0.8, 1, 1)
@@ -3027,7 +3227,7 @@ end
 -- UI
 ---------------------------------------------------------------------------
 
-local PANEL_W = 180
+local PANEL_W = 212
 
 local function EditField(parent, name, placeholder)
 	local bg = CreateFrame("Frame", nil, parent, "BackdropTemplate")
@@ -3262,7 +3462,7 @@ function Wowie.ShowReplyPreview()
 		local body = Wowie.ReplyView.Create(scroll, "WowieReplyPreviewText")
 		scroll:SetScrollChild(body)
 		preview.body, preview.scroll = body, scroll
-		preview.sample = "## A clearer answer\nStart with the important part. Longer explanations are split into readable sections instead of one dense block.\n\n### Your next steps\n1. Review the information you want to share.\n2. Ask a question in the conversation.\n3. Follow directions yourself; Wowie does not play for you.\n\n> You can drag-select any paragraph or code block directly.\n\n### A code example\n```lua\nlocal greeting = \"Hello, adventurer\"\nprint(greeting)\n```\n\n[Example source](https://example.com/guide)\n\nTL;DR:\nReadable sections, selectable text and compact sources.\n\n[bridge] Example technical detail, kept separate from the answer."
+		preview.sample = "## A clearer answer\n**Start here:** Lead with the recommendation, then explain only what matters. See [the example guide](https://example.com/guide).\n\n### Compare your options\n- **Pros:** Short, labeled points make the important differences easy to find.\n- **Cons:** A long explanation inside one bullet is still hard to scan, even when it wraps neatly beneath the text instead of the marker.\n- **Best for:** Reading an answer while you play.\n\n### Your next steps\n1. Review the information you want to share.\n2. Ask a question in the conversation.\n\n> Drag-select text to copy it. The message Copy button keeps the complete original.\n\n### A code example\n```lua\nlocal greeting = \"Hello, adventurer\"\nprint(greeting)\n```\n\n[bridge] Example technical detail, kept separate from the answer."
 		preview.options = { formatted = true, identity = preview, onResize = function() Wowie.ShowReplyPreview() end }
 		preview:SetScript("OnHide", function()
 			body:ClearSelection()
@@ -3501,11 +3701,8 @@ local function BuildUI()
 	ui.connection = UI.Label(f, "Idle / not verified", 12, "muted")
 	ui.connection:SetPoint("LEFT", dotHolder, "RIGHT", 5, 0)
 	ui.connection:SetWordWrap(false)
-	local close = UI.Button(f, "X", 30, function() Wowie.Toggle(false) end, "quiet", "WowieClose")
-	close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -10, -10)
-	UI.Tooltip(close, "Close", "Hide the workspace and compact bar. /wowie opens it again.")
 	local minimize = UI.Button(f, "—", 30, function() Wowie.Minimize(true) end, "quiet", "WowieMinimize")
-	minimize:SetPoint("RIGHT", close, "LEFT", -6, 0)
+	minimize:SetPoint("TOPRIGHT", f, "TOPRIGHT", -10, -10)
 	UI.Tooltip(minimize, "Minimize · Esc", "Keep waiting in the compact bar without taking keyboard focus.")
 	local settings = UI.Button(f, "Settings", 70, function() Wowie.ShowDefaults() end, "quiet", "WowieSettings")
 	settings:SetPoint("RIGHT", minimize, "LEFT", -8, 0)
@@ -3568,18 +3765,19 @@ local function BuildUI()
 	heading:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -14)
 	ui.chatCount = UI.Label(panel, "", 11, "muted")
 	ui.chatCount:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -12, -15)
-	local newChat = UI.Button(panel, "+ New chat", PANEL_W - 20, function() Wowie.NewChat() end, "primary", "WowieNewChat")
+	local newChat = UI.Button(panel, "+ New chat", PANEL_W - 20, function() Wowie.NewChat() end, "secondary", "WowieNewChat")
 	newChat:SetPoint("TOPLEFT", panel, "TOPLEFT", 10, -38)
+	newChat:SetHeight(28)
 	ui.newChat = newChat
 	local searchBg, search = EditField(panel, "WowieChatSearch", "Search chats")
-	searchBg:SetPoint("TOPLEFT", newChat, "BOTTOMLEFT", 0, -10)
-	searchBg:SetPoint("TOPRIGHT", newChat, "BOTTOMRIGHT", 0, -10)
+	searchBg:SetPoint("TOPLEFT", newChat, "BOTTOMLEFT", 0, -8)
+	searchBg:SetPoint("TOPRIGHT", newChat, "BOTTOMRIGHT", 0, -8)
 	ui.chatSearch = search
 	local chatScroll = UI.ScrollFrame(panel, "WowieChatScroll")
 	chatScroll:SetPoint("TOPLEFT", searchBg, "BOTTOMLEFT", 0, -10)
-	chatScroll:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -28, 54)
+	chatScroll:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -24, 54)
 	local chatContent = CreateFrame("Frame", "WowieChatList", chatScroll)
-	chatContent:SetSize(PANEL_W - 38, 1)
+	chatContent:SetSize(PANEL_W - 34, 1)
 	chatScroll:SetScrollChild(chatContent)
 	ui.chatContent, ui.chatScroll = chatContent, chatScroll
 	ui.chatEmpty = UI.Label(chatContent, "No conversations match.", 12, "muted")
@@ -3590,6 +3788,9 @@ local function BuildUI()
 	ui.sharingSummary:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 12, 18)
 	ui.sharingSummary:SetWidth(PANEL_W - 24)
 	ui.sharingSummary:SetWordWrap(true)
+	local sharingRule = UI.Rule(panel)
+	sharingRule:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 10, 46)
+	sharingRule:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -10, 46)
 	Wowie.UpdateSharingSummary()
 
 	local menu = UI.Window(CreateFrame("Frame", "WowieChatMenu", f, "BackdropTemplate"), 26)
@@ -3643,7 +3844,7 @@ local function BuildUI()
 	ui.chatButtons = {}
 	for i = 1, MAX_CHATS do
 		local b = CreateFrame("Button", "WowieChatRow" .. i, chatContent)
-		b:SetSize(PANEL_W - 38, 62)
+		b:SetSize(PANEL_W - 34, CHAT_ROW_HEIGHT)
 		b.selected = b:CreateTexture(nil, "BACKGROUND")
 		b.selected:SetAllPoints()
 		b.selected:SetColorTexture(unpack(UI.colors.primary))
@@ -3655,17 +3856,17 @@ local function BuildUI()
 		hover:SetAllPoints()
 		hover:SetColorTexture(UI.colors.accent[1], UI.colors.accent[2], UI.colors.accent[3], 0.055)
 		b.label = UI.Label(b, "", 12)
-		b.label:SetPoint("TOPLEFT", b, "TOPLEFT", 7, -8)
-		b.label:SetPoint("TOPRIGHT", b, "TOPRIGHT", -28, -8)
-		b.label:SetHeight(30)
-		b.label:SetWordWrap(true)
+		b.label:SetPoint("TOPLEFT", b, "TOPLEFT", 8, -7)
+		b.label:SetSize(PANEL_W - 76, 16)
+		b.label:SetWordWrap(false)
+		b.label:SetJustifyV("TOP")
 		b.detail = UI.Label(b, "", 10, "muted")
-		b.detail:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 7, 8)
-		b.detail:SetPoint("RIGHT", b, "RIGHT", -7, 0)
+		b.detail:SetPoint("TOPLEFT", b, "TOPLEFT", 8, -26)
+		b.detail:SetSize(PANEL_W - 76, 12)
 		b.detail:SetWordWrap(false)
-		b.menu = UI.Button(b, "...", 27, function() Wowie.ShowChatMenu(b.chatId, b) end, "quiet", "WowieChatRowMenu" .. i)
-		b.menu:SetHeight(24)
-		b.menu:SetPoint("TOPRIGHT", b, "TOPRIGHT", -1, -2)
+		b.menu = UI.Button(b, "...", 26, function() Wowie.ShowChatMenu(b.chatId, b) end, "quiet", "WowieChatRowMenu" .. i)
+		b.menu:SetHeight(28)
+		b.menu:SetPoint("RIGHT", b, "RIGHT", -2, 0)
 		UI.Tooltip(b.menu, "Conversation actions", "Rename, folder, agent, copy, reset, clear or delete.")
 		b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 		b:SetScript("OnClick", function(self, button)
@@ -3896,10 +4097,8 @@ local function BuildUI()
 	ui.miniBadge:SetPoint("TOPLEFT", miniTitle, "BOTTOMLEFT", 0, -3)
 	ui.miniBadge:SetWidth(218)
 	ui.miniBadge:SetWordWrap(false)
-	local mclose = UI.Button(m, "X", 28, function() Wowie.Toggle(false) end, "quiet", "WowieMiniClose")
-	mclose:SetPoint("RIGHT", m, "RIGHT", -6, 0)
 	local open = UI.Button(m, "Open", 60, function() Wowie.Minimize(false) end, "primary", "WowieMiniOpen")
-	open:SetPoint("RIGHT", mclose, "LEFT", -6, 0)
+	open:SetPoint("RIGHT", m, "RIGHT", -6, 0)
 	m:Hide()
 end
 
@@ -3950,7 +4149,7 @@ local HELP = table.concat({
 	"/wowie hide                   hide the window completely",
 	"/ai <text>                         send <text> to the current chat straight from the game chat box (/wowie <text> too). A message that starts with a command word is still sent when the rest of the line doesn't fit that command",
 	"/r <text>                          replies to the agent when it was the last to message you (else normal whisper reply)",
-	"/wowie echo summary|full|short|off|<chars>   how much of each reply to print in the game chat (summary = the agent's closing TL;DR lines)",
+	"/wowie echo short|full|off|<chars>   how much of each reply to print in the game chat (short = a preview of the answer)",
 	"/wowie longchat on|off        let the game chat box take 4000 characters (for long /ai messages)",
 	"/wowie new [name]             start a new chat (its own agent session, like a new terminal)",
 	"/wowie chat <n|name>          switch chats (or click one in the left panel)",
@@ -3999,7 +4198,7 @@ local COMMAND_ARGS = {
 	mode = { [""] = true, pixel = true, reload = true },
 	signal = { [""] = true, on = true, off = true }, longchat = { [""] = true, on = true, off = true },
 	auto = OnOffOrNumber,
-	echo = function(rest) return rest == "" or rest == "summary" or rest == "full" or rest == "short" or rest == "off" or tonumber(rest) ~= nil end,
+	echo = function(rest) return rest == "" or rest == "full" or rest == "short" or rest == "off" or tonumber(rest) ~= nil end,
 	bind = 1, agent = 1,
 	chat = ChatArgument, chats = ChatArgument,
 	cd = true, new = true, rename = true,
@@ -4135,12 +4334,12 @@ SlashCmdList["WOWIE"] = function(msg)
 			end
 		end
 	elseif cmd == "echo" then
-		if rest == "summary" or rest == "full" or rest == "short" or rest == "off" then
+		if rest == "full" or rest == "short" or rest == "off" then
 			s.echo = rest
 		elseif tonumber(rest) then
 			s.echo = tostring(math.max(200, math.floor(tonumber(rest))))
 		end
-		AddHistory(c, "system", "replies in game chat: " .. s.echo .. " (summary = the agent's TL;DR lines, full = " .. ECHO_DEFAULT .. " chars, short, off, or a number of characters)")
+		AddHistory(c, "system", "replies in game chat: " .. s.echo .. " (short = a preview, full = " .. ECHO_DEFAULT .. " chars, off, or a number of characters)")
 		Wowie.Render()
 	elseif cmd == "longchat" then
 		if rest == "on" then s.longchat = true elseif rest == "off" then s.longchat = false end
@@ -4199,7 +4398,7 @@ SlashCmdList["WOWIE"] = function(msg)
 		if c.pendingId then
 			AddHistory(c, "system", "Gave up waiting on #" .. c.pendingId)
 			run.outbound[c.pendingId] = nil
-			if db.outbox and db.outbox.id == c.pendingId and db.outbox.nonce == c.request.nonce then db.outbox.profile = nil end
+			if db.outbox and db.outbox.id == c.pendingId and db.outbox.nonce == c.request.nonce then db.outbox = nil end
 			if db.contextOutbox and db.contextOutbox.id == c.pendingId and db.contextOutbox.nonce == c.request.nonce then db.contextOutbox = nil end
 			c.queryReply, c.snapshotAcked = nil, nil
 			if run.act then run.act[c.id] = nil end
@@ -4207,7 +4406,7 @@ SlashCmdList["WOWIE"] = function(msg)
 			c.request = nil
 			c.progress = nil
 			RefreshStrip()
-			if not AnyPending() then keyCatcher:Hide() end
+			Wowie.ArmAutoRefresh()
 		end
 		Wowie.Render()
 	elseif cmd == "clear" then
@@ -4252,7 +4451,9 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 	elseif event == "PLAYER_LOGIN" then
 		if not db then InitDB() end
 		BuildUI()
-		run = { outbound = {} }
+		run = { outbound = {}, reconcilePending = true }
+		Wowie.nextAutoRefresh = nil
+		RefreshControlOutbox()
 		HideStrip()
 		tx.active, tx.probe, tx.failed, tx.retryDisplay, tx.reason = "robust", nil, nil, nil, ""
 		tx.interval, tx.displays, tx.captureInterval, tx.nextFrameAt, tx.lastSignalCheck = 0.5, nil, nil, nil, nil
@@ -4265,25 +4466,11 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 			run.act = {}
 			for _, ch in ipairs(db.chats) do
 				if ch.pendingId then
-					if ch.request and (ch.queryReply or ch.resumePending or (ch.request.profile and not ch.snapshotAcked)) then
-						local rec = {}
-						if ch.queryReply then
-							rec = { chat = ch.id, nonce = ch.request.nonce, dataKind = "query",
-								request = ch.queryReply.request, payload = ch.queryReply.text }
-						else
-							for k, v in pairs(ch.request) do rec[k] = v end
-						end
-						rec.sentAt = GetTime()
-						PrepareData(rec)
-						run.outbound[ch.pendingId] = rec
-						ch.resumePending = nil
-					end
 					-- Beats already written stay valid, so the counter catches up on its own.
 					run.act[ch.id] = { next = 1, count = 0, startedAt = GetTime() }
 				end
 			end
 			ScheduleNextPoll()
-			RefreshStrip()
 		end
 		local c = ActiveChat()
 		if c and c.draft and c.draft ~= "" then

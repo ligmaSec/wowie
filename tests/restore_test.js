@@ -39,20 +39,21 @@ function readSlot(src, globalName) {
 test('slot file round-trips replies, denied rules, cwd, agents and a restore bundle', () => {
   const restore = {
     token: 'tok1',
+    id: 'restore-offer-001',
     chats: [{ id: 'c1', name: 'realms', cwd: 'C:\\x\\y', messages: [
       { role: 'user', id: 1, t: 1, text: 'hi "there"\nnew line' },
       { role: 'assistant', id: 1, t: 2, agent: 'codex', text: 'hello | pipe \\ backslash' },
     ] }],
   };
   const lua = P.luaTable('Wowie_SlotData',
-    [{ chat: 'c9', id: 3, nonce: 'owner-000003', status: 'done', text: 'ok\ttab', denied: ['WebSearch', 'Bash(cargo:*)'], agent: 'grok' }],
-    { cwd: 'C:\\proj', restore, now: 1700000000123, agent: 'claude', agents: ['claude', 'codex', 'grok'], connectionAck: { session: 'sess"\\\n', nonce: 'hello-000003', at: 1699999999 } });
+    [{ chat: 'c9', id: 3, nonce: 'owner-000003', generation: 'chat-generation-1', status: 'done', text: 'ok\ttab', denied: ['WebSearch', 'Bash(cargo:*)'], agent: 'grok' }],
+    { cwd: 'C:\\proj', restore, now: 1700000000123, agent: 'claude', agents: ['claude', 'codex', 'grok'], connectionAck: { session: 'sess"\\\n', nonce: 'hello-000003', at: 1699999999 }, receipts: [{session:'sess',chat:'c9',nonce:'receipt-000003',kind:'reply'}] });
   const d = readSlot(lua, 'Wowie_SlotData');
   assert.equal(d.now, 1700000000);
   assert.equal(d.cwd, 'C:\\proj');
   assert.equal(d.agent, 'claude');
   assert.deepEqual(d.agents, ['claude', 'codex', 'grok']);
-  assert.equal(d.requestProtocol, 1);
+  assert.equal(d.requestProtocol, 2);
   assert.equal(d.contextProtocol, 2);
   assert.equal(d.connectionProtocol, 1);
   assert.deepEqual(d.connectionAck, { session: 'sess"\\\n', nonce: 'hello-000003', at: 1699999999 });
@@ -61,7 +62,10 @@ test('slot file round-trips replies, denied rules, cwd, agents and a restore bun
   assert.equal(d.replies[0].text, 'ok\ttab');
   assert.equal(d.replies[0].agent, 'grok');
   assert.equal(d.replies[0].nonce, 'owner-000003');
+  assert.equal(d.replies[0].generation, 'chat-generation-1');
+  assert.deepEqual(Object.values(d.receipts), [{session:'sess',chat:'c9',nonce:'receipt-000003',kind:'reply'}]);
   assert.equal(d.restore.token, 'tok1');
+  assert.equal(d.restore.id, 'restore-offer-001');
   assert.equal(d.restore.chats.length, 1);
   assert.equal(d.restore.chats[0].messages[0].text, 'hi "there"\nnew line');
   assert.equal(d.restore.chats[0].messages[0].agent, '');

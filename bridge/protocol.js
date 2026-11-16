@@ -138,6 +138,9 @@ function parseFlags(flags) {
     else if (tok.startsWith('model=')) out.model = fromHex(tok.slice(6));
     else if (tok.startsWith('reasoning=')) out.reasoning = tok.slice(10).trim().toLowerCase();
     else if (tok.startsWith('nonce=')) out.nonce = tok.slice(6);
+    else if (tok.startsWith('generation=')) out.generation = tok.slice(11);
+    else if (tok.startsWith('receipt=')) out.receipt = tok.slice(8);
+    else if (tok.startsWith('target=')) out.target = tok.slice(7);
     else if (tok.startsWith('profile=')) out.profile = tok.slice(8);
     else if (tok.startsWith('calibration=')) out.calibration = tok.slice(12);
     else if (tok.startsWith('data=')) out.data = tok.slice(5);
@@ -190,6 +193,10 @@ function parseOutbox(src) {
   const newSession = /\["newSession"\]\s*=\s*true/.test(b);
   const nonce = (b.match(/\["nonce"\]\s*=\s*"([^"]*)"/) || [])[1] || '';
   const job = { id, session, chat, nonce, text, cwd, newSession, via: 'reload' };
+  const generation = b.match(/\["generation"\]\s*=\s*"([^"]*)"/);
+  if (generation) job.generation = generation[1];
+  const name = b.match(/\["name"\]\s*=\s*"([0-9a-fA-F]*)"/);
+  if (name) job.name = fromHex(name[1]);
   const ctx = b.match(/\["ctx"\]\s*=\s*"([0-9a-fA-F]*)"/);
   if (ctx) job.ctx = fromHex(ctx[1]);
   const agent = b.match(/\["agent"\]\s*=\s*"([0-9a-zA-Z_-]*)"/);
@@ -212,38 +219,42 @@ function parseContextOutbox(src) {
   const id = Number((b.match(/\["id"\]\s*=\s*(\d+)/) || [])[1]);
   const field = name => (b.match(new RegExp(`\\["${name}"\\]\\s*=\\s*"([^"]*)"`)) || [])[1] || '';
   if (!id || !field('request') || !field('text')) return null;
-  return { id, session: field('session'), chat: field('chat'), nonce: field('nonce'), request: field('request'), data: 'query', payload: fromHex(field('text')), via: 'reload' };
+  return { id, session: field('session'), chat: field('chat'), nonce: field('nonce'), generation: field('generation'), request: field('request'), data: 'query', payload: fromHex(field('text')), via: 'reload' };
+}
+
+function parseControlOutbox(src) {
+  const encoded = String(src || '').match(/\["controlOutbox"\]\s*=\s*"([0-9a-fA-F]*)"/);
+  if (!encoded) return [];
+  return jobsFromStrip(0, fromHex(encoded[1]))
+    .filter(job => job.forget || job.receipt === 'reply' || job.receipt === 'restore')
+    .map(job => ({ ...job, via: 'reload' }));
 }
 
 // ---------------------------------------------------------------------------
 // System prompt: reply format, game context, primer
 // ---------------------------------------------------------------------------
 
-// What the agent is told on every run. First how the reply is shown: the full
-// reply goes to the addon's window and only its closing "TL;DR:" block is
-// printed in the game chat, so every reply must end with one. Then, while the
-// addon has sent a context (the player's character, location and so on; see
-// GameContext in Wowie.lua), that context plus the addon/macro primer
-// (docs/WOW-ADDON-PRIMER.md) so it can write for this client whatever folder
-// the chat works in. Empty context = neither is appended, so a bridge used for
-// unrelated projects, or an addon with `/wowie context off`, only gets the
-// reply-format rule. Claude and Grok take this as a system prompt; for Codex,
-// agents.js puts it at the top of the prompt.
-const SUMMARY_MARKER = 'TL;DR:';
+// Every run gets native reply-format and map guidance. Player context and the
+// addon/macro primer are appended only when context sharing is enabled.
+// Claude and Grok take this as a system prompt; agents.js prepends it for Codex.
 const REPLY_FORMAT = [
-  'The user is chatting inside World of Warcraft through Wowie. Its discussion window supports readable Markdown-style headings, paragraphs, bullet lists, numbered steps, block quotes, fenced code and labeled HTTP/HTTPS links. Use that structure naturally: short paragraphs, meaningful headings for longer answers, and steps for instructions. Do not write a wall of text or raw long URLs; use [descriptive label](https://...) for sources. Keep simple answers short without unnecessary sections. Inline emphasis is normalized for selectable native text; avoid decorative formatting, HTML and wide tables.',
-  '',
-  `The separate game-chat echo needs a brief plain-text summary. End each reply with "${SUMMARY_MARKER}" on its own line followed by one or two lines under about 200 characters. Wowie keeps this summary in a separate disclosure rather than repeating it in the main answer. Put substantive details and sources before that summary. Do not expose internal bridge labels or claim a map marker proves navigation is active.`,
+  'The user is chatting inside World of Warcraft through Wowie, often while playing. Its discussion window supports Markdown-style headings, paragraphs, bullet lists, numbered steps, block quotes, fenced code and labeled HTTP/HTTPS links.',
+  'Make answers easy to scan. Lead with the direct answer or recommendation in one short sentence; do not repeat it in a separate recap. For a simple question, stop after a short paragraph or a few bullets. Add depth when the question needs it or the user asks.',
+  'For longer answers, use short ## or ### headings with blank lines between sections, and paragraphs of at most two or three short sentences. Keep each bullet to one point, usually one sentence; split multi-sentence explanations into separate bullets instead of packing a paragraph into a bullet. Use numbered steps for instructions.',
+  'For comparisons, give each option a heading and short labeled bullets such as **Pros:**, **Cons:** and **Best for:**. Prefer these compact sections to wide tables. Use **bold** sparingly for key terms and labels; Wowie highlights them in its selectable native text. Do not bold entire paragraphs.',
+  'Use [descriptive label](https://...) for sources, placed next to the relevant claim, instead of raw long URLs. Avoid decorative formatting and HTML. Do not add sections merely to fill a template, and do not omit important qualifications just to be brief.',
 ];
 
-// How the agent draws on the world map (see "Map layers" below and docs/MAP.md).
-// Sent with the game context, since marks only make sense in a game chat.
+// Map creation is a reply capability, not a character-sharing permission.
+// Apply it to in-game recommendations, never unrelated project locations.
 const MAP_HINT = [
   'You can mark the player\'s world map. Either append commands to the file named by the WOWIE_MAP_FILE environment variable (one JSON object per line) or, for a few marks, end the reply with a fenced block whose language tag is wowmap containing them. Commands:',
   '{"op":"set","layer":"<name>","title":"<shown title>","ordered":true,"loop":false,"points":[{"m":<uiMapID>,"x":<0-100>,"y":<0-100>,"label":"<text>","kind":"quest"}]}  replaces that layer; "ordered" draws a numbered route with a navigator, "loop" closes it.',
   '{"op":"clear","layer":"<name>"} removes a layer; {"op":"clearall"} removes them all.',
-  'x and y are map percent on the map with that uiMapID (the context gives the player\'s current one). kind is one of ore, herb, quest, turnin, kill, loot, object, explore, npc, trainer, vendor, dungeon, flight, poi. Only mark the map when asked for a route, marks or locations; say in the reply what you drew.',
-  'Use clear, human-readable layer titles and point labels. Saved marks appear in wowie\'s Navigation window, where the player can choose a destination, start a route, move between stops or stop navigation. Direct them to Navigation rather than asking them to type commands or internal layer names. Creating marks does not prove that guidance is active: another route may already own tracking.',
+  'x and y are map percent on the destination map identified by uiMapID, not world coordinates or legacy area IDs. kind is one of ore, herb, quest, turnin, kill, loot, object, explore, npc, trainer, vendor, dungeon, flight, poi.',
+  'Whenever your answer recommends that the player go to an in-game location, NPC, trainer, vendor, quest objective, dungeon or gathering area, also create the corresponding saved navigation point using these commands, even if they did not explicitly ask for map marks or navigation. Directions or coordinates in prose alone are not enough. Use a one-point layer for a single destination, an ordered layer for sequential travel stops, and an unordered collection for alternative destinations. Do not add points for passing mentions, unrelated coding/file locations or when the player explicitly asks not to create them.',
+  'Resolve the correct destination uiMapID and coordinates from reliable game data or sources before creating a point; do not invent them or assume that another destination uses the player\'s current map. If a destination cannot be located reliably, explain that rather than claiming to have marked it. Character sharing is not required to mark a known destination.',
+  'Use a destination- or task-specific layer name (1-32 ASCII letters, digits, underscores, dots or hyphens), with a clear, human-readable title and point labels. Preserve unrelated saved destinations and active routes; do not clear layers just to add a recommendation. Saved marks appear in Wowie\'s Navigation window, where the player can choose a destination, start a route, move between stops or stop navigation. Say what you marked and direct them to Navigation rather than asking them to type commands or internal layer names. Creating marks does not prove that guidance is active: another route may already own tracking.',
 ];
 
 // How the agent hands the player a ready-made macro (see "Macros" below).
@@ -257,7 +268,7 @@ const MACRO_HINT = [
 ];
 
 function systemPrompt(ctx, primer) {
-  const lines = [...REPLY_FORMAT];
+  const lines = [...REPLY_FORMAT, '', ...MAP_HINT];
   const text = String(ctx || '').trim();
   if (text) {
     lines.push('',
@@ -265,8 +276,6 @@ function systemPrompt(ctx, primer) {
       text,
       '',
       'Use this when the request is about the game or the character (questions, macros, addon code, gear advice); ignore it when the task is unrelated. Items, spells or quests the player shift-clicked into a message appear as [Name] in the text, with their tooltip in a "Linked from the game" block at the end of the message.',
-      '',
-      ...MAP_HINT,
       '',
       ...MACRO_HINT);
   }
@@ -277,28 +286,6 @@ function systemPrompt(ctx, primer) {
   return lines.join('\n');
 }
 
-// Keep the original reply for history/copy. The chat echo uses only its trailing
-// summary, excluding internal bridge notes and markers inside code examples.
-const MARKER_RE = /^[ \t]*(?:#+[ \t]*)?(?:\*\*|__)?[ \t]*TL;?DR[ \t]*:?[ \t]*(?:\*\*|__)?[ \t]*:?[ \t]*/i;
-function splitSummary(text) {
-  const full = String(text || '').trim();
-  let offset = 0, start = -1, fence = null;
-  for (const line of full.split('\n')) {
-    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
-    if (marker) {
-      if (!fence) fence = marker[1];
-      else if (marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = null;
-    } else if (!fence) {
-      const match = MARKER_RE.exec(line);
-      if (match) start = offset + match[0].length;
-    }
-    offset += line.length + 1;
-  }
-  let summary = start < 0 ? '' : full.slice(start).trim();
-  const note = /(?:^|\n)[ \t]*\[bridge\]/.exec(summary);
-  if (note) summary = summary.slice(0, note.index).trim();
-  return { text: full, summary };
-}
 
 // ---------------------------------------------------------------------------
 // Permissions and progress
@@ -384,13 +371,14 @@ function luaTable(globalName, records, opts = {}) {
     `\tagent = ${luaStr(opts.agent || '')},`,
     `\tagents = { ${agents.map(luaStr).join(', ')} },`,
     '\tcontextProtocol = 2,',
-    '\trequestProtocol = 1,',
+    '\trequestProtocol = 2,',
     '\tconnectionProtocol = 1,',
     '\ttransportProtocol = 1,',
     `\ttransport = { displays = { "robust", "compact", "quiet", "quiet4" }, frameIntervalMs = ${Math.max(100, 2 * captureIntervalMs)}, captureIntervalMs = ${captureIntervalMs} },`,
     `\tcontextEnabled = ${opts.contextEnabled === false ? 'false' : 'true'},`,
   ];
   if (opts.connectionAck) lines.push(`\tconnectionAck = ${luaValue(opts.connectionAck)},`);
+  if (opts.receipts && opts.receipts.length) lines.push(`\treceipts = ${luaValue(opts.receipts)},`);
   lines.push(
     '\treplies = {',
   );
@@ -399,6 +387,7 @@ function luaTable(globalName, records, opts = {}) {
     lines.push(`\t\t\tchat = ${luaStr(r.chat || '')},`);
     lines.push(`\t\t\tid = ${Number(r.id) || 0},`);
     lines.push(`\t\t\tnonce = ${luaStr(r.nonce || '')},`);
+    if (r.generation) lines.push(`\t\t\tgeneration = ${luaStr(r.generation)},`);
     lines.push(`\t\t\tstatus = ${luaStr(r.status)},`);
     lines.push(`\t\t\ttext = ${luaStr(r.text)},`);
     lines.push(`\t\t\tcwd = ${luaStr(r.cwd || '')},`);
@@ -406,7 +395,6 @@ function luaTable(globalName, records, opts = {}) {
     lines.push(`\t\t\tagent = ${luaStr(r.agent || '')},`);
     if (r.request) lines.push(`\t\t\trequest = ${luaStr(r.request)},`);
     if (Array.isArray(r.queries)) lines.push(`\t\t\tqueries = ${luaValue(r.queries)},`);
-    if (r.summary) lines.push(`\t\t\tsummary = ${luaStr(r.summary)},`);
     if (Array.isArray(r.denied) && r.denied.length) {
       lines.push(`\t\t\tdenied = { ${r.denied.map(luaStr).join(', ')} },`);
     }
@@ -424,9 +412,9 @@ function luaTable(globalName, records, opts = {}) {
   if (opts.map) lines.push(luaMap(opts.map));
   const restore = opts.restore;
   if (restore) {
-    lines.push('\trestore = {', `\t\ttoken = ${luaStr(restore.token)},`, '\t\tchats = {');
+    lines.push('\trestore = {', `\t\ttoken = ${luaStr(restore.token)},`, `\t\tid = ${luaStr(restore.id || '')},`, '\t\tchats = {');
     for (const c of restore.chats) {
-      lines.push('\t\t\t{', `\t\t\t\tid = ${luaStr(c.id)},`, `\t\t\t\tname = ${luaStr(c.name)},`, `\t\t\t\tcwd = ${luaStr(c.cwd)},`, '\t\t\t\tmessages = {');
+      lines.push('\t\t\t{', `\t\t\t\tid = ${luaStr(c.id)},`, `\t\t\t\tgeneration = ${luaStr(c.generation || '')},`, `\t\t\t\tname = ${luaStr(c.name)},`, `\t\t\t\tcwd = ${luaStr(c.cwd)},`, '\t\t\t\tmessages = {');
       for (const m of c.messages) {
         lines.push(`\t\t\t\t\t{ role = ${luaStr(m.role)}, id = ${Number(m.id) || 0}, t = ${Number(m.t) || 0}, agent = ${luaStr(m.agent || '')}, text = ${luaStr(m.text)} },`);
       }
@@ -624,10 +612,6 @@ function extractMacros(text) {
   return { text: out, macros, notes: [...new Set(notes)] };
 }
 
-// The summary is printed into the game chat: macro blocks have no place there.
-function stripMacroBlocks(text) {
-  return String(text ?? '').replace(MACRO_RE, '').replace(/\n{3,}/g, '\n\n').trim();
-}
 
 function luaMacros(macros) {
   return `\t\t\tmacros = { ${macros.map(m => `{ name = ${luaStr(m.name)}, body = ${luaStr(m.body)}, icon = ${m.icon == null ? 'nil' : typeof m.icon === 'number' ? m.icon : luaStr(m.icon)}, char = ${m.char ? 'true' : 'false'}, risky = ${m.risky ? 'true' : 'false'} }`).join(', ')} },`;
@@ -637,9 +621,9 @@ module.exports = {
   fromHex, pad3, slotNumber, chatKey, sessKey,
   validNonce, alreadyHandled, markHandled, pruneStale, MONTH_MS,
   resolveCwd, sameFolder, baseName,
-  parseFlags, jobsFromStrip, parseOutbox, parseContextOutbox, systemPrompt, splitSummary,
+  parseFlags, jobsFromStrip, parseOutbox, parseContextOutbox, parseControlOutbox, systemPrompt,
   ruleFor, describeToolUse,
   luaStr, luaValue, luaTable, SILENT_WAV,
   MAP_LIMITS, validateMapCommand, newMap, applyMapCommands, extractMapBlocks, parseMapFile, luaMap,
-  MACRO_LIMITS, extractMacros, stripMacroBlocks, luaMacros,
+  MACRO_LIMITS, extractMacros, luaMacros,
 };

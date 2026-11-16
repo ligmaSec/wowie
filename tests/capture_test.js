@@ -144,14 +144,14 @@ async function until(predicate, diagnostic = () => '') {
 
 function bridgeFixture(t, mode, normalExit = false) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wowie-capture-test-'));
-  for (const name of ['bridge.js', 'capture.js', 'agents.js', 'protocol.js', 'context.js']) {
+  for (const name of fs.readdirSync(path.join(ROOT, 'bridge')).filter(name => name.endsWith('.js') || name === 'ownership.ps1')) {
     fs.copyFileSync(path.join(ROOT, 'bridge', name), path.join(dir, name));
   }
   const addons = path.join(dir, 'Interface', 'AddOns');
   fs.mkdirSync(path.join(addons, 'Wowie'), { recursive: true });
   fs.writeFileSync(path.join(addons, 'Wowie', 'Wowie.toc'), '## Interface: 16001\n');
   const config = { addonDir: addons, defaultCwd: dir, agent: 'claude', slots: 1, primerFile: '', gameContext: false,
-    agents: Object.fromEntries(['claude', 'codex', 'grok', 'antigravity', 'hermes'].map(id => [id, { path: path.join(dir, 'absent-cli') }])),
+    agents: Object.fromEntries(['claude', 'codex', 'grok', 'agy', 'hermes'].map(id => [id, { path: path.join(dir, 'absent-cli') }])),
     capture: { backend: 'wayland', python: process.execPath } };
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config));
   fs.writeFileSync(path.join(dir, 'capture_wayland.py'), `
@@ -164,9 +164,10 @@ function bridgeFixture(t, mode, normalExit = false) {
     if (${JSON.stringify(mode)} === 'transient' && count === 1) process.exit(7);
     setInterval(() => {}, 1000);
   `);
+  fs.writeFileSync(path.join(dir, 'capture.js'),
+    `const path = require('node:path'); exports.captureCommand = () => [process.execPath, [path.join(__dirname, 'capture_wayland.py')]];`);
   const preload = path.join(dir, 'preload.js');
   fs.writeFileSync(preload, `
-    Object.defineProperty(process, 'platform', {value:'linux'});
     ${normalExit ? "const fs=require('node:fs'),path=require('node:path'); const timer=setInterval(()=>{if(fs.existsSync(path.join(__dirname,'exit-parent'))){clearInterval(timer);process.exit(0);}},25);" : ''}
   `);
   const child = spawn(process.execPath, ['--require', preload, path.join(dir, 'bridge.js')], {

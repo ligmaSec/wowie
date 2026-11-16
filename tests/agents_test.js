@@ -277,6 +277,47 @@ test('Codex stream: thread id, one line per item, the last agent message is the 
   assert.deepEqual(A.codexParser().feed({ type: 'turn.completed', usage: {} }).done, { text: '', error: false });
 });
 
+test('Codex web actions expose structured queries and browse targets when arguments arrive', () => {
+  // Wire fields from codex-rs/exec/src/exec_events.rs WebSearchItem and
+  // codex-rs/protocol/src/models.rs WebSearchAction, not MCP arguments/results.
+  const p = A.codexParser();
+  const event = (type, item) => p.feed({ type, item: { id: 'web-1', type: 'web_search', query: '', ...item } }).progress;
+  assert.deepEqual(event('item.started', { action: { type: 'other' } }), []);
+  const action = { type: 'search', query: 'lua 5.1 gsub', queries: ['lua 5.1 gsub', 'WoW API source'] };
+  assert.deepEqual(event('item.completed', { action }), ['search: lua 5.1 gsub; WoW API source']);
+  assert.equal(A.codexItemLine({ type: 'web_search', action: { type: 'search', queries: ['first query', 'second query'] } }), 'search: first query; second query');
+  assert.equal(A.codexItemLine({ type: 'web_search', query: 'legacy query' }), 'search: legacy query');
+  assert.equal(A.codexItemLine({ type: 'web_search', action: { type: 'open_page', url: 'https://example.com/docs' } }), 'open https://example.com/docs');
+  assert.equal(A.codexItemLine({ type: 'web_search', action: { type: 'find_in_page', pattern: 'installation', url: 'https://example.com/docs' } }), 'find: installation in https://example.com/docs');
+  assert.equal(A.codexItemLine({ type: 'web_search', action: { type: 'find_in_page', url: 'https://example.com/docs' } }), 'find: https://example.com/docs');
+  assert.equal(A.codexItemLine({ type: 'web_search', action: { type: 'open_page' } }), null);
+  assert.equal(A.codexItemLine({ type: 'web_search', results: [{ text: 'must not leak result bodies' }] }), null);
+  assert.equal(A.codexItemLine({ type: 'web_search', action: { type: 'search', queries: [null, {}, ''] } }), null);
+  const updated = A.codexParser();
+  const item = { id: 'web-2', type: 'web_search', query: '', action };
+  assert.deepEqual(updated.feed({ type: 'item.started', item: { ...item, action: { type: 'other' } } }).progress, []);
+  assert.deepEqual(updated.feed({ type: 'item.updated', item }).progress, ['search: lua 5.1 gsub; WoW API source']);
+  assert.deepEqual(updated.feed({ type: 'item.completed', item }).progress, [], 'completion does not repeat the same arguments');
+  assert.deepEqual(updated.feed({ type: 'item.completed', item: { ...item, action: { type: 'search', query: 'revised query' } } }).progress, ['search: revised query']);
+  const long = A.codexItemLine({ type: 'web_search', action: { type: 'search', query: 'x\n'.repeat(200) } });
+  assert.equal(long.length, 143, 'uses the existing 140-character snippet plus ellipsis');
+  assert.ok(!long.includes('\n'));
+});
+
+test('other streaming agents retain their schema-provided web queries and fetch targets', () => {
+  assert.deepEqual(A.claudeParser().feed({ type: 'assistant', message: { content: [
+    { type: 'tool_use', name: 'WebSearch', input: { query: 'WoW 1.12 macro API' } },
+    { type: 'tool_use', name: 'WebFetch', input: { url: 'https://example.com/api' } },
+  ] } }).progress, ['search: WoW 1.12 macro API', 'fetch https://example.com/api']);
+  const grok = A.grokParser();
+  assert.deepEqual(grok.feed({ type: 'tool_call', toolCallId: 'search-1', toolName: 'web_search', rawInput: { query: 'WoW API' } }).progress, ['search: WoW API']);
+  assert.deepEqual(grok.feed({ type: 'tool_call', toolCallId: 'fetch-1', toolName: 'web_fetch', rawInput: { url: 'https://example.com/api' } }).progress, ['fetch https://example.com/api']);
+  const agy = A.agyParser();
+  const tool = (tool_name, parameters) => agy.feed({ event: 'step_update', step_update: { step_type: 'tool', state: 'ACTIVE', tool_name, tool_info: { parameters } } }).progress;
+  assert.deepEqual(tool('search_web', { query: 'WoW quest guide' }), ['search: WoW quest guide']);
+  assert.deepEqual(tool('read_url_content', { url: 'https://example.com/guide' }), ['fetch https://example.com/guide']);
+});
+
 test('Grok stream: chunks join into the reply, thoughts and tool calls become progress, end carries the session id', () => {
   // The documented example stream, as printed by Grok Build 1.0.
   const lines = [

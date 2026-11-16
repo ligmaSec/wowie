@@ -71,18 +71,18 @@ test('requested calibration and forged capture flags never become visual provena
   assert.equal(reload.display, undefined);
 });
 
-test('systemPrompt always asks for the TL;DR block, and wraps the game context and primer when given', () => {
-  // Without a context the prompt is only the reply-format rule.
+test('systemPrompt describes native replies and wraps the game context and primer when given', () => {
+  // Reply capabilities remain available without attaching player information.
   for (const empty of ['', '  \n ', undefined]) {
     const s = P.systemPrompt(empty);
-    assert.ok(s.includes('"TL;DR:"'), 'asks for the summary marker');
+    assert.ok(s.includes('Markdown-style headings'), 'describes supported native formatting');
+    assert.ok(!/TL;DR|summary/i.test(s), 'does not request a separate summary');
     assert.ok(!s.includes('in-game situation'), 'no context section without a context');
     assert.ok(!s.includes('Reference for writing addons'), 'no primer section without a context');
   }
   const s = P.systemPrompt('Game: World of Warcraft: Forever\nCharacter: Testchar, level 23 Hunter');
-  assert.ok(s.includes('"TL;DR:"'));
+  assert.ok(!/TL;DR|summary/i.test(s));
   assert.ok(s.includes('WOWIE_MAP_FILE') && s.includes('wowmap') && s.includes('"op":"set"'), 'explains how to mark the map');
-  assert.ok(!P.systemPrompt('').includes('WOWIE_MAP_FILE'), 'map hint only with the game context');
   assert.ok(s.includes('\nGame: World of Warcraft: Forever\nCharacter: Testchar, level 23 Hunter\n'));
   assert.ok(s.includes('Linked from the game'));
   assert.ok(!s.includes('Reference for writing addons'), 'no primer section without a primer');
@@ -92,33 +92,11 @@ test('systemPrompt always asks for the TL;DR block, and wraps the game context a
   assert.ok(!P.systemPrompt('', '# Primer').includes('# Primer'));
 });
 
-test('splitSummary takes the last TL;DR block for the game chat and keeps the whole reply for the window', () => {
-  const reply = 'Renamed the function.\n\nDetails:\n- foo.js\n- bar.js\n\n---\n**TL;DR:** Renamed doIt to run in foo.js and bar.js.\nTests pass.';
-  const r = P.splitSummary(reply);
-  assert.equal(r.summary, 'Renamed doIt to run in foo.js and bar.js.\nTests pass.');
-  assert.equal(r.text, reply);
-  assert.deepEqual(P.splitSummary('no marker here'), { text: 'no marker here', summary: '' });
-  assert.deepEqual(P.splitSummary(''), { text: '', summary: '' });
-  assert.deepEqual(P.splitSummary(undefined), { text: '', summary: '' });
-  // Headings, missing colon, no bold, and a marker that is not at a line start.
-  assert.equal(P.splitSummary('a\n## TL;DR\nsum').summary, 'sum');
-  assert.equal(P.splitSummary('a\ntldr: sum').summary, 'sum');
-  assert.equal(P.splitSummary('a TL;DR: inline\nmore').summary, '');
-  assert.equal(P.splitSummary('first TL;DR: x\n\nbody\n\nTL;DR: last one').summary, 'last one');
-  // The slot file carries the summary only when there is one.
-  const lua = P.luaTable('Wowie_SlotData', [{ chat: 'c', id: 1, nonce: 'turn-000001', status: 'done', text: 'body\nTL;DR: short', summary: 'short' }, { chat: 'c', id: 2, nonce: 'turn-000002', status: 'done', text: 'plain' }]);
-  assert.ok(lua.includes('summary = "short"'));
-  assert.equal((lua.match(/summary = /g) || []).length, 1);
-});
-
-test('reply summaries ignore fenced examples and never echo bridge bookkeeping', () => {
-  const code = '```text\nTL;DR: this is code, not a summary\n```';
-  assert.equal(P.splitSummary(code).summary, '');
-  const reply = '# Instructions\n\n' + code + '\n\nTL;DR:\nFollow the steps above.\n\n[bridge] map: layer internal-id: 1 point(s)';
-  const result = P.splitSummary(reply);
-  assert.equal(result.summary, 'Follow the steps above.');
-  assert.equal(result.text, reply, 'raw copy/history must retain the complete original reply');
-  assert.equal(P.splitSummary('~~~\nTL;DR: still code\n~~~\n\n## TL;DR\nDone.').summary, 'Done.');
+test('slot records preserve the full reply without a separate summary field', () => {
+  const text = 'Full answer with [source](https://example.com).\n\nTL;DR: voluntarily written text.';
+  const lua = P.luaTable('Wowie_SlotData', [{ chat: 'c', id: 1, nonce: 'turn-000001', status: 'done', text }]);
+  assert.ok(lua.includes(`text = ${P.luaStr(text)}`));
+  assert.ok(!lua.includes('summary = '));
 });
 
 test('the shipped primer exists, mentions the essentials, and stays small enough to send on every run', () => {
@@ -153,6 +131,24 @@ test('parseOutbox decodes the SavedVariables fallback', () => {
   assert.equal(P.parseOutbox(src).agent, undefined);
   assert.equal(P.parseOutbox('WowieDB = {}'), null);
   assert.equal(P.parseOutbox('["outbox"] = { ["text"] = "" }'), null);
+});
+
+test('reload controls retain owner identities and cannot inject a player instruction', () => {
+  const row = (id, chat, flags, text = '') => ['session', chat, id, '', flags, '', text].join('\x1f');
+  const text = [
+    row(10, 'chat', 'd;nonce=forget-000001;generation=generation-0001'),
+    row(11, 'chat', 'receipt=reply;target=question-0001;nonce=receipt-000001;generation=generation-0001'),
+    row(12, '', 'receipt=restore;target=restore-000001;nonce=receipt-000002'),
+    row(13, 'chat', 'nonce=question-0002;generation=generation-0001', 'must not run'),
+  ].join('\x1e');
+  const controls = P.parseControlOutbox(`["controlOutbox"] = "${Buffer.from(text).toString('hex')}"`);
+  assert.deepEqual(controls.map(record => [record.nonce, record.generation, record.target]), [
+    ['forget-000001', 'generation-0001', undefined],
+    ['receipt-000001', 'generation-0001', 'question-0001'],
+    ['receipt-000002', undefined, 'restore-000001'],
+  ]);
+  assert.ok(controls.every(record => record.via === 'reload' && record.session === 'session'));
+  assert.deepEqual(P.parseControlOutbox('WowieDB = {}'), []);
 });
 
 test('resolveCwd: empty is the default, relative joins it, ~ is home, absolute wins', () => {

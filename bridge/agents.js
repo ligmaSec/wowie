@@ -93,6 +93,28 @@ function claudeParser() {
 // Codex
 // ---------------------------------------------------------------------------
 
+// Codex exec's WebSearchItem carries action.query/queries, or an open/find
+// target (codex-rs/protocol/src/models.rs WebSearchAction). Its initial event
+// can have no arguments yet; do not publish an empty "search:" activity.
+function codexSearchLine(item) {
+  const action = item.action || {};
+  const text = value => typeof value === 'string' ? value.trim() : '';
+  if (action.type === 'open_page') {
+    const url = text(action.url);
+    return url ? snippet(`open ${url}`) : null;
+  }
+  if (action.type === 'find_in_page') {
+    const pattern = text(action.pattern), url = text(action.url);
+    return pattern || url ? snippet(`find: ${[pattern, url].filter(Boolean).join(' in ')}`) : null;
+  }
+  const queries = [...new Set([
+    text(action.query),
+    ...(Array.isArray(action.queries) ? action.queries.map(text) : []),
+    text(item.query),
+  ].filter(Boolean))];
+  return queries.length ? snippet(`search: ${queries.join('; ')}`) : null;
+}
+
 // One progress line for a Codex item, or null for the kinds shown elsewhere.
 function codexItemLine(item) {
   switch (item.type) {
@@ -103,7 +125,7 @@ function codexItemLine(item) {
       const verb = kinds.size === 1 ? ({ add: 'write', delete: 'delete', update: 'edit' })[[...kinds][0]] || 'edit' : 'edit';
       return `${verb} ${changes.map(c => baseName(c.path)).filter(Boolean).slice(0, 4).join(', ')}`;
     }
-    case 'web_search': return `search: ${item.query || ''}`;
+    case 'web_search': return codexSearchLine(item);
     case 'mcp_tool_call': return `tool: ${item.server || ''}.${item.tool || ''}`;
     case 'collab_tool_call': return `agent: ${item.tool || ''}`;
     default: return null;
@@ -112,16 +134,16 @@ function codexItemLine(item) {
 
 function codexParser() {
   let last = null; // the newest agent_message: Codex's final answer is the last one of the turn
-  const shown = new Set(); // item ids already announced when they started
+  const shown = new Map(); // last progress line for each announced item
   return {
     feed(ev) {
       const out = empty();
       const item = ev.item;
       if (ev.type === 'thread.started') {
         if (ev.thread_id) out.session = ev.thread_id;
-      } else if (ev.type === 'item.started' && item) {
+      } else if ((ev.type === 'item.started' || (ev.type === 'item.updated' && item?.type === 'web_search')) && item) {
         const line = codexItemLine(item);
-        if (line) { out.progress.push(line); shown.add(item.id); }
+        if (line && shown.get(item.id) !== line) { out.progress.push(line); shown.set(item.id, line); }
       } else if (ev.type === 'item.completed' && item) {
         if (item.type === 'agent_message') {
           last = String(item.text || '');
@@ -132,7 +154,7 @@ function codexParser() {
           if (item.message) out.notes.push(String(item.message));
         } else {
           const line = codexItemLine(item);
-          if (line && !shown.has(item.id)) out.progress.push(line);
+          if (line && (!shown.has(item.id) || (item.type === 'web_search' && shown.get(item.id) !== line))) out.progress.push(line);
           if (item.type === 'command_execution' && item.status === 'declined') {
             out.notes.push(`Codex was not allowed to run: ${firstLine(shellInner(item.command))}\nRaise "permissionMode" for codex in bridge/config.json (acceptEdits lets it edit the project, bypassPermissions lifts the sandbox) if it should have been.`);
           }
@@ -360,11 +382,10 @@ function hermesParser() {
 // The table
 // ---------------------------------------------------------------------------
 
-// The "system prompt" is the game context and the addon primer. Claude and Grok
-// take it as a real system prompt; Codex has no such flag, so it rides at the
-// top of the prompt, marked as context, in full for a new session and as the
-// short context-only version on a resumed one (the primer is already in the
-// thread).
+// The system prompt carries reply/map guidance and optional game context and
+// addon primer. Claude and Grok take it as a real system prompt; Codex has no
+// such flag, so it rides at the top of the prompt, marked as context. Resumed
+// sessions keep the guidance and current context but omit the existing primer.
 function contextBlock(text) {
   return `[Context from the Wowie bridge, not written by the user]\n${text}\n[End of context]\n\n`;
 }

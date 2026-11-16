@@ -99,6 +99,36 @@ test('conflicting or malformed context parts fail rather than becoming apparentl
   assert.throws(() => receiver.add({ ...packets[0], text: 'not hexadecimal' }), /Invalid/);
 });
 
+test('multipart aggregate limits preserve other owners and release bytes on completion', () => {
+  const one = fragments({ value: 'a'.repeat(32) }, { nonce: 'capacity-owner-1' });
+  const two = fragments({ value: 'b'.repeat(32) }, { nonce: 'capacity-owner-2' });
+  const receiver = new C.Transfers({ maxPendingBytes: 96, maxPending: 4 });
+  receiver.add(one[0]); receiver.add(two[0]);
+  receiver.add(one[1]); receiver.add(two[1]);
+  assert.throws(() => receiver.add(one[2]), /shared memory limit/);
+  assert.deepEqual(JSON.parse(receiver.add(two[2]).text), { value: 'b'.repeat(32) }, 'capacity pressure cannot discard another owner');
+  let result;
+  for (const packet of one) result = receiver.add(packet);
+  assert.deepEqual(JSON.parse(result.text), { value: 'a'.repeat(32) }, 'completion releases capacity for a retry');
+});
+
+test('multipart expiry and explicit owner retirement free transfer slots and byte capacity', () => {
+  const one = fragments({ value: 'a'.repeat(32) }, { nonce: 'expiry-owner-001' });
+  const two = fragments({ value: 'b'.repeat(32) }, { nonce: 'expiry-owner-002' });
+  const receiver = new C.Transfers({ maxPendingBytes: 64, maxPending: 1 });
+  receiver.add(one[0]);
+  assert.throws(() => receiver.add(two[0]), /Too many incomplete/);
+  receiver.expire(Infinity);
+  receiver.add(two[0]);
+  receiver.forget(two[0]);
+  let result;
+  for (const packet of one) result = receiver.add(packet);
+  assert.deepEqual(JSON.parse(result.text), { value: 'a'.repeat(32) });
+  assert.throws(() => receiver.add({ ...one[0], parts: 1, text: 'e30' }), /base64/);
+  for (const packet of two) result = receiver.add(packet);
+  assert.deepEqual(JSON.parse(result.text), { value: 'b'.repeat(32) }, 'malformed completed transfers also release capacity');
+});
+
 test('read-only request batches remain data, and unsupported request operations are rejected', () => {
   const parsed = C.requests('Checking.\n```wowcontext\n[{"op":"snapshot","category":"mail"},{"op":"api","name":"C_Spell.GetSpellInfo","args":[133]}]\n```');
   assert.equal(parsed.queries.length, 2);
@@ -110,12 +140,13 @@ test('read-only request batches remain data, and unsupported request operations 
 test('reload character snapshots and query results remain separate from ordinary player text', () => {
   const profile = { version: 1, enabled: ['inventory'], data: { inventory: ['Épée'] } };
   const hex = value => Buffer.from(value).toString('hex');
-  const source = `WowieDB = { ["outbox"] = { ["id"] = 7, ["session"] = "token", ["chat"] = "chat", ["nonce"] = "owner-000007", ["text"] = "${hex('question')}", ["profile"] = "${hex(JSON.stringify(profile))}" }, ["contextOutbox"] = { ["id"] = 7, ["session"] = "token", ["chat"] = "chat", ["nonce"] = "owner-000007", ["request"] = "7-1", ["text"] = "${hex('[{"ok":false}]')}" } }`;
+  const source = `WowieDB = { ["outbox"] = { ["id"] = 7, ["session"] = "token", ["chat"] = "chat", ["nonce"] = "owner-000007", ["generation"] = "chat-generation-7", ["text"] = "${hex('question')}", ["profile"] = "${hex(JSON.stringify(profile))}" }, ["contextOutbox"] = { ["id"] = 7, ["session"] = "token", ["chat"] = "chat", ["nonce"] = "owner-000007", ["generation"] = "chat-generation-7", ["request"] = "query-batch-001", ["text"] = "${hex('[{"ok":false}]')}" } }`;
   const job = P.parseOutbox(source), response = P.parseContextOutbox(source);
   assert.equal(job.text, 'question');
   assert.equal(job.nonce, 'owner-000007');
   assert.equal(response.nonce, job.nonce);
   assert.deepEqual(C.snapshot(job.profilePayload), profile);
-  assert.equal(response.request, '7-1');
+  assert.equal(response.generation, job.generation);
+  assert.equal(response.request, 'query-batch-001');
   assert.deepEqual(JSON.parse(response.payload), [{ ok: false }]);
 });

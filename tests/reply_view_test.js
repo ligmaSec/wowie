@@ -29,6 +29,12 @@ function vm() {
     MEASURE_CALLS = 0
     -- Exercise glyph wrapping, not the default stub's constant 14px height.
     -- Native FontStrings interpret WoW escapes; native EditBoxes hold literals.
+    function DisplayText(text)
+      text = text:gsub('||', '\1')
+      text = text:gsub('|H.-|h(.-)|h', '%1')
+      text = text:gsub('|c%x%x%x%x%x%x%x%x', ''):gsub('|r', ''):gsub('|T.-|t', ''):gsub('|A.-|a', '')
+      return (text:gsub('\1', '|'))
+    end
     function PaintedHeight(text, width, size, spacing)
       local lines, x = 1, 0
       for glyph in text:gmatch('[%z\1-\127\194-\244][\128-\191]*') do
@@ -54,20 +60,28 @@ function vm() {
       frame.SetMultiLine = function(self, enabled) self.multiLine = enabled end
       frame.SetMaxLetters = function(self, maximum) self.maxLetters = maximum end
       frame.SetHyperlinksEnabled = function(self, enabled) self.hyperlinksEnabled = enabled end
+      frame.SetTextColor = function(self, ...) self.textColor = {...} end
       frame.CreateFontString = function(self, ...)
         local label = createFontString(self, ...)
+        label.SetTextColor = function(self, ...) self.textColor = {...} end
         label.GetStringHeight = function(self)
           MEASURE_CALLS = MEASURE_CALLS + 1
-          local text = self:GetText():gsub('||', '\1')
-          text = text:gsub('|c%x%x%x%x%x%x%x%x', ''):gsub('|r', ''):gsub('|T.-|t', ''):gsub('|A.-|a', '')
-          text = text:gsub('\1', '|')
+          local text = DisplayText(self:GetText())
           local _, size = self:GetFont()
           return PaintedHeight(text, self:GetWidth(), size, self:GetSpacing())
+        end
+        label.GetStringWidth = function(self)
+          local _, size = self:GetFont()
+          return #DisplayText(self:GetText()):gsub('[\128-\191]', '') * size * .58
         end
         return label
       end
       return frame
     end
+    local tooltipText = GameTooltip.SetText
+    function GameTooltip:SetText(text) self.lines = {}; tooltipText(self, text) end
+    function GameTooltip:AddLine(text) self.lines[#self.lines + 1] = text end
+    GameTooltip:Hide()
   `);
   for (const file of ['Codec.lua', 'Inbox.lua', 'Wowie.lua', 'ReplyView.lua']) {
     run(fs.readFileSync(path.join(__dirname, '../addon/Wowie', file), 'utf8'), 'Wowie');
@@ -80,6 +94,22 @@ function vm() {
     function Parse(text, formatted) P = Wowie.ReplyView.Parse(text, formatted) end
     function Layout(text, width) return Wowie.ReplyView.Layout(V, text, width or 360, OPTIONS) end
     function Click(button) button:GetScript('OnClick')(button) end
+    function CitationLink(row, occurrence)
+      local text = row.displayLabel and row.displayLabel:GetText():gsub('||', '\1') or ''
+      for link in text:gmatch('|H([^|]+)|h') do
+        occurrence = occurrence - 1
+        if occurrence == 0 then return link end
+      end
+      return nil
+    end
+    function ClickCitation(row, occurrence)
+      local link = assert(CitationLink(row, occurrence), 'citation is not rendered as a hyperlink')
+      row.body:GetScript('OnHyperlinkClick')(row.body, link, '', 'LeftButton')
+    end
+    function HoverCitation(row, occurrence)
+      local link = assert(CitationLink(row, occurrence), 'citation is not rendered as a hyperlink')
+      row.body:GetScript('OnHyperlinkEnter')(row.body, link)
+    end
     function BlockText(blocks)
       local parts = {}
       for _, block in ipairs(blocks) do parts[#parts + 1] = block.text end
@@ -94,13 +124,11 @@ function vm() {
           local body = row.body
           local _, size = body:GetFont()
           if body:IsShown() and body:GetHeight() < PaintedHeight(body:GetText(), body:GetWidth(), size, body:GetSpacing()) then return false end
+          if row.displayLabel and row.displayLabel:IsShown() and row.displayLabel:GetStringHeight() > body:GetHeight() then return false end
           if row:GetWidth() > V:GetWidth() or body:GetWidth() + body.x > row:GetWidth() then return false end
           if -row.y + row:GetHeight() > V:GetHeight() then return false end
           if body:GetHeight() - body.y > row:GetHeight() then return false end
         end
-      end
-      for _, button in ipairs(V.sources) do
-        if button:IsShown() and (-button.y + button:GetHeight() > V:GetHeight() or button:GetWidth() > V:GetWidth()) then return false end
       end
       return true
     end
@@ -146,7 +174,8 @@ test('structured paragraphs, emphasis, steps, quotes, code and simple tables ret
   assert.equal(v.value('P.blocks[1].kind'), 'heading');
   assert.equal(v.value('P.blocks[1].text'), 'Travel plan');
   assert.equal(v.value('P.blocks[2].text'), 'A careful route with local_name intact.');
-  assert.equal(v.value('Kind("list").text'), '1. Find the gate');
+  assert.equal(v.value('Kind("list").text'), 'Find the gate');
+  assert.equal(v.value('Kind("list").marker'), '1.');
   assert.equal(v.value('Kind("quote").text'), 'Watch for patrols.\nWait before crossing.');
   assert.equal(v.value('Kind("code").text'), code);
   assert.equal(v.value('Kind("code").language'), 'lua');
@@ -154,12 +183,81 @@ test('structured paragraphs, emphasis, steps, quotes, code and simple tables ret
   assert.equal(v.value('Kind("rule").kind'), 'rule');
   assert.equal(v.num('#P.links'), 0, 'URLs in code are not extracted');
   assert.equal(v.num('#P.details'), 0);
-  assert.equal(v.num('#P.summary'), 0);
   assert.equal(v.value('Fits()'), 'true');
   assert.ok(v.num('V.blocks[1].fontSize') > v.num('V.blocks[2].fontSize'));
 });
 
-test('balanced Markdown and bare URLs become readable deduplicated copy-source actions', () => {
+test('emphasis stays visible without turning literal escapes into links or changing copied text', () => {
+  const v = vm();
+  const plain = 'Pros: Tough |cffff0000red|r and |HwowieSource:1|h[fake]|h.';
+  v.text(plain.replace('Pros:', '**Pros:**'));
+  v.run('Layout(TEXT)');
+  assert.equal(v.value('SelectableReply:GetText()'), plain);
+  assert.equal(v.value('DisplayText(V.blocks[1].displayLabel:GetText())'), plain);
+  assert.match(v.value('V.blocks[1].displayLabel:GetText()'), /^\|cff[0-9a-f]{6}Pros:\|r /);
+  assert.equal(v.value('SelectableReply.hyperlinksEnabled'), 'false');
+  assert.equal(v.value('CitationLink(V.blocks[1], 1)'), 'nil');
+  assert.equal(v.num('SelectableReply.textColor[4]'), 0);
+  v.run('SelectableReply:SetFocus(); SelectableReply:HighlightText(0, 15)');
+  const writes = v.num('SelectableReply.textWrites');
+  for (const width of [100, 760]) {
+    v.run(`Layout(TEXT, ${width})`);
+    assert.equal(v.value('Fits()'), 'true');
+    assert.equal(v.num('SelectableReply.highlightEnd'), 15);
+    assert.equal(v.num('SelectableReply.textWrites'), writes);
+  }
+  v.text(plain);
+  v.run('Layout(TEXT)');
+  assert.equal(v.value('V.blocks[1].displayLabel:IsShown()'), 'false');
+  assert.equal(v.num('SelectableReply.textColor[4]'), 1, 'removing emphasis must not leave invisible text');
+  assert.equal(v.num('SelectableReply.textWrites'), writes, 'style-only changes preserve plain copyable text');
+
+  v.text('**Read [the guide](https://example.test/guide) first**, then decide.');
+  v.run('Layout(TEXT); Wowie.ShowCopy = function(text) COPIED = text end; ClickCitation(V.blocks[1], 1)');
+  assert.equal(v.value('COPIED'), 'https://example.test/guide');
+  assert.equal(v.value('DisplayText(V.blocks[1].displayLabel:GetText())'), 'Read the guide [1] first, then decide.');
+  assert.match(v.value('V.blocks[1].displayLabel:GetText()'), /\[1\]\|h\|cff[0-9a-f]{6} first\|r/);
+});
+
+test('wrapped lists hang below their text and sections stay distinct at every reading size', () => {
+  const v = vm();
+  const text = 'Choose a companion for the job.\n\n### Voidwalker\n- **Pros:** Keeps enemies busy while you cast from a safe distance. [Guide](https://example.test/pet)\n  - Bring food and supplies for a long trip.\n12. Choose your companion before pulling the next group of enemies.\n\n### Imp\nRanged support.\n\n```lua\nlocal example = 1\n```';
+  v.text(text);
+  for (const size of [13, 14, 16]) {
+    v.run(`OPTIONS.fontSize = ${size}`);
+    for (const width of [90, 360, 960]) {
+      v.run(`Layout(TEXT, ${width})`);
+      assert.equal(v.value('Fits()'), 'true');
+      assert.equal(v.value('V.parsed.source'), text);
+      v.run(`
+        local heading, first, nested, numbered, nextHeading = V.blocks[2], V.blocks[3], V.blocks[4], V.blocks[5], V.blocks[6]
+        for _, row in ipairs({first, nested, numbered}) do
+          assert(row.markerLabel.x + row.markerLabel:GetWidth() < row.body.x, "list marker overlaps selectable text")
+          assert(row.body.x > 0, "wrapped lines need a hanging indent")
+        end
+        assert(nested.body.x > first.body.x, "nested items need a deeper text column")
+        assert(-nextHeading.y - (-numbered.y + numbered:GetHeight()) > -first.y - (-heading.y + heading:GetHeight()), "sections need more separation than their contents")
+        assert(heading.body.textColor[1] == Wowie.UI.colors.accent[1], "section heading must be visually distinct")
+      `);
+      assert.equal(v.value('V.blocks[5].markerLabel:GetText()'), '12.');
+      assert.ok(v.num('V.blocks[1]:GetWidth()') <= size * 46);
+      assert.equal(v.num('V.blocks[8]:GetWidth()'), width, 'code keeps the full available width');
+    }
+  }
+  v.run('V.blocks[3].body:SetFocus(); V.blocks[3].body:HighlightText(0, 20)');
+  const writes = v.num('V.blocks[3].body.textWrites');
+  v.run('Layout(TEXT, 280)');
+  assert.equal(v.num('V.blocks[3].body.textWrites'), writes);
+  assert.equal(v.num('V.blocks[3].body.highlightEnd'), 20);
+  assert.equal(v.value('DisplayText(V.blocks[3].displayLabel:GetText())'), v.value('V.blocks[3].body:GetText()'));
+  v.text('A heading\n\nA paragraph.\n\nNo list marker here.');
+  v.run('Layout(TEXT)');
+  assert.equal(v.value('V.blocks[3].markerLabel:IsShown()'), 'false');
+  assert.equal(v.num('V.blocks[3].body.x'), 0);
+  assert.equal(v.value('V.blocks[3].body.sourceLinks'), 'nil');
+});
+
+test('balanced Markdown and bare URLs become readable deduplicated inline citations', () => {
   const v = vm();
   const url = 'https://example.test/wiki/Place_(North)?lang=fr&name=Épée';
   v.text(`Use [the guide](${url}) then [again](${url}). Also (https://other.test/a_(b)). Keep [local](file:///tmp/readme) and [unsafe](javascript:alert(1)) literal.`);
@@ -171,49 +269,107 @@ test('balanced Markdown and bare URLs become readable deduplicated copy-source a
   assert.ok(!v.value('P.blocks[1].text').includes(url));
   assert.ok(v.value('P.blocks[1].text').includes('[local](file:///tmp/readme)'));
   assert.ok(v.value('P.blocks[1].text').includes('[unsafe](javascript:alert(1))'));
-  v.run('Click(V.sources[1])');
+  v.run('ClickCitation(V.blocks[1], 1)');
   assert.equal(v.value('COPIED'), url);
+  v.run('HoverCitation(V.blocks[1], 1)');
+  assert.equal(v.value('GameTooltip:IsShown()'), 'true');
+  assert.equal(v.value('DisplayText(GameTooltip.lines[2])'), url);
+  assert.equal(v.value('DisplayText(V.blocks[1].displayLabel:GetText())'), v.value('SelectableReply:GetText()'));
+  v.run('SelectableReply:GetScript("OnHyperlinkLeave")(SelectableReply)');
+  assert.equal(v.value('GameTooltip:IsShown()'), 'false');
+  assert.ok(v.num('V:GetHeight() - V.blocks[1]:GetHeight()') < 28, 'citations do not add a footer action row');
   assert.equal(v.value('Fits()'), 'true');
 });
 
-test('summary and routine bridge receipts fold separately while errors stay visible and navigation is real', () => {
+test('only generated citation numbers are clickable, including repeats and numbered Markdown labels', () => {
+  const v = vm();
+  const url = 'https://example.test/a?path=foo|h&name=Épée';
+  const second = 'https://other.test/guide';
+  v.text(`Literal [1] and \`[1]\` |HwowieSource:1|h[fake]|h. [1](${url}) then **[guide](${second})**; [again](${url}).`);
+  v.run('COPIED = nil; Wowie.ShowCopy = function(text) COPIED = text end; Layout(TEXT)');
+  const displayed = v.value('SelectableReply:GetText()');
+  assert.equal(displayed, 'Literal [1] and [1] |HwowieSource:1|h[fake]|h. [1] then guide [2]; again [1].');
+  assert.equal(v.value('DisplayText(V.blocks[1].displayLabel:GetText())'), displayed);
+  for (const [occurrence, target] of [[1, url], [2, second], [3, url]]) {
+    v.run(`ClickCitation(V.blocks[1], ${occurrence})`);
+    assert.equal(v.value('COPIED'), target);
+  }
+  assert.equal(v.value('CitationLink(V.blocks[1], 4)'), 'nil', 'literal citation text cannot create extra links');
+  v.run('SelectableReply:SetFocus(); SelectableReply:HighlightText(2, 20)');
+  const writes = v.num('SelectableReply.textWrites');
+  for (const width of [90, 500, 170]) {
+    v.run(`Layout(TEXT, ${width})`);
+    assert.equal(v.value('Fits()'), 'true');
+    assert.equal(v.value('SelectableReply:GetText()'), displayed);
+    assert.equal(v.num('SelectableReply.textWrites'), writes);
+    assert.equal(v.num('SelectableReply.highlightEnd'), 20);
+  }
+  v.run('HoverCitation(V.blocks[1], 1)');
+  assert.equal(v.value('DisplayText(GameTooltip.lines[2])'), url);
+});
+
+test('citation targets refresh when visible text is unchanged and collapsed sources have no stale actions', () => {
+  const v = vm();
+  v.run('COPIED = nil; Wowie.ShowCopy = function(text) COPIED = text end');
+  v.text('[guide](https://example.test/old)');
+  v.run('Layout(TEXT); ClickCitation(V.blocks[1], 1); HoverCitation(V.blocks[1], 1)');
+  assert.equal(v.value('COPIED'), 'https://example.test/old');
+  const displayed = v.value('SelectableReply:GetText()');
+  v.text('[guide](https://example.test/new)');
+  v.run('Layout(TEXT); ClickCitation(V.blocks[1], 1)');
+  assert.equal(v.value('SelectableReply:GetText()'), displayed);
+  assert.equal(v.value('COPIED'), 'https://example.test/new');
+  assert.equal(v.value('GameTooltip:IsShown()'), 'false');
+  v.text('Main paragraph.\n\n[bridge] See [the receipt source](https://example.test/receipt).');
+  v.run('Layout(TEXT); Click(V.detailsButton); ClickCitation(V.blocks[2], 1); HoverCitation(V.blocks[2], 1)');
+  assert.equal(v.value('COPIED'), 'https://example.test/receipt');
+  v.run(`
+    OLD_BODY, OLD_LINK = V.blocks[2].body, CitationLink(V.blocks[2], 1)
+    COPIED = nil
+    Click(V.detailsButton)
+    OLD_BODY:GetScript('OnHyperlinkClick')(OLD_BODY, OLD_LINK, '', 'LeftButton')
+  `);
+  assert.equal(v.value('COPIED'), 'nil');
+  assert.equal(v.value('GameTooltip:IsShown()'), 'false');
+  v.run('Click(V.detailsButton); ClickCitation(V.blocks[2], 1)');
+  assert.equal(v.value('COPIED'), 'https://example.test/receipt');
+  v.run('V:Hide()');
+  assert.equal(v.value('GameTooltip:IsShown()'), 'false');
+});
+
+test('voluntary TL;DR remains visible while routine receipts fold and errors and navigation stay accessible', () => {
   const v = vm();
   v.text('Take the northern road.\n\n**TL;DR:** Follow the road.\n\n[bridge] map: layer secret_internal_name: 2 point(s)\n\n[bridge] parser failed: missing event');
   v.run('WowieMap = { ShowNavigation = function() NAVIGATED = true end }; Parse(TEXT, true); Layout(TEXT)');
-  assert.equal(v.value('BlockText(P.blocks)'), 'Take the northern road.');
-  assert.equal(v.value('BlockText(P.summary)'), 'Follow the road.');
+  assert.equal(v.value('BlockText(P.blocks)'), 'Take the northern road.\nTL;DR: Follow the road.');
   assert.equal(v.num('#P.details'), 2);
-  assert.equal(v.value('V.blocks[2]:IsShown()'), 'false');
+  assert.equal(v.value('V.blocks[2]:IsShown()'), 'true');
   assert.equal(v.value('V.blocks[3]:IsShown()'), 'false');
   assert.equal(v.value('V.blocks[4]:IsShown()'), 'true', 'errors must not disappear behind a collapsed receipt');
   assert.equal(v.value('V.navigationButton:IsShown()'), 'true');
   v.run('Click(V.navigationButton)');
   assert.equal(v.value('NAVIGATED'), 'true');
   const initial = v.num('V:GetHeight()');
-  v.run('Click(V.summaryButton)');
-  assert.equal(v.value('V.blocks[2]:IsShown()'), 'true');
-  assert.ok(v.num('V:GetHeight()') > initial);
-  assert.equal(v.num('RESIZES'), 1);
-  v.run('V.blocks[2].body:SetFocus(); V.blocks[2].body:HighlightText(0, 6); Click(V.summaryButton)');
-  assert.equal(v.value('V.blocks[2].body:HasFocus()'), 'false');
-  assert.equal(v.value('V.blocks[2].body.highlightStart'), 'nil');
   v.run('Click(V.detailsButton)');
   assert.equal(v.value('V.blocks[3]:IsShown()'), 'true');
+  assert.ok(v.num('V:GetHeight()') > initial);
+  assert.equal(v.num('RESIZES'), 1);
+  v.run('V.blocks[3].body:SetFocus(); V.blocks[3].body:HighlightText(0, 6); Click(V.detailsButton)');
+  assert.equal(v.value('V.blocks[3].body:HasFocus()'), 'false');
+  assert.equal(v.value('V.blocks[3].body.highlightStart'), 'nil');
   assert.equal(v.value('Fits()'), 'true');
   v.run('WowieMap = nil; Layout(TEXT)');
   assert.equal(v.value('V.navigationButton:IsShown()'), 'false', 'no fake navigation action if the map module is absent');
   v.text('TL;DR: This is the entire answer.');
   v.run('Parse(TEXT, true); Layout(TEXT)');
-  assert.equal(v.num('#P.summary'), 0);
-  assert.equal(v.value('P.blocks[1].text'), 'This is the entire answer.');
-  assert.equal(v.value('V.summaryButton:IsShown()'), 'false');
+  assert.equal(v.value('P.blocks[1].text'), 'TL;DR: This is the entire answer.');
+  assert.equal(v.value('V.blocks[1]:IsShown()'), 'true');
 });
 
-test('non-trailing summary headings and malformed markup remain readable rather than disappearing', () => {
+test('ordinary TL;DR headings and malformed markup remain readable rather than disappearing', () => {
   const v = vm();
   v.text('TL;DR: An introduction.\n\n# More detail\n\nKeep **unfinished and [brackets.\n\n```lua\n  unfinished = "雪"\n');
   v.run('Parse(TEXT, true); Layout(TEXT)');
-  assert.equal(v.num('#P.summary'), 0);
   assert.equal(v.value('P.blocks[1].text'), 'TL;DR: An introduction.');
   assert.ok(v.value('BlockText(P.blocks)').includes('Keep **unfinished and [brackets.'));
   assert.equal(v.value('Kind("code").text'), '```lua\n  unfinished = "雪"\n');
@@ -242,22 +398,30 @@ test('long unbroken text, Unicode and inert WoW escapes are fully measured at ev
     if (width === 150) narrow = v.num('V:GetHeight()');
     if (width === 680) assert.ok(v.num('V:GetHeight()') < narrow);
   }
-  assert.equal(v.value('V.sources[1].url'), 'https://example.test/' + 'path'.repeat(800));
+  v.run('Wowie.ShowCopy = function(text) COPIED = text end; ClickCitation(V.blocks[#V.blocks], 1)');
+  assert.equal(v.value('COPIED'), 'https://example.test/' + 'path'.repeat(800));
 });
 
 test('recycling, identity changes and hiding release every selection without retaining stale source actions', () => {
   const v = vm();
   v.text('First paragraph.\n\nSecond paragraph.\n\nhttps://example.test/source\n\nTL;DR: Short version.');
-  v.run('Layout(TEXT); Click(V.summaryButton); V.blocks[4].body:SetFocus(); V.blocks[4].body:HighlightText(0, 5)');
+  v.run(`
+    Layout(TEXT)
+    SOURCE_BODY, SOURCE_LINK = V.blocks[3].body, CitationLink(V.blocks[3], 1)
+    COPIED = nil
+    Wowie.ShowCopy = function(text) COPIED = text end
+    V.blocks[4].body:SetFocus()
+    V.blocks[4].body:HighlightText(0, 5)
+  `);
   v.run('OPTIONS.identity = {}; Layout(TEXT)');
   assert.equal(v.value('STUB.focus'), 'nil');
   assert.equal(v.value('V.blocks[4].body.highlightStart'), 'nil');
-  assert.equal(v.value('V.summaryOpen'), 'false');
+  assert.equal(v.value('V.detailsOpen'), 'false');
   v.run('V.blocks[2].body:SetFocus(); V.blocks[2].body:HighlightText(0, 3); Layout("Replacement")');
   assert.equal(v.value('V.blocks[2]:IsShown()'), 'false');
   assert.equal(v.value('V.blocks[2].body.highlightStart'), 'nil');
-  assert.equal(v.value('V.sources[1]:IsShown()'), 'false');
-  assert.equal(v.value('V.sources[1].url'), 'nil');
+  v.run('SOURCE_BODY:GetScript("OnHyperlinkClick")(SOURCE_BODY, SOURCE_LINK, "", "LeftButton")');
+  assert.equal(v.value('COPIED'), 'nil');
   assert.equal(v.value('SelectableReply:GetText()'), 'Replacement');
   v.run('SelectableReply:SetFocus(); SelectableReply:HighlightText(0, 5); V:Hide()');
   assert.equal(v.value('STUB.focus'), 'nil');
@@ -307,11 +471,11 @@ test('reply actions share a compact row and wrap without overlap on narrow repli
   const v = vm();
   v.text('Read [the guide](https://example.test/guide).\n\nTL;DR: Take the road.\n\n[bridge] map: layer route: 1 point(s)');
   v.run('WowieMap={ShowNavigation=function() end}; Layout(TEXT,600)');
-  assert.equal(v.num('V.summaryButton.y'), v.num('V.sources[1].y'), 'routine actions must not each consume a full-width row');
+  assert.equal(v.num('V.detailsButton.y'), v.num('V.navigationButton.y'), 'routine actions must not each consume a full-width row');
   for (const width of [600, 220, 120]) {
     v.run(`
       Layout(TEXT,${width})
-      local controls={V.summaryButton,V.detailsButton,V.navigationButton,V.sources[1]}
+      local controls={V.detailsButton,V.navigationButton}
       for i,a in ipairs(controls) do
         assert(a.x>=0 and a.x+a:GetWidth()<=V:GetWidth(),"reply action exceeds the content width")
         for j=i+1,#controls do

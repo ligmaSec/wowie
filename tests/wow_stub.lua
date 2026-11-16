@@ -100,6 +100,8 @@ function Methods.SetFont(self, font, size, flags)
 	self.font, self.fontSize, self.fontFlags = font, size, flags or ""
 	return true
 end
+function Methods.SetAlpha(self, alpha) self.alpha = alpha end
+function Methods.GetAlpha(self) return self.alpha or 1 end
 function Methods.GetFont(self) return self.font or "Fonts\\FRIZQT__.TTF", self.fontSize or 14, self.fontFlags or "" end
 function Methods.SetSpacing(self, spacing) self.spacing = spacing end
 function Methods.GetSpacing(self) return self.spacing or 0 end
@@ -276,6 +278,7 @@ end
 UIParent = CreateFrame("Frame", "UIParent")
 GameTooltip = CreateFrame("Frame", "GameTooltip")
 UIErrorsFrame = CreateFrame("Frame", "UIErrorsFrame")
+STANDARD_TEXT_FONT = "Fonts\\FRIZQT__.TTF"
 ChatFontNormal = { GetFont = function() return "Fonts\\ARIALN.TTF", 14, "" end }
 OKAY, CANCEL = "Okay", "Cancel"
 NUM_CHAT_WINDOWS = 1

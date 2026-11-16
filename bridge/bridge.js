@@ -27,11 +27,11 @@
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
-const { spawn } = require('child_process');
 const { randomBytes } = require('node:crypto');
 const P = require('./protocol'); // the pure protocol code, unit-tested in tests/bridge_test.js
 const A = require('./agents');   // how each agent is launched and read, unit-tested in tests/agents_test.js
 const C = require('./context');  // permissioned snapshots and read-only query continuations
+const { Journal, atomicDurable, requestKey, generationKey, ownerKey } = require('./recovery');
 
 const HERE = __dirname;
 const CONFIG_FILE = path.join(HERE, 'config.json');
@@ -39,6 +39,7 @@ const STATE_FILE = path.join(HERE, 'state.json');
 const LOG_FILE = path.join(HERE, 'bridge.log');
 const TMP_DIR = path.join(HERE, 'tmp'); // prompt files for agents that read the prompt from disk
 
+async function main() {
 const argv = process.argv.slice(2);
 if (argv.includes('--help') || argv.includes('-h')) {
   console.log('wowie [--project <dir>] [--once] [--inject "text" [--agent <id>]]\n\n' +
@@ -53,6 +54,10 @@ catch (e) {
   console.error(`Cannot read ${CONFIG_FILE} (${e.message}).\nRun "node setup.js" in the wowie folder first.`);
   process.exit(2); // the supervisor doesn't restart on 2
 }
+const ownership = await require('./ownership').acquire(cfg.addonDir || cfg.inboxFile || HERE);
+process.once('exit', () => ownership.close());
+const journal = new Journal(path.join(HERE, 'requests.json'));
+const receiptWindow = new Map(Object.entries(journal.data.controls).slice(-64));
 const once = argv.includes('--once');
 const injectIdx = argv.indexOf('--inject');
 const inject = injectIdx >= 0 ? argv[injectIdx + 1] : null;
@@ -128,25 +133,20 @@ const TRANSCRIPT_FILE = path.join(HERE, 'transcripts.json');
 let transcripts = readJson(TRANSCRIPT_FILE, { chats: {}, tokens: {} });
 if (!transcripts.chats) transcripts.chats = {};
 if (!transcripts.tokens) transcripts.tokens = {};
-if (P.pruneStale(state, transcripts)) { saveState(); saveTranscripts(); }
-let pendingRestore = null;
+let pendingRestore = Object.values(journal.data.offers).filter(o => !o.acknowledged).at(-1) || null;
 
 function saveTranscripts() {
-  try { atomicWrite(TRANSCRIPT_FILE, JSON.stringify(transcripts)); } catch (e) { log('could not save transcripts:', e.message); }
+  atomicDurable(TRANSCRIPT_FILE, JSON.stringify(transcripts));
 }
 
-// Chats the player deleted in game while a run for them was still going: the
-// run's late progress and reply must not recreate the transcript.
-const forgotten = new Set();
 
 function noteMessage(job, role, text) {
-  if (!job.chat) return;
-  if (role === 'user') forgotten.delete(job.chat);
-  else if (forgotten.has(job.chat)) return;
-  const c = transcripts.chats[job.chat] = transcripts.chats[job.chat] || { id: job.chat, name: '', cwd: job.cwd, messages: [] };
+  if (!job.chat || journal.forgotten(job)) return;
+  const c = transcripts.chats[job.chat] = transcripts.chats[job.chat] || { id: job.chat, name: '', cwd: job.cwd, generation: job.generation, messages: [] };
+  if (c.messages.some(m => m.nonce === job.nonce && m.role === role)) return;
   if (job.name) c.name = job.name;
   if (job.cwd) c.cwd = job.cwd;
-  const m = { role, text: String(text ?? '').slice(0, 4000), id: job.id, t: Math.floor(Date.now() / 1000) };
+  const m = { role, text: String(text ?? '').slice(0, 4000), id: job.id, nonce: job.nonce, t: Math.floor(Date.now() / 1000) };
   if (role === 'assistant' && job.agent) m.agent = job.agent;
   c.messages.push(m);
   while (c.messages.length > 200) c.messages.shift();
@@ -154,37 +154,101 @@ function noteMessage(job, role, text) {
   saveTranscripts();
 }
 
-// First message from an addon session token we haven't seen: its saved data is
-// fresh (or reset), so offer everything we know once, in the next publish.
+// Session discovery and delivery acknowledgement are deliberately independent.
 function maybeOfferRestore(job) {
-  if (!job.session || transcripts.tokens[job.session]) return;
-  transcripts.tokens[job.session] = Date.now();
+  if (!job.session) return;
+  const saved = journal.data.offers[job.session];
+  if (saved) { pendingRestore = saved.acknowledged ? null : saved; return; }
+  if (journal.data.seenSessions[job.session]) { pendingRestore = null; return; }
   const chats = Object.values(transcripts.chats)
     .filter(c => c.id !== job.chat && c.messages.length)
     .sort((a, b) => (b.updated || 0) - (a.updated || 0))
     .slice(0, 16)
-    .map(c => ({ id: c.id, name: c.name, cwd: c.cwd, messages: c.messages.slice(-40).map(m => ({ ...m, text: m.text.slice(0, 2000) })) }));
-  saveTranscripts();
+    .map(c => ({ id: c.id, name: c.name, cwd: c.cwd, generation: c.generation, messages: c.messages.slice(-40).map(m => ({ ...m, text: m.text.slice(0, 2000) })) }));
+  journal.data.seenSessions[job.session] = Date.now();
+  transcripts.tokens[job.session] = Date.now();
   if (chats.length) {
-    pendingRestore = { token: job.session, chats };
-    log(`new addon session ${job.session}: offering ${chats.length} chat(s) to restore`);
+    pendingRestore = { token: job.session, id: randomBytes(16).toString('hex'), chats };
+    journal.data.offers[job.session] = pendingRestore;
+  } else pendingRestore = null;
+  journal.save();
+  saveTranscripts();
+}
+
+function clearChatSession(job) {
+  for (const key of [sessKey(job), chatKey(job)]) {
+    delete state.sessions[key];
+    if (state.sessionCwd) delete state.sessionCwd[key];
+    if (state.sessionAgent) delete state.sessionAgent[key];
   }
 }
 
-// The player deleted a chat in game. Drop everything we keep for it, so the next
-// restore doesn't bring it back and its id can't resume the old agent session.
-function forgetChat(job) {
-  if (!job.chat) return;
-  const had = !!transcripts.chats[job.chat];
-  delete transcripts.chats[job.chat];
-  forgotten.add(job.chat);
-  delete state.sessions[sessKey(job)];
-  delete state.sessions[chatKey(job)];
-  if (state.sessionCwd) delete state.sessionCwd[sessKey(job)];
-  if (state.sessionAgent) delete state.sessionAgent[sessKey(job)];
-  if (pendingRestore) pendingRestore.chats = pendingRestore.chats.filter(c => c.id !== job.chat);
-  saveTranscripts();
-  log(`#${job.id}${job.session ? '@' + job.session : ''} forgot chat ${job.chat}${had ? '' : ' (nothing stored)'}`);
+// A generation tombstone is committed before touching in-memory work or files.
+function forgetChat(job, acknowledge = true) {
+  journal.data.tombstones[generationKey(job)] = Date.now();
+  for (const entry of Object.values(journal.data.requests)) {
+    if (generationKey(entry.job) !== generationKey(job)) continue;
+    entry.phase = 'forgotten';
+    delete entry.result; delete entry.query;
+    entry.job = { session: entry.job.session, chat: entry.job.chat, nonce: entry.job.nonce, generation: entry.job.generation };
+  }
+  for (const offer of Object.values(journal.data.offers)) offer.chats = offer.chats.filter(c => c.id !== job.chat || (c.generation && c.generation !== job.generation));
+  if (acknowledge) rememberControl(job, 'forget');
+  journal.save();
+  for (const active of [...queued.values(), ...pendingProfiles.values(), ...[...running.values()].map(r => r.job)]) {
+    if (generationKey(active) !== generationKey(job)) continue;
+    active.finished = true;
+    clearTimeout(active.contextTimer); clearInterval(active.contextWatcher);
+    const run = running.get(chatKey(active));
+    if (run?.job === active) { if (run.child) killTree(run.child); running.delete(chatKey(active)); }
+    queued.delete(C.key(active)); pendingProfiles.delete(C.key(active)); pendingQueries.delete(C.key(active));
+    contextTransfers.forget(active);
+  }
+  for (const [id, profile] of contextProfiles) if (generationKey(profile.job) === generationKey(job)) dropProfile(id);
+  // Known incomplete packets may predate the request envelope.
+  for (const [id, packet] of contextPackets) if (generationKey(packet) === generationKey(job)) { contextTransfers.forget(packet); contextPackets.delete(id); }
+  const current = journal.data.generations[job.chat || ownerKey(job)];
+  if (!current || current === job.generation) { delete transcripts.chats[job.chat]; clearChatSession(job); }
+  for (const [key, record] of live) if (record.chat === job.chat && record.generation === job.generation) live.delete(key);
+  saveTranscripts(); saveState();
+  publishNow(); drainQueue();
+  log(`#${job.id} forgot chat ${job.chat} generation ${job.generation}`);
+}
+
+function stageReceipt(key, receipt) {
+  receiptWindow.delete(key);
+  receiptWindow.set(key, receipt);
+  if (receiptWindow.size > 64) receiptWindow.delete(receiptWindow.keys().next().value);
+}
+
+function rememberControl(job, kind) {
+  journal.data.controls[requestKey(job)] = { session: job.session || '', chat: job.chat || '', nonce: job.nonce, kind, target: job.target || '', generation: job.generation || '' };
+  stageReceipt(requestKey(job), journal.data.controls[requestKey(job)]);
+}
+
+function receiveReceipt(job) {
+  const prior = journal.data.controls[requestKey(job)];
+  if (prior) {
+    if (prior.kind === job.receipt && prior.chat === (job.chat || '') && prior.target === job.target && prior.generation === (job.generation || '')) {
+      stageReceipt(requestKey(job), prior);
+      publishNow();
+    }
+    return;
+  }
+  if (job.receipt === 'reply') {
+    const entry = journal.get({ ...job, nonce: job.target });
+    if (!entry || !['complete', 'expired'].includes(entry.phase) || entry.job.chat !== job.chat || entry.job.generation !== job.generation) return;
+    entry.acknowledged = Date.now();
+    journal.retain();
+  } else if (job.receipt === 'restore' && !job.chat) {
+    const offer = journal.data.offers[job.session];
+    if (!offer || offer.id !== job.target) return;
+    offer.acknowledged = Date.now();
+    if (pendingRestore?.id === offer.id) pendingRestore = null;
+  } else return;
+  rememberControl(job, job.receipt);
+  journal.save();
+  publishNow();
 }
 
 let lastMtime = 0;
@@ -197,6 +261,10 @@ let notifiedHello = '';
 const contextTransfers = new C.Transfers();
 const contextProfiles = new Map();
 const pendingProfiles = new Map();
+const contextPackets = new Map();
+let profileBytes = 0;
+let recovering = false;
+let admitting = false;
 const pendingQueries = new Map();
 // Only a received hello can acknowledge an addon probe; never restore this from disk.
 let connectionAck = null;
@@ -209,11 +277,11 @@ let publishTimer = null;
 // ---------------------------------------------------------------------------
 
 function readJson(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (err) { if (err.code === 'ENOENT') return fallback; throw err; }
 }
 
 function saveState() {
-  atomicWrite(STATE_FILE, JSON.stringify(state, null, 2));
+  atomicDurable(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
 function log(...parts) {
@@ -233,18 +301,8 @@ function atomicWrite(file, content) {
   fs.renameSync(tmp, file);
 }
 
-// Stop a run and whatever it spawned (an npm launcher runs the real binary as a
-// child of its own; on Windows a plain kill would leave that one going).
-function killTree(child) {
-  if (process.platform === 'win32') {
-    try {
-      const k = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-      k.on('error', () => { try { child.kill(); } catch {} });
-      return;
-    } catch {}
-  }
-  try { child.kill(); } catch {}
-}
+// The guardian retains installation ownership until the owned tree has exited.
+function killTree(child) { child.kill(); }
 
 // ---------------------------------------------------------------------------
 // What the game reads
@@ -297,7 +355,7 @@ function takeMapCommands(job, text) {
 // Slot file / Inbox.lua body: see protocol.luaTable.
 function slotFile(globalName, records, urgent = true) {
   const map = Date.now() < mapShareUntil && (urgent || mapLuaSize() <= MAP_PROGRESS_MAX) ? state.map : null;
-  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, agent: DEFAULT_AGENT, agents: A.agentIds(), agentOptions, contextEnabled: cfg.gameContext !== false, map, connectionAck, captureIntervalMs: cap.intervalMs });
+  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, receipts: [...receiptWindow.values()], agent: DEFAULT_AGENT, agents: A.agentIds(), agentOptions, contextEnabled: cfg.gameContext !== false, map, connectionAck, captureIntervalMs: cap.intervalMs });
 }
 
 function addonInstalled() {
@@ -332,9 +390,6 @@ function publishNow(urgent = true) {
     try { atomicWrite(path.join(cfg.addonDir, 'Wowie_S' + pad3(i), 'Inbox.lua'), body); } catch { slotsWritten = false; }
   }
   if (slotsWritten) notifyReady(records);
-  // The restore bundle is large; it rides along once and is then dropped.
-  // (The game keeps loading fresh slots until it has read one carrying it.)
-  if (pendingRestore) { pendingRestore.published = (pendingRestore.published || 0) + 1; if (pendingRestore.published >= 3) pendingRestore = null; }
 }
 
 function notifyReady(records) {
@@ -357,6 +412,7 @@ function notifyReady(records) {
 // Final results publish immediately; progress is throttled. `key` is the chat
 // (record.session is the agent's session id, a different thing).
 function publish(key, record, urgent) {
+  if (record.generation && journal.forgotten(record)) return;
   if (requestOwners.has(key) && requestOwners.get(key) !== record.nonce) return;
   live.set(key, record);
   if (urgent) { if (publishTimer) { clearTimeout(publishTimer); publishTimer = null; } publishNow(); return; }
@@ -381,6 +437,7 @@ function resetBeats(id) {
   for (let k = 1; k <= ACT_MAX; k++) { try { atomicWrite(actFile(id, k), Buffer.alloc(0)); } catch {} }
 }
 function beat(job) {
+  if (job.finished || journal.forgotten(job)) return;
   job.beats = (job.beats || 0) + 1;
   if (job.beats > ACT_MAX) return;
   try { atomicWrite(actFile(job.id, job.beats), SILENT_WAV); } catch {}
@@ -411,12 +468,6 @@ function heartbeat() {
 // Inputs
 // ---------------------------------------------------------------------------
 
-// The reload path: the addon writes its outbox into SavedVariables on /reload.
-function readOutbox() {
-  let src;
-  try { src = fs.readFileSync(SAVED_VARS, 'utf8'); } catch { return null; }
-  return P.parseOutbox(src);
-}
 
 // The addon sends the player's in-game context (character, location, ...) with
 // its hello and again whenever it changes; an empty one means "context off".
@@ -482,143 +533,209 @@ function armContextWait(job) {
 }
 
 function contextRecord(job, status, text, extra = {}) {
-  return { chat: job.chat, id: job.id, nonce: job.nonce, status, text, cwd: job.cwd, agent: job.agent || '', ...extra };
+  return { chat: job.chat, id: job.id, nonce: job.nonce, generation: job.generation, status, text, cwd: job.cwd, agent: job.agent || '', ...extra };
+}
+
+function dropProfile(id) {
+  const profile = contextProfiles.get(id);
+  if (profile) { profileBytes -= profile.bytes; contextProfiles.delete(id); }
+}
+
+function maintainContext() {
+  const cutoff = Date.now() - (cfg.timeoutMs || 1800000);
+  contextTransfers.expire(cutoff);
+  for (const [id, packet] of contextPackets) if (packet.at < cutoff) contextPackets.delete(id);
+  for (const [id, profile] of contextProfiles) {
+    if (profile.at < cutoff && !pendingProfiles.has(id)) dropProfile(id);
+  }
 }
 
 function receiveContextData(packet) {
-  if (cfg.gameContext === false) return;
-  const id = C.key(packet);
-  // Retransmitted profile parts cannot replace the snapshot already used by a run.
+  if (cfg.gameContext === false || journal.forgotten(packet)) return;
+  const id = C.key(packet), entry = journal.get(packet);
+  if (entry && (entry.job.generation !== packet.generation || ['complete', 'expired', 'forgotten'].includes(entry.phase))) return;
   if (packet.data === 'profile' && contextProfiles.has(id)) return;
-  let result;
+  const wait = pendingQueries.get(id);
+  if (packet.data === 'query' && (!wait || wait.request !== packet.request || wait.job.generation !== packet.generation)) return;
+  const profileJob = pendingProfiles.get(id);
+  if (packet.data === 'profile' && profileJob && (profileJob.generation !== packet.generation || profileJob.profile !== packet.profile)) return;
+  let result, payload, continuation;
   try {
+    if (packet.payload !== undefined && (typeof packet.payload !== 'string' || Buffer.byteLength(packet.payload) > 4 * 1024 * 1024)) throw new Error('Information snapshot exceeds 4 MiB');
     result = packet.payload !== undefined ? { text: packet.payload } : contextTransfers.add(packet);
-    if (!result.text) {
-      const job = pendingProfiles.get(id);
-      if (job) publish(chatKey(job), contextRecord(job, 'context', `Receiving checked information: ${result.received}/${result.total} parts`), false);
+    if (result.text === undefined) {
+      contextPackets.set(id, { session: packet.session, chat: packet.chat, nonce: packet.nonce, generation: packet.generation, at: contextPackets.get(id)?.at || Date.now() });
+      if (profileJob) publish(chatKey(profileJob), contextRecord(profileJob, 'context', `Receiving checked information: ${result.received}/${result.total} parts`), false);
       return;
     }
+    contextPackets.delete(id);
     if (packet.data === 'profile') {
       C.snapshot(result.text);
-      contextProfiles.set(id, { text: result.text, at: Date.now() });
-      const job = pendingProfiles.get(id);
-      if (job) {
-        pendingProfiles.delete(id);
-        clearTimeout(job.contextTimer);
-        job.profilePayload = result.text;
-        submit(job);
+      payload = result.text;
+      if (!profileJob) {
+        maintainContext();
+        const bytes = Buffer.byteLength(payload);
+        if (contextProfiles.size >= 64 || profileBytes + bytes > 64 * 1024 * 1024) throw new Error('Completed information snapshot cache is full (64 entries / 64 MiB); retry when pending snapshots expire');
+        contextProfiles.set(id, { text: payload, bytes, at: Date.now(), job: { session: packet.session, chat: packet.chat, nonce: packet.nonce, generation: packet.generation, profile: packet.profile } });
+        profileBytes += bytes;
       }
-    } else if (packet.data === 'query') {
-      const wait = pendingQueries.get(id);
-      if (!wait || wait.request !== packet.request) return;
+    } else {
       const responses = JSON.parse(result.text);
       if (!Array.isArray(responses) || responses.length !== wait.queries.length) throw new Error('Incomplete addon information query results');
-      wait.job.continuation = C.continuation(result.text);
-      pendingQueries.delete(id);
-      clearTimeout(wait.job.contextTimer);
-      running.delete(chatKey(wait.job));
-      runJob(wait.job);
+      continuation = C.continuation(result.text);
     }
   } catch (err) {
-    const job = pendingProfiles.get(id) || (pendingQueries.get(id) || {}).job;
+    contextTransfers.forget(packet); contextPackets.delete(id);
+    const job = profileJob || wait?.job;
     if (job) finish(job, 'error', `Could not read selected addon information: ${err.message}`);
     else log(`information packet #${packet.id}: ${err.message}`);
+    return;
   }
-  contextTransfers.expire(Date.now() - (cfg.timeoutMs || 1800000));
-  for (const [k, profile] of contextProfiles) if (profile.at < Date.now() - (cfg.timeoutMs || 1800000)) contextProfiles.delete(k);
+  // Durability failures here are fatal, not misreported as malformed client data.
+  if (profileJob && payload !== undefined) {
+    pendingProfiles.delete(id);
+    clearTimeout(profileJob.contextTimer);
+    profileJob.profilePayload = payload;
+    journal.checkpoint(profileJob, 'queued');
+    scheduleJob(profileJob);
+  } else if (continuation !== undefined) {
+    wait.job.continuation = continuation;
+    journal.checkpoint(wait.job, 'queued', { query: null });
+    pendingQueries.delete(id);
+    clearTimeout(wait.job.contextTimer);
+    running.delete(chatKey(wait.job));
+    scheduleJob(wait.job);
+  }
 }
 
 function requestContext(job, queries) {
+  if (!journal.owns(job)) {
+    finish(job, 'error', 'This request was superseded by a newer question before addon information was needed.');
+    return;
+  }
   if (cfg.gameContext === false || !job.profilePayload) {
     finish(job, 'error', 'The agent requested addon information, but information sharing is disabled. Select the relevant checkboxes in Sharing first.');
     return;
   }
-  const request = `${job.id}-${(job.contextRound = (job.contextRound || 0) + 1)}`;
+  const request = randomBytes(16).toString('hex');
+  journal.checkpoint(job, 'context_query', { query: { request, queries } });
   pendingQueries.set(C.key(job), { job, request, queries });
   running.set(chatKey(job), { job, child: null });
   armContextWait(job);
   saveState();
   publish(chatKey(job), contextRecord(job, 'context_query', 'Reading information allowed by your current Sharing checkboxes...', { request, queries }), true);
+  drainQueue();
 }
 
 
+function replayResult(job, record) {
+  const key = requestOwners.get(chatKey(job)) === job.nonce ? chatKey(job) : `replay:${requestKey(job)}`;
+  live.delete(key);
+  publish(key, record, true);
+}
+
 function submit(job) {
-  if (!P.validNonce(job.nonce)) {
+  const needsGeneration = job.forget || job.data || job.receipt === 'reply' || (!job.hello && job.calibration === undefined && job.receipt !== 'restore');
+  if (!P.validNonce(job.nonce) || (needsGeneration && !P.validNonce(job.generation))) {
     if (!rejectedInput) {
       rejectedInput = true;
-      log(`#${job.id} rejected: Request protocol 1 requires a valid request nonce. Update the Wowie addon and /reload; this request was not run.`);
-      // Old clients match replies by numeric ID alone. A fake error reply would
-      // erase their pending question before the nonce migration can resume it.
+      log(`#${job.id} rejected: Request protocol 2 requires a valid request nonce and chat generation. Update the Wowie addon and /reload; this request was not run.`);
       publishNow();
     }
     return;
   }
-  if (alreadyHandled(job)) {
-    if (job.hello && !job.data && !job.forget) {
-      connectionAck = { session: job.session, nonce: job.nonce, at: Math.floor(Date.now() / 1000), ...(CAPTURE_DISPLAYS.has(job.captureDisplay) ? { display: job.captureDisplay } : {}) };
-      signal('ack', job.id, true);
-      mapShareUntil = Date.now() + MAP_SHARE_MS;
-      publishNow();
-    }
+  if (job.receipt) {
+    if (P.validNonce(job.target)) receiveReceipt(job);
     return;
   }
-  if (job.data) { receiveContextData(job); return; }
-  const key = chatKey(job);
-  // Controls must not compete with or replace any pending user request.
   if (job.forget) {
-    // A deleted chat: forget it and ack. No agent run.
-    markHandled(job);
-    forgetChat(job);
-    saveState();
-    signal('ack', job.id, true);
+    const prior = journal.data.controls[requestKey(job)];
+    if (prior) {
+      if (prior.kind === 'forget' && prior.chat === (job.chat || '') && prior.generation === job.generation) {
+        stageReceipt(requestKey(job), prior);
+        publishNow();
+      }
+    } else forgetChat(job);
     return;
   }
   if (job.hello) {
-    // Acknowledge this actual probe, offer a restore, and refresh the slots. No agent run.
-    if (job.ctx !== undefined) setContext(job);
+    const handled = alreadyHandled(job);
+    if (!handled && job.ctx !== undefined) setContext(job);
     connectionAck = { session: job.session, nonce: job.nonce, at: Math.floor(Date.now() / 1000), ...(CAPTURE_DISPLAYS.has(job.captureDisplay) ? { display: job.captureDisplay } : {}) };
-    markHandled(job);
-    saveState();
+    if (!handled) { markHandled(job); saveState(); }
     signal('ack', job.id, true);
     maybeOfferRestore(job);
-    // Even an empty set: a client holding layers from a reset bridge must drop them.
     mapShareUntil = Date.now() + MAP_SHARE_MS;
     publishNow();
-    log(`hello from session ${job.session}${pendingRestore ? ' (restore offered)' : ''}`);
     return;
   }
-  if (job.calibration !== undefined) return; // calibration is valid only on a hello
-  const cur = running.get(key);
-  if (cur && cur.job.nonce === job.nonce) return;
-  if (queued.has(C.key(job)) || pendingProfiles.has(C.key(job))) return;
-  if (!job.admitted) { requestOwners.set(key, job.nonce); job.admitted = true; }
+  if (job.calibration !== undefined) return;
+  if (journal.forgotten(job)) return;
+  if (job.data) { receiveContextData(job); return; }
+  const entry = journal.get(job);
+  if (entry) {
+    if (entry.job.chat !== job.chat || entry.job.generation !== job.generation) { log(`rejected nonce reuse for #${job.id}`); return; }
+    if (entry.phase === 'complete') replayResult(entry.job, entry.result);
+    else if (entry.phase === 'expired') replayResult(entry.job, contextRecord(entry.job, 'error', 'This acknowledged result is older than the retained 200-result chat history. It cannot be recovered and the original request was not run again.'));
+    else if (entry.phase !== 'forgotten') publishNow();
+    return;
+  }
+  const key = chatKey(job), generationOwner = job.chat || ownerKey(job);
+  const previous = journal.data.generations[generationOwner];
+  admitting = true;
+  try {
+    if (previous && previous !== job.generation) forgetChat({ ...job, generation: previous }, false);
+    journal.data.generations[generationOwner] = job.generation;
+    requestOwners.set(key, job.nonce);
+    journal.data.owners[ownerKey(job)] = job.nonce;
+    job.admitted = true;
+    job.deadline = Date.now() + (cfg.timeoutMs || 1800000);
+    journal.checkpoint(job, 'queued');
+    for (const older of [...pendingProfiles.values(), ...[...pendingQueries.values()].map(w => w.job)]) {
+      if (chatKey(older) === key && older.nonce !== job.nonce) finish(older, 'error', 'This request was superseded by a newer question before addon information arrived.');
+    }
+  } finally { admitting = false; }
+  if (alreadyHandled(job)) {
+    finish(job, 'error', 'This request was handled by an older bridge, but its full result was not saved. Its outcome cannot be recovered safely; the original request was not run again.');
+    return;
+  }
   if (job.ctx !== undefined) setContext(job);
+  prepareJob(job);
+}
+
+function prepareJob(job) {
   if (cfg.gameContext === false) { delete job.profile; delete job.profilePayload; }
   if (job.profilePayload) {
     try { C.snapshot(job.profilePayload); } catch (err) { finish(job, 'error', err.message); return; }
   } else if (job.profile) {
     const id = C.key(job), ready = contextProfiles.get(id);
-    if (ready) job.profilePayload = ready.text;
-    else {
-      if (!pendingProfiles.has(id)) {
-        pendingProfiles.set(id, job);
-        armContextWait(job);
-        publish(chatKey(job), contextRecord(job, 'context', 'Receiving the information checked in Sharing...'), true);
-      }
+    if (ready && ready.job.generation === job.generation && ready.job.profile === job.profile) {
+      job.profilePayload = ready.text;
+      dropProfile(id);
+    } else {
+      journal.checkpoint(job, 'awaiting_profile');
+      pendingProfiles.set(id, job);
+      armContextWait(job);
+      publish(chatKey(job), contextRecord(job, 'context', 'Receiving the information checked in Sharing...'), true);
+      drainQueue();
       return;
     }
   }
-  // Different nonces remain distinct even when the display counter is reused.
-  if (cur || running.size >= MAX_PARALLEL) {
+  journal.checkpoint(job, 'queued');
+  scheduleJob(job);
+}
+
+function scheduleJob(job) {
+  if (job.finished || journal.forgotten(job)) return;
+  const key = chatKey(job);
+  if (recovering || running.has(key) || running.size >= MAX_PARALLEL) {
     queued.set(C.key(job), job);
     publish(key, contextRecord(job, 'queued', 'Request received in full; waiting for an available agent...'), true);
-    log(`#${job.id}${job.session ? '@' + job.session : ''} queued (${cur ? 'chat busy' : running.size + ' running'})`);
-    return;
-  }
-  runJob(job);
+  } else runJob(job);
 }
 
 function drainQueue() {
+  if (recovering || admitting) return;
   for (const [key, job] of queued) {
     if (running.size >= MAX_PARALLEL) break;
     if (running.has(chatKey(job))) continue;
@@ -628,6 +745,7 @@ function drainQueue() {
 }
 
 function runJob(job) {
+  if (job.finished || journal.forgotten(job)) return;
   clearTimeout(job.contextTimer);
   job.deadline = job.deadline || Date.now() + (cfg.timeoutMs || 1800000);
   if (Date.now() >= job.deadline) { finish(job, 'error', 'The conversation timed out while retrieving addon information.'); return; }
@@ -688,7 +806,8 @@ function runJob(job) {
   }
   maybeOfferRestore(job);
   if (!job.userRecorded) { noteMessage(job, 'user', job.text); job.userRecorded = true; }
-  const resume = state.sessions[skey] || state.sessions[key];
+  const resume = job.continuation ? job.providerSession : state.sessions[skey] || state.sessions[key];
+  job.providerSession = resume || '';
 
   // A full snapshot is permission-bound to this turn. Never re-inject an older
   // global summary whose fields may since have been unchecked or belong to another chat.
@@ -716,10 +835,11 @@ function runJob(job) {
     env.WOWIE_MAP_FILE = mapFileFor(job);
   } catch (e) { log(`${tag} map file unavailable: ${e.message}`); }
 
+  journal.checkpoint(job, 'running', { query: null });
   log(`${tag} (${job.via}) ${agent.name} starting in ${cwd}${resume ? ' (resume ' + resume.slice(0, 8) + ')' : ' (new session)'}${ctx ? ' [game context]' : ''}${running.size ? ' [' + (running.size + 1) + ' running]' : ''}`);
-  const child = spawn(cmd.file, args, { cwd, env, windowsHide: true, stdio: [input.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+  const child = ownership.spawn(cmd.file, args, { cwd, env, stdin: input.stdin !== undefined });
   running.set(key, { job, child });
-  publish(key, { chat: job.chat, id: job.id, nonce: job.nonce, status: 'working', text: resume ? 'thinking...' : 'starting a new session...', cwd, session: resume, agent: agentId }, true);
+  publish(key, contextRecord(job, 'working', resume ? 'thinking...' : 'starting a new session...', { session: resume }), true);
   if (input.stdin !== undefined) { child.stdin.on('error', () => {}); child.stdin.end(input.stdin); }
 
   const parser = agent.parser();
@@ -734,10 +854,11 @@ function runJob(job) {
   let parserError = false;
 
   const pushProgress = (line) => {
+    if (job.finished || journal.forgotten(job)) return;
     progress.push(line);
     while (progress.length > 10) progress.shift();
     beat(job);
-    publish(key, { chat: job.chat, id: job.id, nonce: job.nonce, status: 'working', text: progress.join('\n'), cwd, session: sessionId, agent: agentId }, false);
+    publish(key, contextRecord(job, 'working', progress.join('\n'), { session: sessionId }), false);
   };
   if (agent.stream === 'text') pushProgress(`${agent.name} is working (no live progress)`);
   if (input.note) notes.push(input.note);
@@ -745,7 +866,7 @@ function runJob(job) {
   const keepalive = setInterval(() => beat(job), 45000);
 
   const handleLine = (line) => {
-    if (parserError) return;
+    if (parserError || job.finished || journal.forgotten(job)) return;
     let ev;
     try { ev = JSON.parse(line); } catch { return; }
     if (!ev || typeof ev !== 'object') return;
@@ -771,6 +892,7 @@ function runJob(job) {
   };
 
   child.stdout.on('data', (chunk) => {
+    if (job.finished || journal.forgotten(job)) return;
     if (agent.stream === 'text') {
       stdoutText += chunk.toString('utf8');
       return;
@@ -803,7 +925,7 @@ function runJob(job) {
 
   child.on('close', (code) => {
     cleanup();
-    if (job.finished) return;
+    if (job.finished || journal.forgotten(job)) return;
     if (buffer.trim()) handleLine(buffer.trim());
     if (!parserError && typeof parser.finish === 'function') {
       try {
@@ -816,6 +938,7 @@ function runJob(job) {
       }
     }
     if (sessionId) {
+      job.providerSession = sessionId;
       state.sessions[skey] = sessionId;
       (state.sessionCwd = state.sessionCwd || {})[skey] = cwd;
       (state.sessionAgent = state.sessionAgent || {})[skey] = agentId;
@@ -825,19 +948,19 @@ function runJob(job) {
     if (result) result.text = mapped.text;
     if (mapped.note) notes.push(mapped.note);
     if (result && !result.error) {
-      try {
-        const requested = C.requests(result.text);
-        if (requested.queries.length) {
-          job.contextNotes = notes;
-          job.contextDenied = [...denied];
-          requestContext(job, requested.queries);
-          return;
-        }
-        result.text = requested.text;
-      } catch (err) {
+      let requested;
+      try { requested = C.requests(result.text); }
+      catch (err) {
         finish(job, 'error', `Invalid addon information request: ${err.message}`, sessionId);
         return;
       }
+      if (requested.queries.length) {
+        job.contextNotes = notes;
+        job.contextDenied = [...denied];
+        requestContext(job, requested.queries);
+        return;
+      }
+      result.text = requested.text;
     }
     const extra = notes.length ? `\n\n[bridge] ${notes.join('\n\n[bridge] ')}` : '';
     if (result && !result.error) {
@@ -852,38 +975,93 @@ function runJob(job) {
 }
 
 function finish(job, status, text, session, denied) {
-  if (job.finished) return; // spawn failures fire both 'error' and 'close'
+  if (job.finished || journal.forgotten(job)) return;
+  let macros = [];
+  if (status === 'done') {
+    const m = P.extractMacros(text);
+    text = m.text + (m.notes.length ? `\n\n[bridge] ${m.notes.join('; ')}` : '');
+    macros = m.macros;
+  }
+  const record = contextRecord(job, status, text, { session, denied, macros });
+  const entry = journal.checkpoint(job, 'complete', { result: record, query: null, completed: Date.now(), transcriptRecorded: false });
   job.finished = true;
   clearTimeout(job.contextTimer);
   clearInterval(job.contextWatcher);
   pendingProfiles.delete(C.key(job));
   pendingQueries.delete(C.key(job));
-  contextProfiles.delete(C.key(job));
+  dropProfile(C.key(job));
+  contextPackets.delete(C.key(job));
   contextTransfers.forget(job);
   const key = chatKey(job);
   if (running.get(key)?.job.nonce === job.nonce) running.delete(key);
   queued.delete(C.key(job));
   markHandled(job);
   saveState();
-  // A finished reply ends with the "TL;DR:" block the system prompt asks for:
-  // that part is what the game chat prints; the window gets the whole reply.
-  let summary = '';
-  let macros = [];
-  if (status === 'done') {
-    ({ text, summary } = P.splitSummary(text));
-    // After the split: a macro block the agent put after "TL;DR:" must not end up
-    // in the game-chat summary.
-    const m = P.extractMacros(text);
-    text = m.text + (m.notes.length ? `\n\n[bridge] ${m.notes.join('; ')}` : '');
-    macros = m.macros;
-    summary = P.stripMacroBlocks(summary);
-  }
   noteMessage(job, status === 'done' ? 'assistant' : 'system', status === 'done' ? text : 'Bridge error: ' + text);
-  publish(chatKey(job), { chat: job.chat, id: job.id, nonce: job.nonce, status, text, summary, cwd: job.cwd, session, denied, macros, agent: job.agent || '' }, true);
+  entry.transcriptRecorded = true;
+  journal.save();
+  publish(key, record, true);
   signal('sig', job.id, true);
-  log(`#${job.id}${job.session ? '@' + job.session : ''} ${status} (${text.length} chars${summary ? ', summary ' + summary.length : ', no summary'})`);
+  log(`#${job.id}${job.session ? '@' + job.session : ''} ${status} (${text.length} chars)`);
   drainQueue();
-  if (exitWhenIdle && running.size === 0 && pendingProfiles.size === 0 && queued.size === 0) process.exit(status === 'done' ? 0 : 1);
+  if (!recovering && !admitting && exitWhenIdle && running.size === 0 && pendingProfiles.size === 0 && queued.size === 0) process.exit(status === 'done' ? 0 : 1);
+}
+
+function recoverRequests() {
+  recovering = true;
+  const entries = Object.values(journal.data.requests).sort((a, b) => a.accepted - b.accepted);
+  for (const entry of entries) {
+    const job = entry.job;
+    if (journal.data.owners[ownerKey(job)] === job.nonce) requestOwners.set(chatKey(job), job.nonce);
+  }
+  // Complete a durable forget even if the previous process died between the
+  // journal commit and removing its transcript/provider-session files.
+  for (const token of Object.keys(journal.data.tombstones)) {
+    const [chat, generation] = JSON.parse(token);
+    const current = journal.data.generations[chat];
+    if (!current || current === generation) {
+      if (!chat.startsWith('@')) {
+        delete transcripts.chats[chat];
+        clearChatSession({ chat });
+      }
+    }
+  }
+  for (const entry of [...entries].sort((a, b) => (a.updated || a.accepted) - (b.updated || b.accepted))) {
+    const job = entry.job;
+    if (journal.forgotten(job) || !Object.hasOwn(job, 'providerSession')) continue;
+    if (!job.providerSession) { clearChatSession(job); continue; }
+    const key = sessKey(job);
+    state.sessions[key] = job.providerSession;
+    (state.sessionCwd = state.sessionCwd || {})[key] = job.cwd;
+    (state.sessionAgent = state.sessionAgent || {})[key] = job.agent;
+  }
+  for (const entry of entries) {
+    const job = { ...entry.job };
+    if (journal.forgotten(job) || entry.phase === 'forgotten' || entry.phase === 'expired') continue;
+    if (entry.phase === 'complete') {
+      const record = entry.result;
+      if (!record) throw new Error('Completed request has no durable result');
+      if (!entry.transcriptRecorded) {
+        noteMessage(job, record.status === 'done' ? 'assistant' : 'system', record.status === 'done' ? record.text : 'Bridge error: ' + record.text);
+        entry.transcriptRecorded = true;
+      }
+      publish(chatKey(job), record, true);
+    } else if (entry.phase === 'running') {
+      finish(job, 'error', 'The bridge stopped while this agent request was running. Its outcome is uncertain and it was not run again; inspect any external changes before sending a new question.');
+    } else if (entry.phase === 'context_query') {
+      if (!journal.owns(job)) { finish(job, 'error', 'This addon information request was superseded by a newer question.'); continue; }
+      if (!entry.query || !P.validNonce(entry.query.request) || !Array.isArray(entry.query.queries)) throw new Error('Invalid durable addon information query');
+      pendingQueries.set(C.key(job), { job, ...entry.query });
+      running.set(chatKey(job), { job, child: null });
+      armContextWait(job);
+      publish(chatKey(job), contextRecord(job, 'context_query', 'Reading information allowed by your current Sharing checkboxes...', entry.query), true);
+    } else if (entry.phase === 'queued' || entry.phase === 'awaiting_profile') {
+      if (entry.phase === 'awaiting_profile' && !journal.owns(job)) finish(job, 'error', 'This information-sharing request was superseded by a newer question.');
+      else prepareJob(job);
+    } else throw new Error(`Unknown durable request phase: ${entry.phase}`);
+  }
+  journal.save(); saveState(); saveTranscripts();
+  recovering = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -892,14 +1070,24 @@ function finish(job, status, text, session, denied) {
 
 function pollSavedVariables() {
   findSavedVars();
-  let st;
-  try { st = fs.statSync(SAVED_VARS); } catch { return; }
-  if (st.mtimeMs === lastMtime) return;
+  let st, src;
+  try {
+    st = fs.statSync(SAVED_VARS);
+    if (st.mtimeMs === lastMtime) return;
+    src = fs.readFileSync(SAVED_VARS, 'utf8');
+  } catch (err) {
+    if (err.code !== 'ENOENT' && err.code !== 'ENOTDIR') log(`SavedVariables unavailable: ${err.message}`);
+    return;
+  }
   lastMtime = st.mtimeMs;
-  let response;
-  try { response = P.parseContextOutbox(fs.readFileSync(SAVED_VARS, 'utf8')); } catch {}
+  let controls, response, job;
+  try {
+    controls = P.parseControlOutbox(src);
+    response = P.parseContextOutbox(src);
+    job = P.parseOutbox(src);
+  } catch (err) { log(`SavedVariables rejected: ${err.message}`); return; }
+  for (const control of controls) submit(control);
   if (response) submit(response);
-  const job = readOutbox();
   if (job) submit(job);
 }
 
@@ -933,7 +1121,7 @@ function startCapture() {
     log(`capture requires action: ${err.message} Fix the configuration and restart the bridge.`);
     return;
   }
-  const ps = spawn(cmd, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const ps = ownership.spawn(cmd, args, { cwd: process.cwd(), env: process.env, stdin: false });
   const rl = readline.createInterface({ input: ps.stdout });
   const onLine = (line) => {
     if (captureStopping) return;
@@ -1013,22 +1201,37 @@ function banner() {
 // Query installed CLI catalogs independently; capture and chats never wait on them.
 function discoverModels() {
   for (const id of A.agentIds()) {
-    A.discoverModels(id, A.agentConfig(cfg, id)).then(models => {
-      if (!models || !models.length) return;
+    const acfg = A.agentConfig(cfg, id);
+    if (!A.AGENTS[id].modelCatalog || !A.resolveCommand(id, acfg).found) continue;
+    const child = ownership.spawn(process.execPath, [path.join(HERE, 'ownership.js'), 'catalog', id, JSON.stringify(acfg)],
+      { cwd: process.cwd(), env: process.env, stdin: false });
+    let output = '', errors = '';
+    child.stdout.on('data', chunk => { output += chunk.toString('utf8'); });
+    child.stderr.on('data', chunk => { errors = (errors + chunk.toString('utf8')).slice(-1500); });
+    child.on('error', err => log(`${A.displayName(id)} model list unavailable:`, err.message));
+    child.on('close', code => {
+      if (code !== 0) { log(`${A.displayName(id)} model list unavailable: ${errors || `catalog exited ${code}`}`); return; }
+      let models;
+      try { models = JSON.parse(output); }
+      catch (err) { log(`${A.displayName(id)} model list unreadable: ${err.message}`); return; }
+      if (!Array.isArray(models) || !models.length) return;
       agentOptions[id].models = [...new Set([...agentOptions[id].models, ...models])];
       publishNow();
-    }).catch(err => log(`${A.displayName(id)} model list unavailable:`, err.message));
+    });
   }
 }
 
 findSavedVars();
 banner();
+recoverRequests();
+setInterval(maintainContext, Math.min(30000, Math.max(10, Math.floor((cfg.timeoutMs || 1800000) / 2)))).unref();
 if (inject !== null) {
-  submit({ id: state.lastId + 1, nonce: randomBytes(16).toString('hex'), session: '', chat: '', text: inject, cwd: '', newSession: false, via: 'inject', agent: injectAgent || '' });
+  submit({ id: state.lastId + 1, nonce: randomBytes(16).toString('hex'), generation: randomBytes(16).toString('hex'), session: '', chat: '', text: inject, cwd: '', newSession: false, via: 'inject', agent: injectAgent || '' });
 } else {
   pollSavedVariables();
+  drainQueue();
   if (once) {
-    if (running.size === 0 && pendingProfiles.size === 0) { console.log('nothing pending'); process.exit(rejectedInput ? 1 : 0); }
+    if (running.size === 0 && pendingProfiles.size === 0 && queued.size === 0) { console.log('nothing pending'); process.exit(rejectedInput ? 1 : 0); }
   } else {
     setInterval(pollSavedVariables, cfg.pollMs || 750);
     discoverModels();
@@ -1037,3 +1240,6 @@ if (inject !== null) {
     if (cap.enabled) startCapture();
   }
 }
+}
+
+main().catch(err => { console.error(`Wowie bridge stopped: ${err.stack || err.message}`); process.exit(err.exitCode || 1); });

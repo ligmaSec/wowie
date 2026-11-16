@@ -140,11 +140,14 @@ All of these are gitignored.
 | File | Contents |
 |---|---|
 | `bridge/config.json` | Your configuration. |
-| `bridge/state.json` | Agent sessions, handled message IDs, presence/map state and the latest selected **short** context. Full snapshots/query results are held for the active job, not copied here. Delete it to forget all sessions. |
+| `bridge/state.json` | Agent-session metadata, legacy nonce receipts, presence/map state and the latest selected **short** context. Durable recovery may restore session metadata from `requests.json`; deleting this file is not a safe execution reset. |
+| `bridge/requests.json` | Fsynced request/result journal, generations, deletion markers, query batches, control receipts and restore offers. Active jobs include their permitted snapshots/continuations; terminal results discard those active payloads. Retains all unacknowledged results and the latest 200 terminal results per chat unless deleted, then keeps non-runnable tombstones for older acknowledged requests. Preserve this file to prevent duplicate external work. |
 | `bridge/transcripts.json` | The last 200 chat messages per conversation. Internal information requests do not duplicate user turns or store the raw full snapshot; ordinary final answers remain in history. |
 | `bridge/mapjobs/` | One map command file per running job (`WOWIE_MAP_FILE`), read and deleted when the job ends. Map layers themselves live in `state.json` (`map`). |
 | `bridge/bridge.log` | Everything printed to the console, with timestamps. Grows without bound; delete it whenever you like. |
 | `bridge/tmp/` | Prompt files for agents that read the prompt from disk (Grok). Each is deleted when its run ends. |
+
+The bridge owns an exclusive localhost port derived from the canonical addon installation path. An occupied port fails closed (exit 2), including a rare collision with an unrelated service; it is not a network transport for the game. The guardian releases ownership after its child processes stop. Windows uses built-in Windows PowerShell and kernel Job Objects; no npm runtime dependencies are added.
 
 ## `setup.js` flags
 

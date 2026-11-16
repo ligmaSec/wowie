@@ -10,7 +10,21 @@ function key(job) { return JSON.stringify([job.session || '', job.chat || '', jo
 function transferKey(job) { return `${key(job)}:${job.data}:${job.request || job.profile || ''}`; }
 
 class Transfers {
-  constructor() { this.pending = new Map(); }
+  constructor({ maxPendingBytes = 64 * 1024 * 1024, maxPending = 64 } = {}) {
+    if (!Number.isSafeInteger(maxPendingBytes) || maxPendingBytes < 1 || !Number.isSafeInteger(maxPending) || maxPending < 1) {
+      throw new RangeError('Multipart capacity must be positive integers');
+    }
+    this.pending = new Map();
+    this.bytes = 0;
+    this.maxPendingBytes = maxPendingBytes;
+    this.maxPending = maxPending;
+  }
+  remove(id) {
+    const entry = this.pending.get(id);
+    if (!entry) return;
+    this.bytes -= entry.bytes;
+    this.pending.delete(id);
+  }
   add(job) {
     const encoding = job.encoding;
     const valid = encoding === 'b64' || encoding === 'zlib64';
@@ -19,21 +33,27 @@ class Transfers {
       || !valid || typeof job.text !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(job.text)) throw new Error('Invalid information-sharing fragment');
     const id = transferKey(job);
     let entry = this.pending.get(id);
-    if (!entry) { entry = { chunks: new Map(), total: job.parts, encoding, bytes: 0, at: Date.now() }; this.pending.set(id, entry); }
+    if (!entry) {
+      if (this.pending.size >= this.maxPending) throw new Error('Too many incomplete information transfers; retry after pending transfers finish');
+      entry = { chunks: new Map(), total: job.parts, encoding, bytes: 0, at: Date.now() };
+      this.pending.set(id, entry);
+    }
     if (entry.total !== job.parts) throw new Error('Information-sharing fragment count changed during transfer');
     if (entry.encoding !== encoding) throw new Error('Information-sharing encoding changed during transfer');
     const before = entry.chunks.get(job.part);
     if (before !== undefined && before !== job.text) throw new Error('Conflicting information-sharing fragment');
     if (before === undefined) {
+      if (entry.bytes + job.text.length > MAX_WIRE_BYTES) { this.remove(id); throw new Error('Information snapshot exceeds 4 MiB; choose fewer categories or query paginated data'); }
+      if (this.bytes + job.text.length > this.maxPendingBytes) { this.remove(id); throw new Error('Incomplete information transfers exceed the shared memory limit; retry after pending transfers finish'); }
       entry.bytes += job.text.length;
-      if (entry.bytes > MAX_WIRE_BYTES) { this.pending.delete(id); throw new Error('Information snapshot exceeds 4 MiB; choose fewer categories or query paginated data'); }
+      this.bytes += job.text.length;
       entry.chunks.set(job.part, job.text);
     }
     const progress = { received: entry.chunks.size, total: entry.total };
     if (progress.received !== progress.total) return progress;
     const chunks = [];
     for (let i = 1; i <= entry.total; i++) chunks.push(entry.chunks.get(i));
-    this.pending.delete(id);
+    this.remove(id);
     const wire = chunks.join('');
     let bytes = Buffer.from(wire, 'base64');
     if (bytes.toString('base64') !== wire) throw new Error('Invalid information-sharing base64');
@@ -51,10 +71,10 @@ class Transfers {
   }
   forget(job) {
     const prefix = key(job) + ':';
-    for (const id of this.pending.keys()) if (id.startsWith(prefix)) this.pending.delete(id);
+    for (const id of this.pending.keys()) if (id.startsWith(prefix)) this.remove(id);
   }
   expire(before) {
-    for (const [id, entry] of this.pending) if (entry.at < before) this.pending.delete(id);
+    for (const [id, entry] of this.pending) if (entry.at < before) this.remove(id);
   }
 }
 

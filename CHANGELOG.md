@@ -6,10 +6,11 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ### Added
 
+- Durable request/result recovery through an fsynced `bridge/requests.json` journal, including queued work, exact context-query batches, full-result replay, control receipts and acknowledged restore offers. A guardian enforces one bridge per installation and owns subprocess cleanup across bridge loss; interrupted provider executions are reported, never silently rerun.
 - Direct automatic per-window Wayland capture using Python's standard library and libwayland-client, with no picker or portal fallback. Compatible compositors must expose foreign-toplevel listing, foreign-toplevel capture sources and image-copy capture protocols; Hyprland is tested-capable. A persistent connection and reusable native-resolution shared-memory buffer follow the current/new WoW window without screenshot-process spawning per frame. Native Wayland preserves the HDR path. The bridge and `npm run probe` share backend/config selection, including `processName` and title-substring `windowName`; the probe accepts only an optional output PNG path. X11 remains an explicit override for Xwayland/X11 windows, and shares the calibrated decoder.
 - Navigation points now toggle between Navigate and Stop navigation. On map / Show on map centers the destination through OpenMap's stitched view or the native canvas, minimizes Wowie to reveal the map, and preserves the current route and draft.
 
-- Structured selectable reply rendering: headings, paragraphs, lists, quotes, code and readable table rows; compact source URL controls; separate Summary/Details disclosures; full original-text copying. Errors remain visible and existing transcripts are rendered without rewriting them.
+- Structured selectable reply rendering: headings, paragraphs, lists, quotes, code and readable table rows; highlighted clickable inline `[n]` source citations instead of Source buttons; a separate Details disclosure; full original-text copying. Citation tooltips show the full URL and clicks open it for copying. Errors remain visible and existing transcripts are rendered without rewriting them.
 - Reading-size preferences and a local formatting preview, plus a collapsible conversation sidebar.
 
 - Simplified Sharing with one-click Recommended/Minimal presets, a compact default panel and an optional Customize drawer. Smart delivery sends small essentials plus a permitted-source catalog, allowing agents to fetch details without per-API checkbox hunting. Full delivery remains available; existing explicit choices and pending snapshots are preserved.
@@ -28,8 +29,16 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ### Changed
 
+- Removed the close cross from the workspace and compact bar. The workspace keeps Minimize, the compact bar keeps Open, and explicit hide commands remain available.
+- Request protocol 2 adds chat generations and exact deletion/reply/restore acknowledgements. Update bridge and addon together, then `/reload`. Existing pending nonces and selected data are retained; obsolete reload outboxes are retired, and pending turns reconcile against the journal before retransmitting cached query results.
+- The conversation sidebar is wider and more compact: single-line titles with full-title hover, consistent metadata and menu columns, a subdued New chat button and a separated sharing footer. Named-color item links no longer leak `cnIQ…` markup into messages or generated titles; existing titles are repaired only when they match the original automatic title, preserving custom renames, history and pending requests.
+- Replies now distinguish sections with gold headings and more breathing room, highlight inline bold terms, and use hanging bullet/number indents with bounded prose line lengths. Code keeps the full available width, and selection, citation links and full original copying remain intact. Agents receive more specific guidance for short, single-point bullets and labeled comparisons; the local formatting preview demonstrates the changes.
 - Rebuilt the in-game workspace and supporting panels with opaque surfaces, consistent typography, restrained accents, clearer spacing, readable destination rows and raised modal layering. Sharing customization gives its list the main viewport instead of stacking under a large overview. No privacy, navigation or transport behavior is removed.
-- Agents are now instructed to structure longer answers and use labeled sources. Game-chat summaries ignore code-fence examples and internal bridge notes. Install this update and fully restart WoW once for the new `ReplyView.lua` module.
+- Wowie now uses WoW's locale-aware standard UI font throughout its panels, replies (including code blocks), inputs and copy dialog instead of the chat font. Existing text sizes and reading-size preferences are preserved.
+- Agents are now instructed to structure longer answers and use labeled sources. Install this update and fully restart WoW once for the new `ReplyView.lua` module.
+- Removed generated reply summaries, their disclosure button and the summary echo mode. Game chat now defaults to a bounded preview of the answer; saved summary-mode settings move to short previews, while explicit full/off/character-limit choices are preserved.
+- Pending replies now show animated activity dots, elapsed time and distinct sending, queued, context-reading and working states without redrawing selectable text. Codex web activity shows structured search queries and browse/find targets as soon as their arguments arrive, instead of an empty `search:` label.
+- Travel recommendations now create navigation points without requiring an explicit map request, including trainer/vendor directions such as a grimoire purchase. Map instructions remain available with character sharing off; destinations require reliable map IDs and coordinates, and unrelated saved points and active routes are preserved.
 
 - The project, addon, command, saved data, environment variables and repository now use the **Wowie** name. `node setup.js` upgrades an earlier install; fully quit and relaunch the game so the renamed addon and slot files are discovered.
 - Internal cleanup: slot and reload replies share one addon snapshot handler, selector labels and menus share default resolution, and Codex override filtering builds its matchers once per request. Wire formats and selection precedence are unchanged.
@@ -41,6 +50,10 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Coordinated faster transport: 50 ms default capture, negotiated 100 ms upload frames with stalled-receipt backoff, and 100 ms pending readiness checks separated from slower UI maintenance. Complete queued/working receipts stop uploads promptly; phase notifications occur only after publication, not on every fragment or progress update. Cached numeric sounds cannot repeatedly consume slots, and presence filenames are never recycled in-process.
 
 ### Fixed
+
+- Deletion now fences queued/profile-waiting work, old uploads and late callbacks; a delayed old-generation delete cannot erase its replacement's session or transcript. Cached sound files and unrelated clocks no longer acknowledge deletions.
+- Superseded context waits release worker slots; query IDs remain unique across restart. Restore offers remain available until acknowledged rather than expiring after several publications.
+- Slot exhaustion no longer continually postpones its own reload deadline. Orphan multipart/profile data is periodically expired and bounded; acknowledgement snapshots are capped while durable older receipts remain replayable.
 
 - Wayland capture now discovers the game directly instead of relying on source selection or saved portal tokens. Missing libraries/protocols and denied compositor capture permissions stop with a terminal setup error rather than a restart loop; an explicit compositor permission grant may be required.
 - Navigation now recognizes ShortestPathForever API v2 as well as v1. A v2 installation was previously ignored, so Navigate created only a plain waypoint instead of dotted guidance. Native-only fallback now explains missing, incompatible or declined routing in the panel; arrival, combat deferral and route ownership remain intact.

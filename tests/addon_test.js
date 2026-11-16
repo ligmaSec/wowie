@@ -130,8 +130,8 @@ function questionRecord(vm, text) {
 }
 
 // Make the next LoadAddOn deliver this slot data (a Lua table literal body).
-function nextSlot(vm, luaBody, requestProtocol = 1) {
-  vm.run(`STUB.onLoadAddOn = function(name) Wowie_SlotData = ${luaBody}; Wowie_SlotData.contextProtocol = Wowie_SlotData.contextProtocol or 2; Wowie_SlotData.requestProtocol = ${requestProtocol === null ? 'nil' : requestProtocol} end`);
+function nextSlot(vm, luaBody, requestProtocol = 2) {
+  vm.run(`STUB.onLoadAddOn = function(name) Wowie_SlotData = ${luaBody}; Wowie_SlotData.contextProtocol = Wowie_SlotData.contextProtocol or 2; Wowie_SlotData.requestProtocol = ${requestProtocol === null ? 'nil' : requestProtocol}; Wowie_Inbox = Wowie_SlotData end`);
 }
 
 function login(vm) {
@@ -141,7 +141,7 @@ function login(vm) {
 
 // Simulate an acknowledgement of the hello actually emitted on the wire, not
 // a clock-only heartbeat. Capturing identity now keeps later publications stable.
-function nextAck(vm, body = '{ now = time(), cwd = "", replies = {} }', requestProtocol = 1) {
+function nextAck(vm, body = '{ now = time(), cwd = "", replies = {} }', requestProtocol = 2) {
   const hello = stripRecords(vm).find(r => P.parseFlags(r.flags).hello);
   assert.ok(hello, 'an outbound hello must precede its acknowledgement');
   const nonce = P.parseFlags(hello.flags).nonce;
@@ -158,6 +158,10 @@ function connect(vm) {
 
 function loadedSlots(vm) {
   return vm.num('(function() local n = 0; for name in pairs(STUB.loaded) do if name:match("^Wowie_S%d%d%d$") then n = n + 1 end end; return n end)()');
+}
+
+function controlRecords(vm) {
+  return P.parseControlOutbox(`["controlOutbox"] = "${vm.evaluate('WowieDB.controlOutbox') || ''}"`);
 }
 
 const FAST_TRANSPORT = 'transportProtocol=1, transport={displays={"robust","compact","quiet","quiet4"},frameIntervalMs=100,captureIntervalMs=50}';
@@ -435,16 +439,18 @@ test('incoming agent information queries use current checkbox permissions, not t
   assert.equal(vm.num('WowieDB.chats[1].pendingId'), id, 'an information query is not a finished assistant answer');
   const savedQuery = vm.evaluate('WowieDB.contextOutbox.text');
   login(vm);
+  vm.run('STUB.now = STUB.now + 6; STUB.Tick()'); // The bridge republishes the retained query after reconciliation.
   const retransmission = P.jobsFromStrip(decodeStrip(vm).id, decodeStrip(vm).text).find(packet => packet.data === 'query');
   assert.equal(retransmission.nonce, nonce, 'query reload reuses the owner nonce');
   assert.equal(vm.evaluate('WowieDB.contextOutbox.text'), savedQuery);
 });
 
-test('a shift-clicked link lands in the focused input and is sent as its name plus tooltip', () => {
+for (const color of ['|cff1eff00', '|cnIQ2:']) {
+test(`a shift-clicked link lands in the focused input and is sent as its name plus tooltip (${color})`, () => {
   const vm = newVM();
   login(vm);
   connect(vm);
-  const link = '|cff1eff00|Hitem:2140:0:0:0:0:0:0:0:60:0:0|h[Fine Longsword]|h|r';
+  const link = `${color}|Hitem:2140:0:0:0:0:0:0:0:60:0:0|h[Fine Longsword]|h|r`;
   vm.run(`STUB.tooltips["item:2140:0:0:0:0:0:0:0:60:0:0"] = { "Fine Longsword", { "Main Hand", "Sword" }, { "17 - 33 Damage", "Speed 2.70" }, "Requires Level 14" }`);
   // Without focus the link is left alone (shift-click keeps its normal meaning).
   vm.run(`WowieInput:SetText("is this good for me? "); WowieInput:ClearFocus(); ChatFrameUtil.InsertLink("${link}")`);
@@ -470,13 +476,35 @@ test('a shift-clicked link lands in the focused input and is sent as its name pl
   const rec = stripRecords(vm).find(r => r.text.startsWith('is this good'));
   assert.equal(rec.text, expected);
   assert.equal(vm.evaluate('WowieDB.chats[1].history[#WowieDB.chats[1].history].text'), expected, 'the transcript shows what was sent');
-  assert.doesNotMatch(vm.evaluate('WowieDB.chats[1].name'), /Linked from|Main Hand|Requires Level/, 'generated tooltip metadata must not become the conversation title');
+  assert.doesNotMatch(vm.evaluate('WowieDB.chats[1].name'), /Linked from|Main Hand|Requires Level|cnIQ/i, 'tooltip metadata and color escapes must not become the conversation title');
   // Bare links (no colour) and repeated links: one block each, tooltip or not.
   vm.run('RESULT = (Wowie.ExpandLinks("x |Hspell:1978|h[Serpent Sting]|h y |Hspell:1978|h[Serpent Sting]|h"))');
   assert.equal(vm.evaluate('RESULT'), 'x [Serpent Sting] y [Serpent Sting]\n\n--- Linked from the game ---\n[Serpent Sting] spell 1978');
   vm.run('RESULT, COUNT = Wowie.ExpandLinks("plain text | with a pipe")');
   assert.equal(vm.evaluate('RESULT'), 'plain text | with a pipe');
   assert.equal(vm.evaluate('COUNT'), '0');
+});
+}
+
+test('legacy named-color titles are repaired without changing renamed chats, history or requests', () => {
+  const vm = newVM();
+  const source = '|cnIQ1:[Arcanic Systems]|r\n\n--- Linked from the game ---\n[Arcanic Systems] item 2140';
+  vm.run(`
+    WowieDB = { activeChat = "linked", chats = {
+      {id="linked",name="CnIQ1:[Arcanic Systems]|r",cwd="",history={{role="user",text=${P.luaStr(source)}}}},
+      {id="renamed",name="My crafting notes",cwd="",history={{role="user",text=${P.luaStr(source)}}}},
+    }}
+    WowieDB.chats[1].request = { name="CnIQ1:[Arcanic Systems]|r",nonce="preserved-request",text=${P.luaStr(source)} }
+  `);
+  login(vm);
+  assert.equal(vm.evaluate('WowieDB.chats[1].name'), 'Arcanic Systems');
+  assert.equal(vm.evaluate('WowieChatRow1.label:GetText()'), 'Arcanic Systems');
+  assert.equal(vm.evaluate('WowieDB.chats[2].name'), 'My crafting notes');
+  assert.equal(vm.evaluate('WowieDB.chats[1].history[1].text'), source);
+  assert.equal(vm.evaluate('WowieDB.chats[1].request.name'), 'CnIQ1:[Arcanic Systems]|r');
+  assert.equal(vm.evaluate('WowieDB.chats[1].request.text'), source);
+  login(vm);
+  assert.equal(vm.evaluate('WowieDB.chats[1].name'), 'Arcanic Systems', 'repair is stable across reloads');
 });
 
 test('deleting a chat tells the bridge to forget it, and a restore never brings it back', () => {
@@ -493,17 +521,142 @@ test('deleting a chat tells the bridge to forget it, and a restore never brings 
   assert.ok(rec, 'forget record on the strip');
   assert.equal(rec.chat, gone);
   assert.equal(rec.text, '');
-  assert.equal(vm.evaluate(`WowieDB.forget["${gone}"] ~= nil`), 'true');
+  const nonce = P.parseFlags(rec.flags).nonce;
+  assert.equal(vm.evaluate(`WowieDB.forget["${nonce}"] ~= nil`), 'true');
   // A restore that still lists the chat is ignored for it.
   const token = vm.evaluate('WowieDB.session');
-  nextSlot(vm, `{ now = time(), cwd = "", replies = {}, restore = { token = "${token}", chats = { { id = "${gone}", name = "Second", cwd = "", messages = { { role = "user", text = "old", id = 1, t = 1 } } } } } }`);
+  nextSlot(vm, `{ now = time(), cwd = "", replies = {}, restore = { token = "${token}", id = "restore-offer-001", chats = { { id = "${gone}", name = "Second", cwd = "", messages = { { role = "user", text = "old", id = 1, t = 1 } } } } } }`);
   vm.run('Wowie.Connect(); STUB.now = STUB.now + 6; STUB.Tick()');
   assert.equal(vm.num('#WowieDB.chats'), 1, 'deleted chat not restored');
-  // The bridge acks the forget record: it leaves the strip and the memory.
-  const slot = String(rec.id).padStart(3, '0');
+  // A fresh clock or a cached numeric sound cannot acknowledge this deletion.
+  const slot = String(P.slotNumber(rec.id, 200)).padStart(3, '0');
   vm.run(`STUB.sounds["Interface\\\\AddOns\\\\Wowie\\\\ack\\\\${slot}.wav"] = true; STUB.Tick()`);
-  assert.equal(vm.evaluate(`WowieDB.forget["${gone}"]`), null, 'forgotten once acked');
+  assert.equal(vm.evaluate(`WowieDB.forget["${nonce}"] ~= nil`), 'true');
+  nextSlot(vm, `{now=time(),receipts={{session="${token}",chat="${gone}",nonce="${nonce}",kind="reply"}},replies={}}`);
+  vm.run('Wowie.Connect(); STUB.now = STUB.now + 6; STUB.Tick()');
+  assert.equal(vm.evaluate(`WowieDB.forget["${nonce}"] ~= nil`), 'true', 'wrong control kind cannot retire a deletion');
+  nextSlot(vm, `{now=time(),receipts={{session="${token}",chat="${gone}",nonce="${nonce}",kind="forget"}},replies={}}`);
+  vm.run('Wowie.Connect(); STUB.now = STUB.now + 6; STUB.Tick()');
+  assert.equal(vm.evaluate(`WowieDB.forget["${nonce}"]`), null, 'only the exact control receipt retires deletion');
   assert.ok(!stripRecords(vm).find(r => r.flags.split(';').includes('d')), 'forget record left the strip');
+});
+
+test('deletion retires pending uploads and preserves independent offline generation tombstones', () => {
+  const vm = newVM();
+  login(vm);
+  connect(vm);
+  vm.run('Wowie.Send("first generation"); OLD_NONCE = WowieDB.chats[1].request.nonce; OLD_GENERATION = WowieDB.chats[1].generation');
+  const oldNonce = vm.evaluate('OLD_NONCE'), oldGeneration = vm.evaluate('OLD_GENERATION');
+  vm.run('Wowie.DeleteChat()');
+  assert.equal(vm.evaluate('WowieDB.chats[1].request'), null);
+  assert.equal(vm.evaluate('WowieDB.outbox'), null);
+  assert.equal(vm.evaluate('WowieDB.contextOutbox'), null);
+  assert.notEqual(vm.evaluate('WowieDB.chats[1].generation'), oldGeneration);
+  assert.ok(!stripRecords(vm).some(record => P.parseFlags(record.flags).nonce === oldNonce), 'deleted upload must leave the strip');
+  const first = controlRecords(vm).find(record => record.forget);
+  assert.equal(first.generation, oldGeneration);
+  vm.run('Wowie.Send("second generation")');
+  const secondGeneration = vm.evaluate('WowieDB.chats[1].generation');
+  vm.run('Wowie.DeleteChat()');
+  const tombstones = controlRecords(vm).filter(record => record.forget);
+  assert.deepEqual(new Set(tombstones.map(record => record.generation)), new Set([oldGeneration, secondGeneration]));
+  assert.equal(new Set(tombstones.map(record => record.nonce)).size, 2);
+  vm.run('Wowie_Inbox = nil');
+  login(vm);
+  assert.deepEqual(new Set(controlRecords(vm).filter(record => record.forget).map(record => record.nonce)), new Set(tombstones.map(record => record.nonce)), 'reload retains every deletion identity');
+});
+
+test('final reply receipts survive reload without resending the completed player instruction', () => {
+  const vm = newVM();
+  login(vm);
+  connect(vm);
+  vm.run('Wowie.Send("one instruction")');
+  const chat = vm.evaluate('WowieDB.activeChat');
+  const id = vm.num('WowieDB.chats[1].pendingId');
+  const nonce = vm.evaluate('WowieDB.chats[1].request.nonce');
+  const generation = vm.evaluate('WowieDB.chats[1].generation');
+  nextSlot(vm, `{now=time(),replies={{chat="${chat}",id=${id},nonce="${nonce}",generation="${generation}",status="done",text="Complete answer"}}}`);
+  vm.run('Wowie.Send("")');
+  assert.equal(vm.evaluate('WowieDB.chats[1].pendingId'), null);
+  assert.equal(vm.evaluate('WowieDB.outbox'), null);
+  const receipt = controlRecords(vm).find(record => record.receipt === 'reply');
+  assert.equal(receipt.target, nonce);
+  assert.equal(receipt.generation, generation);
+  vm.run('Wowie_Inbox = nil');
+  login(vm);
+  connect(vm);
+  assert.equal(controlRecords(vm).find(record => record.receipt === 'reply').nonce, receipt.nonce);
+  assert.ok(!stripRecords(vm).some(record => record.text === 'one instruction'), 'only the durable receipt is retransmitted');
+  const session = vm.evaluate('WowieDB.session');
+  nextSlot(vm, `{now=time(),receipts={{session="${session}",chat="${chat}",nonce="${receipt.nonce}",kind="reply"}},replies={}}`);
+  vm.run('Wowie.Connect(); STUB.now = STUB.now + 6; STUB.Tick()');
+  assert.equal(controlRecords(vm).length, 0);
+  assert.equal(vm.evaluate('WowieDB.chats[1].history[#WowieDB.chats[1].history].text'), 'Complete answer');
+});
+
+for (const phase of ['working', 'context_query']) {
+test(`reload reconciles an acknowledged ${phase} turn before retransmitting cached query data`, () => {
+  const vm = newVM();
+  login(vm);
+  connect(vm);
+  vm.run('Wowie.Send("Original player instruction")');
+  const first = questionRecord(vm, 'Original player instruction');
+  const fields = P.parseFlags(first.flags);
+  const query = phase === 'context_query' ? ',request="query-batch-rollback",queries={{op="snapshot",category="inventory"}}' : '';
+  nextSlot(vm, `{now=time(),replies={{chat="${first.chat}",id=${first.id},nonce="${fields.nonce}",generation="${fields.generation}",status="${phase}",text="Waiting"${query}}}}`);
+  vm.run('Wowie.Send("")');
+  assert.equal(vm.evaluate('WowieDB.chats[1].snapshotAcked'), 'true');
+  if (phase === 'context_query') assert.equal(vm.evaluate('WowieDB.chats[1].queryReply.request'), 'query-batch-rollback');
+  vm.run('Wowie_Inbox = {requestProtocol=1,replies={}}');
+  login(vm);
+  assert.equal(stripRecords(vm).filter(record => !P.parseFlags(record.flags).hello).length, 0, 'an old bridge cannot safely reconcile durable requests');
+  vm.run('Wowie_Inbox = {requestProtocol=2,contextProtocol=2,replies={}}');
+  login(vm);
+  const retry = questionRecord(vm, 'Original player instruction');
+  assert.equal(retry.id, first.id);
+  assert.equal(P.parseFlags(retry.flags).nonce, fields.nonce);
+  assert.equal(P.parseFlags(retry.flags).generation, fields.generation);
+  assert.equal(vm.evaluate('WowieDB.chats[1].pendingId'), String(first.id));
+});
+}
+
+for (const failure of ['exhausted', 'missing']) {
+test(`automatic reload remains reachable after repeated ${failure}-slot ticks`, () => {
+  const vm = newVM();
+  login(vm);
+  connect(vm);
+  vm.run('Wowie.Send("keep waiting"); SLOT_CHECKS = 0');
+  if (failure === 'exhausted') {
+    vm.run('C_AddOns.IsAddOnLoaded = function() SLOT_CHECKS = SLOT_CHECKS + 1; return true end');
+  } else {
+    vm.run('C_AddOns.LoadAddOn = function() SLOT_CHECKS = SLOT_CHECKS + 1; return nil, "MISSING" end');
+  }
+  vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
+  const deadline = vm.num('Wowie.nextAutoRefresh');
+  const checks = vm.num('SLOT_CHECKS');
+  assert.ok(deadline > vm.num('GetTime()'));
+  for (let i = 0; i < 20; i++) vm.run('STUB.now = STUB.now + 2; STUB.Tick()');
+  assert.equal(vm.num('Wowie.nextAutoRefresh'), deadline, 'repeated failures must not postpone recovery');
+  assert.equal(vm.num('SLOT_CHECKS'), checks, 'exhaustion must stop ordinary slot scans/loads');
+  assert.equal(vm.evaluate('STUB.reloaded'), 'false', 'reload still requires a hardware event');
+  vm.run('InCombatLockdown = function() return true end; WowieKeyCatcher:GetScript("OnKeyDown")(WowieKeyCatcher, "SPACE")');
+  assert.equal(vm.evaluate('STUB.reloaded'), 'false');
+  vm.run('InCombatLockdown = function() return false end; Wowie.ArmAutoRefresh(); WowieKeyCatcher:GetScript("OnKeyDown")(WowieKeyCatcher, "SPACE")');
+  assert.equal(vm.evaluate('STUB.reloaded'), 'true');
+});
+}
+
+test('message admission includes the complete generation and folder envelope', () => {
+  const vm = newVM();
+  login(vm);
+  connect(vm);
+  vm.run(`WowieDB.settings.context = false; WowieDB.chats[1].cwd = ${P.luaStr('/project/' + 'folder/'.repeat(70))}; WowieInput:SetText(${P.luaStr('q'.repeat(2880))}); Wowie.SendFromInput()`);
+  assert.equal(vm.evaluate('WowieDB.chats[1].pendingId'), null, 'oversized envelope must be rejected before admission');
+  assert.equal(vm.evaluate('WowieInput:GetText()'), 'q'.repeat(2880), 'rejection preserves the draft');
+  vm.run(`WowieInput:SetText(${P.luaStr('q'.repeat(2200))}); Wowie.SendFromInput()`);
+  const record = stripRecords(vm).find(record => record.text === 'q'.repeat(2200));
+  assert.ok(record, 'a fitting envelope is delivered intact rather than drawing an empty frame');
+  assert.equal(P.parseFlags(record.flags).generation, vm.evaluate('WowieDB.chats[1].generation'));
 });
 
 test('Send and Reconnect stay visible, timeout preserves the draft and enables another check', () => {
@@ -753,7 +906,7 @@ test('a sent message is encoded on the strip with the chat folder, then a slot r
   assert.equal(vm.evaluate('WowieDB.chats[1].history[#WowieDB.chats[1].history].role'), 'assistant');
   assert.equal(vm.evaluate('WowieDB.chats[1].history[#WowieDB.chats[1].history].text'), 'hi back');
   assert.ok(vm.evaluate('table.concat(STUB.prints, "\\n")').includes('hi back'), 'reply echoed to the game chat');
-  assert.equal(vm.evaluate('WowieStrip.shown'), 'false', 'strip cleared once nothing is pending');
+  assert.ok(!stripRecords(vm).some(record => record.text === 'hello world'), 'the completed instruction is no longer retransmitted while its receipt is pending');
 
   // The bridge's default folder arrived with the slot and is what "/wowie cd" reports.
   vm.run('SlashCmdList.WOWIE("cd")');
@@ -775,7 +928,6 @@ test('a denied reply shows Allow, and Allow resends with the rules as flags', ()
   const rec = stripRecords(vm).find(r => r.flags.includes('allow='));
   assert.ok(rec, 'allow record on the strip');
   assert.deepEqual(P.parseFlags(rec.flags).allow, ['WebSearch', 'Bash(cargo:*)']);
-  assert.equal(rec.id, id + 1);
 });
 
 test('a chat can pick its agent: the strip says so, replies are labelled by their writer, unknown names are refused', () => {
@@ -834,7 +986,8 @@ test('selector changes leave an in-flight request unchanged when resent, includi
   vm.run('STUB.RunTimers()');
   const options = A.selectionOptions({ agents: { codex: { models: ['code-model', 'review-model'] } } });
   vm.run(`STUB.onLoadAddOn = function()
-    ${P.luaTable('Wowie_SlotData', [], { now: vm.num('time()') * 1000, requestProtocol: 1, contextProtocol: 2, connectionProtocol: 1, connectionAck: { session: vm.evaluate('WowieDB.session'), nonce: P.parseFlags(stripRecords(vm).find(r => P.parseFlags(r.flags).hello).flags).nonce, at: vm.num('time()') }, agent: 'claude', agents: A.agentIds(), agentOptions: options })}
+    ${P.luaTable('Wowie_SlotData', [], { now: vm.num('time()') * 1000, requestProtocol: 2, contextProtocol: 2, connectionProtocol: 1, connectionAck: { session: vm.evaluate('WowieDB.session'), nonce: P.parseFlags(stripRecords(vm).find(r => P.parseFlags(r.flags).hello).flags).nonce, at: vm.num('time()') }, agent: 'claude', agents: A.agentIds(), agentOptions: options })}
+    Wowie_Inbox = Wowie_SlotData
   end`);
   vm.run('STUB.now = STUB.now + 6; STUB.Tick(); Wowie.Toggle(true)');
   vm.run(`
@@ -876,7 +1029,8 @@ function connectAgentOptions(vm) {
     agy: { models: ['gemini-model'] },
   } });
   vm.run(`STUB.onLoadAddOn = function()
-    ${P.luaTable('Wowie_SlotData', [], { now: vm.num('time()') * 1000, requestProtocol: 1, contextProtocol: 2, connectionProtocol: 1, connectionAck: { session: vm.evaluate('WowieDB.session'), nonce: P.parseFlags(stripRecords(vm).find(r => P.parseFlags(r.flags).hello).flags).nonce, at: vm.num('time()') }, agent: 'claude', agents: A.agentIds(), agentOptions })}
+    ${P.luaTable('Wowie_SlotData', [], { now: vm.num('time()') * 1000, requestProtocol: 2, contextProtocol: 2, connectionProtocol: 1, connectionAck: { session: vm.evaluate('WowieDB.session'), nonce: P.parseFlags(stripRecords(vm).find(r => P.parseFlags(r.flags).hello).flags).nonce, at: vm.num('time()') }, agent: 'claude', agents: A.agentIds(), agentOptions })}
+    Wowie_Inbox = Wowie_SlotData
   end`);
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
 }
@@ -1034,67 +1188,48 @@ test('/wowie reset marks the next message as a new session', () => {
   assert.equal(vm.evaluate('WowieDB.chats[1].resetNext'), null);
 });
 
-test('game chat echo: the summary by default, the first lines without one, the whole reply with "echo full"', () => {
+test('game chat echoes a bounded reply preview by default, with full and off modes', () => {
   const vm = newVM();
   login(vm);
   connect(vm);
-  assert.equal(vm.evaluate('WowieDB.settings.echo'), 'summary', 'summary echo is the default');
   const chatId = vm.evaluate('WowieDB.chats[1].id');
   const prints = () => vm.evaluate('table.concat(STUB.prints, "\\n")');
-  const reply = (text, summary) => {
+  const reply = (text) => {
     vm.run('STUB.prints = {}');
     vm.run('Wowie.Send("do it")');
     const id = vm.num('WowieDB.chats[1].pendingId');
-    const sum = summary === undefined ? '' : `, summary = "${summary}"`;
-    nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id}, nonce = "${vm.evaluate('WowieDB.chats[1].request.nonce')}", status = "done", text = "${text}", agent = "claude"${sum} } } }`);
+    nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id}, nonce = "${vm.evaluate('WowieDB.chats[1].request.nonce')}", status = "done", text = ${P.luaStr(text)}, agent = "claude" } } }`);
     vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
     assert.equal(vm.evaluate('WowieDB.chats[1].pendingId'), null);
   };
 
-  // With a summary only the summary is printed; the window keeps the whole reply.
-  reply('Long line one\\nLong line two\\nLong line three\\n\\nTL;DR: Renamed foo.\\nTests pass.', 'Renamed foo.\\nTests pass.');
+  const text = 'The important answer.\n\n' + 'Longer explanation. '.repeat(25) + '\nLast detail.';
+  reply(text);
   let out = prints();
-  assert.ok(out.includes('[Claude · ') && out.includes('Renamed foo.') && out.includes('Tests pass.'), 'summary lines printed: ' + out);
-  assert.ok(!out.includes('Long line one'), 'the body stays out of the game chat');
-  assert.ok(out.includes('[open]'), 'the open link is there');
-  assert.ok(vm.evaluate('WowieDB.chats[1].history[#WowieDB.chats[1].history].text').includes('Long line three'), 'the window has the full reply');
+  assert.ok(out.includes('[Claude · ') && out.includes('The important answer.'), out);
+  assert.ok(out.includes(' ...') && out.includes('[open]'), out);
+  assert.ok(!out.includes('Last detail.'), 'long details stay in the window');
+  assert.equal(vm.evaluate('WowieDB.chats[1].history[#WowieDB.chats[1].history].text'), text);
 
-  // Without a summary: the first two lines, then a hint that there is more.
-  reply('Line one\\nLine two\\nLine three\\nLine four');
-  out = prints();
-  assert.ok(out.includes('Line one') && out.includes('Line two'), 'first two lines: ' + out);
-  assert.ok(!out.includes('Line three'), 'third line held back');
-  assert.ok(out.includes('click [open]'), 'hint to open the window');
-
-  // A short reply without a summary needs no hint.
   reply('Just this');
   out = prints();
-  assert.ok(out.includes('Just this') && !out.includes('click [open] to read'), out);
+  assert.ok(out.includes('Just this') && !out.includes(' ...'), out);
 
-  // "echo full" prints everything, as before.
   vm.run('SlashCmdList.WOWIE("echo full")');
-  assert.equal(vm.evaluate('WowieDB.settings.echo'), 'full');
-  reply('Line one\\nLine two\\nLine three\\n\\nTL;DR: Short.', 'Short.');
+  reply(text);
   out = prints();
-  assert.ok(out.includes('Line one') && out.includes('Line three') && out.includes('TL;DR: Short.'), out);
-  vm.run('SlashCmdList.WOWIE("echo summary")');
-  assert.equal(vm.evaluate('WowieDB.settings.echo'), 'summary');
-  vm.run('SlashCmdList.WOWIE("echo bogus")');
-  assert.equal(vm.evaluate('WowieDB.settings.echo'), 'summary', 'an unknown mode is ignored');
+  assert.ok(out.includes('The important answer.') && out.includes('Last detail.'), out);
 
-  // An install that still had the old default saved moves to summary once; a mode picked on purpose stays.
-  const vm2 = newVM();
-  vm2.run('WowieDB = { settings = { echo = "full" } }');
-  login(vm2);
-  assert.equal(vm2.evaluate('WowieDB.settings.echo'), 'summary');
-  const vm3 = newVM();
-  vm3.run('WowieDB = { settings = { echo = "short" } }');
-  login(vm3);
-  assert.equal(vm3.evaluate('WowieDB.settings.echo'), 'short');
-  const vm4 = newVM();
-  vm4.run('WowieDB = { settings = { echo = "full", echoV2 = true } }');
-  login(vm4);
-  assert.equal(vm4.evaluate('WowieDB.settings.echo'), 'full');
+  vm.run('SlashCmdList.WOWIE("echo off")');
+  reply('Only in the discussion');
+  assert.equal(prints(), '');
+
+  for (const [saved, expected] of [['summary', 'short'], ['full', 'full'], ['short', 'short'], ['off', 'off'], ['850', '850']]) {
+    const restored = newVM();
+    restored.run(`WowieDB = { settings = { echo = "${saved}" } }`);
+    login(restored);
+    assert.equal(restored.evaluate('WowieDB.settings.echo'), expected, `saved ${saved} choice`);
+  }
 });
 
 test('a restore bundle addressed to this session adds the missing chats once', () => {
@@ -1105,7 +1240,7 @@ test('a restore bundle addressed to this session adds the missing chats once', (
   const chatId = vm.evaluate('WowieDB.chats[1].id');
   const id = vm.num('WowieDB.chats[1].pendingId');
   const token = vm.evaluate('WowieDB.session');
-  const bundle = `restore = { token = "${token}", chats = { { id = "old1", name = "Old work", cwd = "C:\\\\old", messages = { { role = "user", id = 1, t = 1, text = "q" }, { role = "claude", id = 1, t = 2, text = "a" } } } } }`;
+  const bundle = `restore = { token = "${token}", id = "restore-bundle-001", chats = { { id = "old1", name = "Old work", cwd = "C:\\\\old", messages = { { role = "user", id = 1, t = 1, text = "q" }, { role = "claude", id = 1, t = 2, text = "a" } } } } }`;
   nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id}, nonce = "${vm.evaluate('WowieDB.chats[1].request.nonce')}", status = "done", text = "ok" } }, ${bundle} }`);
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
   assert.equal(vm.num('#WowieDB.chats'), 2);
@@ -1114,8 +1249,10 @@ test('a restore bundle addressed to this session adds the missing chats once', (
   // An older bridge's transcript says "claude"; it is read as an assistant reply from Claude.
   assert.equal(vm.evaluate('WowieDB.chats[1].history[2].role'), 'assistant');
   assert.equal(vm.evaluate('WowieDB.chats[1].history[2].agent'), 'claude');
-  assert.equal(vm.evaluate('WowieDB.restored'), 'true');
-  // A second bundle with the same token is ignored.
+  assert.equal(vm.evaluate('WowieDB.restored'), 'restore-bundle-001');
+  const restoreReceipt = P.parseControlOutbox(`["controlOutbox"] = "${vm.evaluate('WowieDB.controlOutbox')}"`).find(record => record.receipt === 'restore');
+  assert.equal(restoreReceipt.target, 'restore-bundle-001');
+  // A duplicate offer is acknowledged again without importing its chats twice.
   vm.run('Wowie.Send("again")');
   const id2 = vm.num('WowieDB.chats[2].pendingId');
   nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id2}, nonce = "${vm.evaluate('WowieDB.chats[2].request.nonce')}", status = "done", text = "ok" } }, ${bundle.replace('old1', 'old2')} }`);
@@ -1183,18 +1320,19 @@ test('chat actions target the chosen conversation and deletion waits for confirm
   assert.equal(vm.evaluate('WowieDB.chats[1].name'), 'Chat 1');
 });
 
-test('minimize collapses to the mini bar and back; the mini bar X hides everything', () => {
+test('minimize and Open preserve the workspace; explicit toggle still hides it', () => {
   const vm = newVM();
   login(vm);
   vm.run('Wowie.Toggle(true)');
   assert.equal(vm.evaluate('WowieFrame.shown'), 'true');
-  vm.run('Wowie.Minimize(true)');
+  vm.run('WowieInput:SetText("keep this draft"); WowieMinimize:GetScript("OnClick")(WowieMinimize)');
   assert.equal(vm.evaluate('WowieFrame.shown'), 'false');
   assert.equal(vm.evaluate('WowieMini.shown'), 'true');
   assert.equal(vm.evaluate('WowieDB.settings.minimized'), 'true');
-  vm.run('Wowie.Minimize(false)');
+  vm.run('WowieMiniOpen:GetScript("OnClick")(WowieMiniOpen)');
   assert.equal(vm.evaluate('WowieFrame.shown'), 'true');
   assert.equal(vm.evaluate('WowieMini.shown'), 'false');
+  assert.equal(vm.evaluate('WowieInput:GetText()'), 'keep this draft');
   vm.run('Wowie.Toggle(false)');
   assert.equal(vm.evaluate('WowieFrame.shown'), 'false');
   assert.equal(vm.evaluate('WowieMini.shown'), 'false');
@@ -1357,17 +1495,19 @@ test('hello and forget retries preserve their persisted operation identities', (
   vm.run('Wowie.NewChat("Delete me")');
   const chat = vm.evaluate('WowieDB.chats[2].id');
   vm.run(`Wowie.DeleteChat("${chat}")`);
-  const forget = stripRecords(vm).find(r => r.flags.split(';').includes('d'));
-  const nonce = P.parseFlags(forget.flags).nonce;
+  const forget = controlRecords(vm).find(record => record.forget);
+  const nonce = forget.nonce;
   assert.match(nonce, /^[A-Za-z0-9_-]{8,64}$/);
-  assert.equal(vm.evaluate(`WowieDB.forget["${chat}"].nonce`), nonce);
+  assert.equal(vm.evaluate(`WowieDB.forget["${nonce}"].chat`), chat);
   login(vm);
   vm.run('STUB.RunTimers()');
-  assert.deepEqual(stripRecords(vm).find(r => r.flags.split(';').includes('d')), forget);
+  assert.deepEqual(controlRecords(vm).find(record => record.forget), forget);
+  connect(vm);
+  assert.equal(P.parseFlags(stripRecords(vm).find(record => P.parseFlags(record.flags).forget).flags).nonce, nonce);
 });
 
-for (const version of [null, 0, 2]) {
-test(`new questions require advertised request protocol 1 (received ${version})`, () => {
+for (const version of [null, 0, 1]) {
+test(`new questions require advertised request protocol 2 (received ${version})`, () => {
   const vm = newVM();
   login(vm);
   vm.run('STUB.RunTimers()');
@@ -1461,7 +1601,7 @@ test('checking a pending reply preserves the next draft and never submits it aut
   vm.run('WowieInput:GetScript("OnEnterPressed")(WowieInput)');
   assert.equal(vm.evaluate('WowieDB.chats[1].pendingId'), null);
   assert.equal(vm.evaluate('WowieInput:GetText()'), draft);
-  assert.equal(vm.num('WowieDB.lastSeq'), vm.num('BEFORE'), 'reply checks cannot submit the next draft');
+  assert.ok(!stripRecords(vm).some(record => record.text.trim() === draft.trim()), 'reply checks cannot submit the next draft');
   vm.run('WowieCancelWait:GetScript("OnClick")(WowieCancelWait)');
   assert.equal(vm.evaluate('WowieInput:GetText()'), draft);
 });
@@ -1483,6 +1623,58 @@ test('filtered conversation rows retain their target IDs and a no-match search c
   assert.equal(vm.num('#WowieDB.chats'), 16);
   vm.run('WowieChatSearch:SetText("")');
   assert.equal(vm.evaluate('WowieChatRow16.chatId'), vm.evaluate('WowieDB.chats[16].id'));
+});
+
+test('compact sidebar rows keep long titles, metadata and actions in separate readable areas', () => {
+  const vm = newVM();
+  vm.run(`
+    local label = Wowie.UI.Label
+    Wowie.UI.Label = function(...)
+      local region = label(...)
+      region.SetWordWrap = function(self, wrap) self.wrap = wrap end
+      region.GetStringHeight = function(self)
+        local _, size = self:GetFont()
+        local lines = self.wrap == false and 1 or math.ceil(#self:GetText() * size * 0.58 / self:GetWidth())
+        return math.max(1, lines) * math.ceil(size * 1.2)
+      end
+      return region
+    end
+  `);
+  login(vm);
+  const title = 'A long conversation about researching quest rewards and comparing equipment for several classes';
+  vm.run(`
+    for i = 2, 16 do Wowie.NewChat("Conversation " .. i) end
+    WowieDB.chats[1].name = ${P.luaStr(title)}
+    WowieDB.chats[1].unread = 3
+    WowieDB.chats[1].cwd = "/projects/crafting"
+    WowieDB.chats[1].agent = "codex"
+    Wowie.RenderChatList()
+    WowieChatScroll:SetHeight(300)
+    local visible = 0
+    for i = 1, 16 do
+      local row = _G["WowieChatRow" .. i]
+      local title, detail, menu = row.label, row.detail, row.menu
+      local menuLeft = row:GetWidth() + menu.x - menu:GetWidth()
+      assert(title.x + title:GetWidth() < menuLeft, "title collides with actions")
+      assert(detail.x + detail:GetWidth() < menuLeft, "metadata collides with actions")
+      assert(-title.y + title:GetStringHeight() <= -detail.y, "title wraps into metadata")
+      assert(-detail.y + detail:GetStringHeight() <= row:GetHeight(), "metadata extends below its row")
+      if i > 1 then
+        local previous = _G["WowieChatRow" .. (i - 1)]
+        assert(-previous.y + previous:GetHeight() <= -row.y, "conversation hit areas overlap")
+      end
+      if -row.y + row:GetHeight() <= WowieChatScroll:GetHeight() then visible = visible + 1 end
+    end
+    assert(visible >= 6, "a 300px sidebar should show at least six complete conversation rows")
+    local last = WowieChatRow16
+    assert(WowieChatList:GetHeight() == -last.y + last:GetHeight(), "scroll range must end at the last conversation")
+    WowieChatRow1:GetScript("OnEnter")(WowieChatRow1)
+  `);
+  assert.equal(vm.evaluate('GameTooltip:GetText()'), title, 'hover exposes the full unshortened title');
+  assert.equal(vm.evaluate('WowieDB.chats[1].name'), title, 'ellipsis is presentation only');
+  assert.equal(vm.evaluate('WowieChatRow1.detail:GetText()'), '3 new · crafting · Codex');
+  vm.run('WowieChatSearch:SetText("Conversation 16"); WowieChatRow1:GetScript("OnEnter")(WowieChatRow1)');
+  assert.equal(vm.evaluate('GameTooltip:GetText()'), 'Conversation 16', 'a recycled row exposes its current conversation');
 });
 
 test('transcript redraws preserve reading position, remember each chat, and follow only at latest', () => {
@@ -1582,6 +1774,41 @@ test('recycled discussion bodies clear selections before binding another message
   assert.equal(vm.evaluate('WowieMessageText1:HasFocus()'), 'false');
   assert.equal(vm.evaluate('WowieMessageText1.highlightStart'), null);
   assert.equal(vm.evaluate('WowieMessageText1.highlightEnd'), null);
+});
+
+test('working animation advances without disturbing selections and stops when its bubble is reused', () => {
+  const vm = newVM();
+  login(vm);
+  connect(vm);
+  vm.run('Wowie.Send("Find the fishing requirement")');
+  const chat = vm.evaluate('WowieDB.chats[1].id');
+  const id = vm.num('WowieDB.chats[1].pendingId');
+  const nonce = vm.evaluate('WowieDB.chats[1].request.nonce');
+  const progress = 'search: WoW Forever fishing pole skill requirement';
+  nextSlot(vm, `{replies={{chat="${chat}",id=${id},nonce="${nonce}",status="working",text=${P.luaStr(progress)}}}}`);
+  vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
+  assert.equal(vm.evaluate('WowieMessageText2:GetText()'), progress);
+  assert.equal(vm.evaluate('WowieMessageActivity2:IsShown()'), 'true');
+  vm.run('WowieMessageText2:SetFocus(); WowieMessageText2:HighlightText(8, 20)');
+  const dots = 'table.concat({WowieMessageActivity2.dots[1]:GetAlpha(), WowieMessageActivity2.dots[2]:GetAlpha(), WowieMessageActivity2.dots[3]:GetAlpha()}, ",")';
+  const alpha = vm.evaluate(dots);
+  const seconds = vm.num('WowieMessageActivity2.seconds');
+  vm.run('STUB.Advance(0.25)');
+  assert.notEqual(vm.evaluate(dots), alpha, 'the pending strip visibly animates without new events');
+  vm.run('STUB.Advance(1)');
+  assert.ok(vm.num('WowieMessageActivity2.seconds') > seconds, 'elapsed time advances without tool output');
+  assert.equal(vm.evaluate('WowieMessageText2:HasFocus()'), 'true');
+  assert.equal(vm.num('WowieMessageText2.highlightStart'), 8);
+  assert.equal(vm.num('WowieMessageText2.highlightEnd'), 20);
+  vm.run('Wowie.NewChat("Other"); STUB.now = STUB.now + 3');
+  assert.equal(vm.evaluate('WowieMessageActivity2:GetScript("OnUpdate")'), null, 'hidden conversations stop animating');
+  vm.run(`Wowie.SwitchChat("${chat}"); STUB.Advance(0.25)`);
+  assert.ok(vm.num('WowieMessageActivity2.seconds') >= seconds + 4, 'switching chats does not restart the request clock');
+  nextSlot(vm, `{replies={{chat="${chat}",id=${id},nonce="${nonce}",status="done",text="Learn Fishing first."}}}`);
+  vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
+  assert.equal(vm.evaluate('WowieMessageText2:GetText()'), 'Learn Fishing first.');
+  assert.equal(vm.evaluate('WowieMessageActivity2:IsShown()'), 'false');
+  assert.equal(vm.evaluate('WowieMessageActivity2:GetScript("OnUpdate")'), null, 'finished replies never keep animating');
 });
 
 test('wrapped replies contain their painted text and actions after width changes', () => {
@@ -1904,4 +2131,37 @@ test('filtered two-pixel Quiet falls back to verified dark four-pixel cells and 
   acknowledgeDisplay(vm, 'quiet4');
   assert.equal(vm.evaluate('WowieStrip.display'), 'quiet4');
   assert.equal(vm.evaluate('WowieDB.chats[1].request.nonce'), nonce);
+});
+
+test('startup retires obsolete reload outboxes instead of reviving completed instructions', () => {
+  const vm = newVM();
+  vm.run(`
+    WowieDB = {activeChat="old-chat", chats={{id="old-chat",name="Existing chat",cwd="",history={{role="assistant",text="Already completed"}}}},
+      outbox={id=7,nonce="retired-question",chat="old-chat",text="7175657374696f6e"},
+      contextOutbox={id=7,nonce="retired-question",chat="old-chat",request="retired-query",text="5b5d"}}
+  `);
+  login(vm);
+  assert.equal(vm.evaluate('WowieDB.outbox'), null);
+  assert.equal(vm.evaluate('WowieDB.contextOutbox'), null);
+  assert.equal(vm.evaluate('WowieDB.chats[1].history[1].text'), 'Already completed');
+});
+
+test('a pre-upgrade last-chat deletion cannot tombstone its replacement generation', () => {
+  const vm = newVM();
+  vm.run(`
+    WowieDB = {lastSeq=8,activeChat="old-chat",chats={{id="old-chat",name="Chat 1",cwd="",history={}}},
+      forget={["old-chat"]={id=8,nonce="legacy-forget-0001"}}}
+  `);
+  login(vm);
+  const generation = vm.evaluate('WowieDB.chats[1].generation');
+  assert.notEqual(generation, controlRecords(vm)[0].generation);
+  connect(vm);
+  vm.run('Wowie.Send("A replacement question")');
+  const request = questionRecord(vm, 'A replacement question');
+  const flags = P.parseFlags(request.flags);
+  assert.equal(flags.generation, generation);
+  assert.equal(flags.newSession, true);
+  login(vm);
+  assert.equal(vm.evaluate('WowieDB.chats[1].generation'), generation);
+  assert.equal(controlRecords(vm).find(record => record.forget).nonce, 'legacy-forget-0001');
 });

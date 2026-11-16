@@ -62,7 +62,7 @@ test('bridge waits for selected data, asks the real permission gate, resumes the
   fs.mkdirSync(path.dirname(inbox), { recursive: true });
   fs.mkdirSync(path.join(dir, 'project'));
   fs.writeFileSync(path.join(addons, 'Wowie/Wowie.toc'), '## Interface: 16001\n');
-  for (const name of ['bridge.js', 'agents.js', 'protocol.js', 'context.js']) fs.copyFileSync(path.join(ROOT, 'bridge', name), path.join(dir, name));
+  for (const name of fs.readdirSync(path.join(ROOT, 'bridge')).filter(name => name.endsWith('.js') || name === 'ownership.ps1')) fs.copyFileSync(path.join(ROOT, 'bridge', name), path.join(dir, name));
   const agent = path.join(dir, 'agent.js');
   fs.writeFileSync(agent, `
     let input = ''; process.stdin.on('data', data => input += data);
@@ -86,7 +86,7 @@ test('bridge waits for selected data, asks the real permission gate, resumes the
   `);
   const profile = JSON.stringify({ version: 1, capturedAt: 1, enabled: ['inventory'], data: { inventory: Array.from({ length: 1800 }, (_, i) => ({ id: i, name: 'Épée-' + i })), tail: 'PROFILE_END_SENTINEL' } });
   const hex = text => Buffer.from(text).toString('hex');
-  const state = (response, nonce = 'owner-000001') => `WowieDB = { ["outbox"] = { ["id"] = 1, ["session"] = "token", ["chat"] = "chat", ["nonce"] = "owner-000001", ["text"] = "${hex('What can you tell me?')}", ["profile"] = "${hex(profile)}" }${response ? `, ["contextOutbox"] = { ["id"] = 1, ["session"] = "token", ["chat"] = "chat", ["nonce"] = "${nonce}", ["request"] = "1-1", ["text"] = "${hex(response)}" }` : ''} }`;
+  const state = (response, nonce = 'owner-000001') => `WowieDB = { ["outbox"] = { ["id"] = 1, ["session"] = "token", ["chat"] = "chat", ["generation"] = "generation-0001", ["nonce"] = "owner-000001", ["text"] = "${hex('What can you tell me?')}", ["profile"] = "${hex(profile)}" }${response ? `, ["contextOutbox"] = { ["id"] = 1, ["session"] = "token", ["chat"] = "chat", ["generation"] = "generation-0001", ["nonce"] = "${nonce}", ["request"] = "${vm.get('Wowie_Inbox.replies[1].request')}", ["text"] = "${hex(response)}" }` : ''} }`;
   fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({lastId:0,sessions:{},handled:{},context:{text:'PRIVATE_DISABLED_IDENTITY_OLD'}}));
   fs.writeFileSync(saved, state());
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ addonDir: addons, savedVariablesFile: saved, defaultCwd: path.join(dir, 'project'), agent: 'claude', agents: {claude:{path:agent}}, capture:{enabled:false}, primerFile:'', timeoutMs:15000, pollMs:25, slots:1 }));
@@ -97,7 +97,7 @@ test('bridge waits for selected data, asks the real permission gate, resumes the
   const exited = new Promise(resolve => child.on('exit', code => resolve(code)));
   t.after(async () => { if (child.exitCode === null) { child.kill(); await exited; } fs.rmSync(dir, { recursive: true, force: true }); });
   assert.equal(await waiting, 'context_query', output);
-  assert.equal(vm.get('Wowie_Inbox.requestProtocol'), '1');
+  assert.equal(vm.get('Wowie_Inbox.requestProtocol'), '2');
   assert.equal(vm.get('Wowie_Inbox.replies[1].nonce'), 'owner-000001');
   assert.equal(vm.get('Wowie_Inbox.map.layers[1].name'), 'before-context', 'map side effects must be published before a read-only continuation waits');
   const response = vm.get('WowieContext.Query(Wowie_Inbox.replies[1].queries[1])');
@@ -127,7 +127,7 @@ test('smart sharing supplies action bars and Auctionator on demand without broad
   fs.mkdirSync(path.dirname(inbox), { recursive: true });
   fs.mkdirSync(path.join(dir, 'project'));
   fs.writeFileSync(path.join(addons, 'Wowie/Wowie.toc'), '## Interface: 16001\n');
-  for (const name of ['bridge.js', 'agents.js', 'protocol.js', 'context.js']) {
+  for (const name of fs.readdirSync(path.join(ROOT, 'bridge')).filter(name => name.endsWith('.js') || name === 'ownership.ps1')) {
     fs.copyFileSync(path.join(ROOT, 'bridge', name), path.join(dir, name));
   }
   const vm = addonVM();
@@ -189,7 +189,7 @@ test('smart sharing supplies action bars and Auctionator on demand without broad
     });
   `);
   const hex = text => Buffer.from(text).toString('hex');
-  const savedState = response => `WowieDB = {["outbox"]={["id"]=1,["session"]="smartsession",["chat"]="smartchat",["nonce"]="smart-owner-0001",["text"]="${hex('What is on my action bars, and what is Wool Cloth worth?')}",["profile"]="${hex(profile)}"}${response ? `,["contextOutbox"]={["id"]=1,["session"]="smartsession",["chat"]="smartchat",["nonce"]="smart-owner-0001",["request"]="1-1",["text"]="${hex(response)}"}` : ''}}`;
+  const savedState = response => `WowieDB = {["outbox"]={["id"]=1,["session"]="smartsession",["chat"]="smartchat",["generation"]="generation-0001",["nonce"]="smart-owner-0001",["text"]="${hex('What is on my action bars, and what is Wool Cloth worth?')}",["profile"]="${hex(profile)}"}${response ? `,["contextOutbox"]={["id"]=1,["session"]="smartsession",["chat"]="smartchat",["generation"]="generation-0001",["nonce"]="smart-owner-0001",["request"]="${vm.get('Wowie_Inbox.replies[1].request')}",["text"]="${hex(response)}"}` : ''}}`;
   fs.writeFileSync(saved, savedState());
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
     addonDir: addons, savedVariablesFile: saved, defaultCwd: path.join(dir, 'project'),
@@ -251,7 +251,7 @@ function bridgeSandbox(t, initialState, options = {}) {
   const slots = Array.from({ length: options.slots || 1 }, (_, i) => path.join(addons, 'Wowie_S' + P.pad3(i + 1), 'Inbox.lua'));
   for (const file of slots) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, ''); }
   if (options.presence) fs.mkdirSync(path.join(addons, 'Wowie/presence'));
-  for (const name of ['bridge.js', 'agents.js', 'protocol.js', 'context.js']) fs.copyFileSync(path.join(ROOT, 'bridge', name), path.join(dir, name));
+  for (const name of fs.readdirSync(path.join(ROOT, 'bridge')).filter(name => name.endsWith('.js') || name === 'ownership.ps1')) fs.copyFileSync(path.join(ROOT, 'bridge', name), path.join(dir, name));
   const calls = path.join(dir, 'calls.jsonl');
   const agent = path.join(dir, 'agent.js');
   fs.writeFileSync(agent, `
@@ -261,7 +261,8 @@ function bridgeSandbox(t, initialState, options = {}) {
     process.stdin.on('end', () => {
       if (!input) return;
       const calls = path.join(__dirname, 'calls.jsonl');
-      fs.appendFileSync(calls, JSON.stringify({started: true, input}) + '\\n');
+      fs.appendFileSync(calls, JSON.stringify({started: true, input, argv: process.argv, pid: process.pid}) + '\\n');
+      ${options.descendant ? `if (fs.readFileSync(calls, 'utf8').trim().split('\\n').length === 1) { const child = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio:'ignore'}); child.unref(); fs.writeFileSync(path.join(__dirname, 'descendant'), String(child.pid)); }` : ''}
       const attempt = fs.readFileSync(calls, 'utf8').trim().split('\\n').length;
       let progressed = false;
       const timer = setInterval(() => {
@@ -271,7 +272,7 @@ function bridgeSandbox(t, initialState, options = {}) {
         }
         if (!fs.existsSync(path.join(__dirname, 'release-' + attempt))) return;
         clearInterval(timer);
-        const result = ${options.query ? "attempt === 1 ? '```wowcontext\\n{\"op\":\"snapshot\",\"category\":\"inventory\"}\\n```' :" : ''} 'Question completed.\\n\\nTL;DR:\\nDone.';
+        const result = ${options.queryEvery ? "attempt % 2 === 1 ? '```wowcontext\\n{\"op\":\"snapshot\",\"category\":\"inventory\"}\\n```' :" : options.query ? "attempt === 1 ? '```wowcontext\\n{\"op\":\"snapshot\",\"category\":\"inventory\"}\\n```' :" : ''} ${JSON.stringify(options.replyText || 'Question completed.\n\nTL;DR:\nDone.')};
         console.log(JSON.stringify({type:'result',session_id:'identity-thread',subtype:'success',result}));
       }, 10);
     });
@@ -314,24 +315,30 @@ function bridgeSandbox(t, initialState, options = {}) {
     fs.watch(__dirname, inspect); inspect();
     setInterval(() => { if (process.ppid !== parent) process.exit(); }, 25);
   `);
+  if (options.capture) fs.writeFileSync(path.join(dir, 'capture.js'),
+    `const path = require('node:path'); exports.captureCommand = () => [process.execPath, [path.join(__dirname, 'capture_x11.py')]];`);
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ addonDir: addons, savedVariablesFile: saved, defaultCwd: path.join(dir, 'project'), agent: 'claude', agents: Object.fromEntries(A.agentIds().map(id => [id, {path:agent}])), capture:{enabled:!!options.capture, python:process.execPath, intervalMs:options.captureIntervalMs}, primerFile:'', timeoutMs:15000, pollMs:25, slots:slots.length, presenceIntervalMs:options.presenceIntervalMs, presenceMax:options.presenceMax, maxParallel:options.maxParallel, progressWriteMs:options.progressWriteMs }));
-  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(initialState));
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({lastId: 0, sessions: {}, handled: {}, ...initialState}));
   const children = [];
   const start = (args = ['--once']) => {
     const child = spawn(process.execPath, [...(options.clock || options.presence ? ['--require', clockPreload] : []), 'bridge.js', ...args], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
     child.stdout.on('data', data => output += data); child.stderr.on('data', data => output += data);
     const exited = new Promise(resolve => child.on('exit', code => resolve(code)));
-    const result = { child, exited, output: () => output };
+    const closed = new Promise(resolve => child.on('close', code => resolve(code)));
+    const result = { child, exited, closed, output: () => output };
     children.push(result);
     return result;
   };
   t.after(async () => {
-    for (const { child, exited } of children) if (child.exitCode === null && child.signalCode === null) { child.kill(); await exited; }
+    for (const { child, closed } of children) {
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+      await closed;
+    }
     fs.rmSync(dir, { recursive: true, force: true });
   });
   const write = source => { fs.writeFileSync(saved + '.tmp', source); fs.renameSync(saved + '.tmp', saved); };
-  const outbox = (nonce, chat = 'chat', id = 146) => `WowieDB = { ["outbox"] = { ["id"] = ${id}, ["session"] = "token", ["chat"] = "${chat}", ${nonce == null ? '' : `["nonce"] = "${nonce}",`} ["text"] = "${Buffer.from('The same player question').toString('hex')}" } }`;
+  const outbox = (nonce, chat = 'chat', id = 146, generation = 'generation-0001') => `WowieDB = { ["outbox"] = { ["id"] = ${id}, ["session"] = "token", ["chat"] = "${chat}", ["generation"] = "${generation}", ${nonce == null ? '' : `["nonce"] = "${nonce}",`} ["text"] = "${Buffer.from('The same player question').toString('hex')}" } }`;
   const release = attempt => fs.writeFileSync(path.join(dir, 'release-' + attempt), '');
   const callCount = () => fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').length : 0;
   const messages = (chat = 'chat') => JSON.parse(fs.readFileSync(path.join(dir, 'transcripts.json'), 'utf8')).chats[chat].messages;
@@ -576,7 +583,7 @@ test('a restarted bridge acknowledges a received historic hello retry, but never
   assert.equal(vm.get('Wowie_Inbox.connectionAck.session'), session);
   assert.equal(vm.get('Wowie_Inbox.connectionAck.at'), String(receivedAt));
   assert.equal(fs.readFileSync(path.join(fixture.dir, 'state.json'), 'utf8'), before, 'a received duplicate does not rewrite persistent receipts or context');
-  assert.equal(fs.existsSync(path.join(fixture.dir, 'transcripts.json')), false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(fixture.dir, 'transcripts.json'), 'utf8')).chats, {});
   assert.equal(fixture.callCount(), 0);
 });
 
@@ -584,8 +591,7 @@ test('malformed hello input cannot mint an acknowledgement or prevent a later va
   const fixture = bridgeSandbox(t, { lastId: 0, sessions: {}, handled: {} }, { clock: true, capture: true, presenceIntervalMs: 25 });
   const vm = addonVM(), initial = fixture.advance(0), running = fixture.start([]);
   await waitClock(fixture, vm, initial);
-  fixture.strip(['token', 'chat', '1', '', 'h;nonce=bad', 'Chat', ''].join('\x1f'), 1);
-  await waitFor(() => running.output().includes('rejected: Request protocol 1'));
+  await capturePacket(fixture, running, ['token', 'chat', '1', '', 'h;nonce=bad', 'Chat', ''].join('\x1f'), 1);
   await waitClock(fixture, vm, fixture.advance(2));
   assert.equal(vm.get('Wowie_Inbox.connectionProtocol'), '1');
   assert.equal(vm.get('Wowie_Inbox.connectionAck'), null);
@@ -612,7 +618,7 @@ test('an old hello id runs a new nonce, queued reused ids stay distinct, and ret
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(fixture.callCount(), 1, 'a retry while running must not start another agent');
   fixture.write(fixture.outbox('question-000147'));
-  await waitFor(() => fs.readFileSync(path.join(fixture.dir, 'bridge.log'), 'utf8').includes('#146@token queued'));
+  await waitReply(fixture, vm, 'question-000147', 'queued');
   fixture.write(fixture.outbox('question-000147') + '\n-- queued retry');
   await new Promise(resolve => setTimeout(resolve, 100));
   const secondWorking = waitInbox(fixture.inbox, vm, status => status === 'working' && vm.get('Wowie_Inbox.replies[1].nonce') === 'question-000147');
@@ -621,7 +627,7 @@ test('an old hello id runs a new nonce, queued reused ids stay distinct, and ret
   const done = waitInbox(fixture.inbox, vm, status => status === 'done' && vm.get('Wowie_Inbox.replies[1].nonce') === 'question-000147');
   fixture.release(2);
   await done;
-  running.child.kill(); await running.exited;
+  running.child.kill(); await running.closed;
   assert.equal(fixture.callCount(), 2);
   assert.equal(fixture.messages().filter(message => message.role === 'user').length, 2);
   assert.equal(fixture.messages().filter(message => message.role === 'assistant').length, 2);
@@ -643,7 +649,7 @@ test('nonce-less input cannot finish an old client question, run an AI or poison
   assert.equal(await rejected.exited, 1, rejected.output());
   assert.equal(fixture.callCount(), 0);
   vm.run(fs.readFileSync(fixture.inbox, 'utf8'));
-  assert.equal(vm.get('Wowie_Inbox.requestProtocol'), '1');
+  assert.equal(vm.get('Wowie_Inbox.requestProtocol'), '2');
   assert.equal(vm.get('#Wowie_Inbox.replies'), '0', 'compatibility metadata cannot complete the old pending question');
   assert.equal(JSON.parse(fs.readFileSync(path.join(fixture.dir, 'state.json'), 'utf8')).handledNonces, undefined);
   fixture.write(fixture.outbox('recovered-000146'));
@@ -654,14 +660,14 @@ test('nonce-less input cannot finish an old client question, run an AI or poison
   assert.equal(fixture.messages().filter(message => message.role === 'user').length, 1);
 });
 
-test('inject mints a fresh nonce for every invocation and publishes protocol 1 replies', async t => {
+test('inject mints a fresh nonce for every invocation and publishes protocol 2 replies', async t => {
   const fixture = bridgeSandbox(t, { lastId: 0, sessions: {}, handled: {} }), vm = addonVM(), nonces = [];
   for (let attempt = 1; attempt <= 2; attempt++) {
     fixture.release(attempt);
     const injected = fixture.start(['--inject', 'A deterministic CLI question']);
     assert.equal(await injected.exited, 0, injected.output());
     vm.run(fs.readFileSync(fixture.inbox, 'utf8'));
-    assert.equal(vm.get('Wowie_Inbox.requestProtocol'), '1');
+    assert.equal(vm.get('Wowie_Inbox.requestProtocol'), '2');
     assert.equal(vm.get('Wowie_Inbox.replies[1].status'), 'done');
     const nonce = vm.get('Wowie_Inbox.replies[1].nonce');
     assert.match(nonce, /^[A-Za-z0-9_-]{8,64}$/);
@@ -706,7 +712,7 @@ test('calibration echoes only validated capture provenance, retries retain actua
   assert.equal(vm.get('Wowie_Inbox.transport.captureIntervalMs'), '75');
   assert.equal(vm.get('Wowie_Inbox.transport.frameIntervalMs'), '150');
   assert.equal(vm.get('table.concat(Wowie_Inbox.transport.displays, ",")'), 'robust,compact,quiet,quiet4');
-  assert.equal(vm.get('Wowie_Inbox.requestProtocol'), '1');
+  assert.equal(vm.get('Wowie_Inbox.requestProtocol'), '2');
   assert.equal(vm.get('Wowie_Inbox.connectionProtocol'), '1');
   assert.equal(vm.get('Wowie_Inbox.contextProtocol'), '2');
   assert.equal(fixture.pulses().length, 0, 'idle slot clocks are not readiness boundaries');
@@ -757,7 +763,7 @@ test('complete queued receipts publish promptly across chats without partial, pr
   assert.equal(vm.get('Wowie_Inbox.transport.captureIntervalMs'), '50');
   assert.equal(vm.get('Wowie_Inbox.transport.frameIntervalMs'), '100');
   const busyNonce = 'busy-chat-000001', nonce = 'queued-chat-000001';
-  const record = (chat, owner, flags, text) => ['token', chat, '146', '', `nonce=${owner}${flags ? ';' + flags : ''}`, chat, text].join('\x1f');
+  const record = (chat, owner, flags, text) => ['token', chat, '146', '', `nonce=${owner};generation=generation-0001${flags ? ';' + flags : ''}`, chat, text].join('\x1f');
   await capturePacket(fixture, running, record('busy', busyNonce, '', 'First fixture question'));
   await waitReply(fixture, vm, busyNonce, 'working');
   await waitFor(() => fixture.callCount() === 1 && fixture.pulses().length >= 1);
@@ -812,7 +818,7 @@ test('new context query rounds and results notify once while stale nonce respons
   const vm = addonVM(), nonce = 'query-owner-000001';
   const profile = JSON.stringify({ version: 1, enabled: ['inventory'], data: { inventory: [] } });
   const hex = text => Buffer.from(text).toString('hex');
-  const state = (responseNonce, request = '146-1') => fixture.outbox(nonce).replace('["text"]', `["profile"] = "${hex(profile)}", ["text"]`).replace(/ } }$/, `${responseNonce ? ` }, ["contextOutbox"] = { ["id"] = 146, ["session"] = "token", ["chat"] = "chat", ["nonce"] = "${responseNonce}", ["request"] = "${request}", ["text"] = "${hex('[{"ok":true,"data":{"inventory":[]}}]')}"` : ''} } }`);
+  const state = (responseNonce, request) => fixture.outbox(nonce).replace('["text"]', `["profile"] = "${hex(profile)}", ["text"]`).replace(/ } }$/, `${responseNonce ? ` }, ["contextOutbox"] = { ["id"] = 146, ["session"] = "token", ["chat"] = "chat", ["generation"] = "generation-0001", ["nonce"] = "${responseNonce}", ["request"] = "${request || batch}", ["text"] = "${hex('[{"ok":true,"data":{"inventory":[]}}]')}"` : ''} } }`);
   fixture.write(state());
   fixture.start([]);
   await waitReply(fixture, vm, nonce, 'working');
@@ -822,6 +828,7 @@ test('new context query rounds and results notify once while stale nonce respons
   await waitReply(fixture, vm, nonce, 'context_query');
   await waitFor(() => fixture.pulses().length >= 2);
   assertPulse(fixture, vm, 1, nonce, 'context_query');
+  const batch = replyField(vm, nonce, 'request');
   fixture.write(state('query-stale-000001'));
   await waitClock(fixture, vm, fixture.advance(1));
   assert.equal(replyField(vm, nonce), 'context_query');
@@ -888,4 +895,296 @@ test('a final validation error publishes nonce-correlated readiness once without
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(fixture.callCount(), 0);
   assert.equal(fixture.pulses().length, 1, 'replayed errors and idle publications do not spend more flags');
+});
+
+function controlState(kind, nonce, target = '', chat = 'chat', generation = 'generation-0001', session = 'token') {
+  const flags = kind === 'forget' ? 'd' : `receipt=${kind};target=${target}`;
+  const record = [session, chat, '900', '', `${flags};nonce=${nonce};generation=${generation}`, '', ''].join('\x1f');
+  return `WowieDB = { ["controlOutbox"] = "${Buffer.from(record).toString('hex')}" }`;
+}
+
+async function receipt(fixture, vm, kind, nonce, chat = 'chat', session = 'token') {
+  await waitFor(() => {
+    if (!fs.existsSync(fixture.inbox)) return false;
+    vm.run(fs.readFileSync(fixture.inbox, 'utf8'));
+    return vm.get(`(function() for _, r in ipairs(Wowie_Inbox.receipts or {}) do if r.kind == ${P.luaStr(kind)} and r.nonce == ${P.luaStr(nonce)} and r.chat == ${P.luaStr(chat)} and r.session == ${P.luaStr(session)} then return true end end end)()`) === 'true';
+  });
+}
+
+test('control receipt snapshots stay bounded while old durable acknowledgements remain replayable', async t => {
+  const fixture = bridgeSandbox(t, {}), vm = addonVM();
+  fixture.start([]);
+  for (let i = 0; i < 70; i++) {
+    const nonce = `bounded-forget-${String(i).padStart(4, '0')}`;
+    fixture.write(controlState('forget', nonce));
+    await receipt(fixture, vm, 'forget', nonce);
+    assert.ok(Number(vm.get('#Wowie_Inbox.receipts')) <= 64);
+  }
+  const first = 'bounded-forget-0000';
+  assert.equal(vm.get(`(function() for _, r in ipairs(Wowie_Inbox.receipts) do if r.nonce == "${first}" then return true end end return false end)()`), 'false');
+  fixture.write(controlState('forget', first));
+  await receipt(fixture, vm, 'forget', first);
+  assert.ok(Number(vm.get('#Wowie_Inbox.receipts')) <= 64, 'replaying an older acknowledgement keeps the window bounded');
+  assert.equal(fixture.callCount(), 0);
+});
+
+async function stopBridge(running, signal = 'SIGTERM') {
+  running.child.kill(signal);
+  await running.closed;
+}
+
+function queryState(fixture, nonce, batch, generation = 'generation-0001') {
+  return fixture.outbox(nonce, 'chat', 146, generation).replace(/ } }$/, ` }, ["contextOutbox"] = { ["id"]=146, ["session"]="token", ["chat"]="chat", ["generation"]="${generation}", ["nonce"]="${nonce}", ["request"]="${batch}", ["text"]="${Buffer.from('[{"ok":true,"data":{"inventory":[]}}]').toString('hex')}" } }`);
+}
+
+test('full final replies survive restart, receipt retries and saved-data rollback without another provider turn', async t => {
+  const answer = 'Question completed.\n' + 'Detailed answer preserved across recovery.\n'.repeat(300) + 'End.';
+  const fixture = bridgeSandbox(t, {}, {replyText: answer}), vm = addonVM(), nonce = 'replay-owner-0001';
+  fixture.write(fixture.outbox(nonce));
+  fixture.release(1);
+  let running = fixture.start([]);
+  await waitReply(fixture, vm, nonce, 'done');
+  const text = replyField(vm, nonce, 'text');
+  assert.equal(text, answer, 'journal retains the full answer beyond the transcript copy limit');
+  await stopBridge(running, 'SIGKILL');
+  running = fixture.start([]);
+  await waitReply(fixture, vm, nonce, 'done');
+  assert.equal(replyField(vm, nonce, 'text'), text);
+  fixture.write(controlState('reply', 'reply-receipt-0001', nonce));
+  await receipt(fixture, vm, 'reply', 'reply-receipt-0001');
+  await stopBridge(running);
+  running = fixture.start([]);
+  await receipt(fixture, vm, 'reply', 'reply-receipt-0001');
+  fixture.write(fixture.outbox(nonce));
+  await waitReply(fixture, vm, nonce, 'done');
+  assert.equal(replyField(vm, nonce, 'text'), text);
+  assert.equal(fixture.callCount(), 1);
+  assert.equal(fixture.messages().filter(m => m.role === 'user').length, 1);
+});
+
+test('owner death interrupts uncertain work, cleans descendants and resumes durable queued work once', async t => {
+  const fixture = bridgeSandbox(t, {}, {maxParallel: 1, descendant: true}), vm = addonVM();
+  fixture.write(fixture.outbox('interrupted-owner-0001', 'busy'));
+  const running = fixture.start([]);
+  await waitFor(() => fixture.callCount() === 1 && fs.existsSync(path.join(fixture.dir, 'descendant')));
+  const pids = [fixture.callsRead()[0].pid, Number(fs.readFileSync(path.join(fixture.dir, 'descendant'), 'utf8'))];
+  t.after(() => { for (const pid of pids) { try { process.kill(pid); } catch {} } });
+  fixture.write(fixture.outbox('queued-owner-0001', 'waiting'));
+  await waitReply(fixture, vm, 'queued-owner-0001', 'queued');
+  await stopBridge(running, 'SIGKILL');
+  await waitFor(() => pids.every(pid => {
+    try {
+      process.kill(pid, 0);
+      // Linux zombies have exited and cannot execute; container init may reap later.
+      return process.platform === 'linux' && /\) Z /.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf8'));
+    } catch (error) { return error.code === 'ESRCH' || error.code === 'ENOENT'; }
+  }));
+  fixture.write('WowieDB = {}');
+  fixture.release(2);
+  fixture.start([]);
+  await waitReply(fixture, vm, 'queued-owner-0001', 'done');
+  fixture.write(fixture.outbox('interrupted-owner-0001', 'busy'));
+  await waitReply(fixture, vm, 'interrupted-owner-0001', 'error');
+  assert.equal(fixture.callCount(), 2);
+  assert.equal(fixture.messages('waiting').filter(m => m.role === 'user').length, 1);
+});
+
+test('durable context waits retain exact batch identity and resume the provider conversation after restart', async t => {
+  const fixture = bridgeSandbox(t, {}, {queryEvery: true, clock: true, presenceIntervalMs: 25}), vm = addonVM(), nonce = 'context-recovery-0001';
+  fixture.write(withProfile(fixture.outbox(nonce)));
+  fixture.release(1);
+  const running = fixture.start([]);
+  await waitReply(fixture, vm, nonce, 'context_query');
+  const batch = replyField(vm, nonce, 'request');
+  assert.ok(batch);
+  await stopBridge(running);
+  fixture.write('WowieDB = {}');
+  fixture.start([]);
+  await waitReply(fixture, vm, nonce, 'context_query');
+  assert.equal(replyField(vm, nonce, 'request'), batch);
+  fixture.write(queryState(fixture, nonce, batch));
+  await waitFor(() => fixture.callCount() === 2);
+  assert.ok(fixture.callsRead()[1].argv.includes('--resume'));
+  assert.ok(fixture.callsRead()[1].input.includes('[Read-only addon query results:'));
+  fixture.release(2);
+  await waitReply(fixture, vm, nonce, 'done');
+  fixture.write(withProfile(fixture.outbox('context-recovery-0002')));
+  fixture.release(3);
+  await waitReply(fixture, vm, 'context-recovery-0002', 'context_query');
+  const nextBatch = replyField(vm, 'context-recovery-0002', 'request');
+  assert.notEqual(nextBatch, batch);
+  fixture.write(queryState(fixture, 'context-recovery-0002', batch));
+  await waitClock(fixture, vm, fixture.advance(1));
+  assert.equal(fixture.callCount(), 3, 'an old batch cannot resume a newer same-id request');
+  assert.equal(replyField(vm, 'context-recovery-0002'), 'context_query');
+  fixture.write(queryState(fixture, 'context-recovery-0002', nextBatch));
+  fixture.release(4);
+  await waitReply(fixture, vm, 'context-recovery-0002', 'done');
+  assert.equal(fixture.callCount(), 4);
+  assert.equal(fixture.messages().filter(m => m.role === 'user').length, 2);
+});
+
+test('superseded providers asking for context cannot block the latest same-chat question', async t => {
+  const fixture = bridgeSandbox(t, {}, {query: true, maxParallel: 1}), vm = addonVM();
+  fixture.write(withProfile(fixture.outbox('superseded-owner-0001')));
+  fixture.start([]);
+  await waitFor(() => fixture.callCount() === 1);
+  fixture.write(fixture.outbox('latest-owner-000001'));
+  await waitReply(fixture, vm, 'latest-owner-000001', 'queued');
+  fixture.release(1);
+  await waitFor(() => fixture.callCount() === 2);
+  fixture.release(2);
+  await waitReply(fixture, vm, 'latest-owner-000001', 'done');
+  assert.equal(fixture.callCount(), 2);
+  assert.ok(!fixture.callsRead()[1].input.includes('[Read-only addon query results:'));
+});
+
+test('forget receipts retire queued and late running work, survive retries and isolate a new generation', async t => {
+  const fixture = bridgeSandbox(t, {}, {maxParallel: 1}), vm = addonVM();
+  fixture.write(fixture.outbox('forgotten-running-0001'));
+  let running = fixture.start([]);
+  await waitFor(() => fixture.callCount() === 1);
+  fixture.write(fixture.outbox('forgotten-queued-0001'));
+  await waitReply(fixture, vm, 'forgotten-queued-0001', 'queued');
+  const forget = controlState('forget', 'forget-control-0001');
+  fixture.write(forget);
+  await receipt(fixture, vm, 'forget', 'forget-control-0001');
+  fixture.release(1);
+  await waitFor(() => {
+    try { process.kill(fixture.callsRead()[0].pid, 0); return false; }
+    catch (error) { return error.code === 'ESRCH'; }
+  });
+  await stopBridge(running);
+  running = fixture.start([]);
+  await receipt(fixture, vm, 'forget', 'forget-control-0001');
+  fixture.write(fixture.outbox('fresh-generation-0001', 'chat', 146, 'generation-0002'));
+  fixture.release(2);
+  await waitReply(fixture, vm, 'fresh-generation-0001', 'done');
+  assert.equal(fixture.callCount(), 2);
+  assert.ok(!fixture.callsRead()[1].argv.includes('--resume'), 'forgotten provider session must not leak into the new incarnation');
+  assert.equal(fixture.messages().filter(m => m.role === 'user').length, 1);
+  fixture.write(controlState('forget', 'late-forget-control', '', 'chat', 'generation-0001'));
+  await receipt(fixture, vm, 'forget', 'late-forget-control');
+  fixture.write(fixture.outbox('after-late-forget', 'chat', 147, 'generation-0002'));
+  fixture.release(3);
+  await waitReply(fixture, vm, 'after-late-forget', 'done');
+  assert.ok(fixture.callsRead()[2].argv.includes('--resume'), 'a late old-generation deletion cannot erase the replacement session');
+  assert.equal(fixture.messages().filter(m => m.role === 'user').length, 2);
+});
+
+test('only one live bridge owns an installation and owner death permits recovery', async t => {
+  const fixture = bridgeSandbox(t, {}), vm = addonVM();
+  fixture.write(fixture.outbox('singleton-owner-0001'));
+  const first = fixture.start([]);
+  await waitFor(() => fixture.callCount() === 1);
+  const second = fixture.start([]);
+  await waitFor(() => second.child.exitCode !== null || second.child.signalCode !== null);
+  assert.notEqual(await second.exited, 0, second.output());
+  assert.equal(fixture.callCount(), 1);
+  fixture.release(1);
+  await waitReply(fixture, vm, 'singleton-owner-0001', 'done');
+  await stopBridge(first, 'SIGKILL');
+  fixture.write(fixture.outbox('singleton-owner-0002'));
+  fixture.release(2);
+  fixture.start([]);
+  await waitReply(fixture, vm, 'singleton-owner-0002', 'done');
+  assert.equal(fixture.callCount(), 2);
+});
+
+function withProfile(source) {
+  const profile = JSON.stringify({version: 1, enabled: ['inventory'], data: {inventory: []}});
+  return source.replace('["text"]', `["profile"]="${Buffer.from(profile).toString('hex')}", ["text"]`);
+}
+
+test('profile waits survive restart and forgotten fragments cannot resurrect old generations', async t => {
+  const fixture = bridgeSandbox(t, {}, {capture: true}), vm = addonVM(), nonce = 'profile-recovery-0001';
+  const record = (owner, flags, text = '') => ['token', 'chat', '146', '', `nonce=${owner};generation=generation-0001;${flags}`, 'Chat', text].join('\x1f');
+  let running = fixture.start([]);
+  await capturePacket(fixture, running, record(nonce, 'profile=146', 'Read selected inventory'));
+  await waitReply(fixture, vm, nonce, 'context');
+  fixture.clearStrip();
+  await stopBridge(running);
+  running = fixture.start([]);
+  await waitReply(fixture, vm, nonce, 'context');
+  const payload = Buffer.from(JSON.stringify({version: 1, enabled: ['inventory'], data: {inventory: []}})).toString('base64');
+  await capturePacket(fixture, running, record(nonce, 'data=profile;profile=146;encoding=b64;part=1/1', payload));
+  await waitFor(() => fixture.callCount() === 1);
+  fixture.release(1);
+  await waitReply(fixture, vm, nonce, 'done');
+  const forgotten = 'profile-forgotten-0001';
+  await capturePacket(fixture, running, record(forgotten, 'profile=146', 'Never run this'));
+  await waitReply(fixture, vm, forgotten, 'context');
+  fixture.write(controlState('forget', 'profile-forget-0001'));
+  await receipt(fixture, vm, 'forget', 'profile-forget-0001');
+  await capturePacket(fixture, running, record(forgotten, 'data=profile;profile=146;encoding=b64;part=1/1', payload));
+  await capturePacket(fixture, running, record('unseen-forgotten-0001', '', 'Delayed old question'));
+  fixture.write(fixture.outbox('profile-new-generation', 'chat', 146, 'generation-0002'));
+  fixture.release(2);
+  await waitReply(fixture, vm, 'profile-new-generation', 'done');
+  assert.equal(fixture.callCount(), 2);
+  assert.ok(!fixture.callsRead()[1].argv.includes('--resume'));
+  assert.equal(fixture.messages().filter(m => m.role === 'user').length, 1);
+});
+
+test('restore offers survive unrelated publications and restart until their exact acknowledgement', async t => {
+  const fixture = bridgeSandbox(t, {}, {capture: true}), vm = addonVM();
+  fixture.write(fixture.outbox('restore-original-0001'));
+  fixture.release(1);
+  let running = fixture.start([]);
+  await waitReply(fixture, vm, 'restore-original-0001', 'done');
+  fixture.write('WowieDB = {}');
+  const hello = index => ['reset-session', 'empty-chat', '500', '', `h;nonce=restore-hello-${String(index).padStart(4, '0')}`, '', ''].join('\x1f');
+  await capturePacket(fixture, running, hello(0), 500);
+  await waitAck(fixture, vm, 'restore-hello-0000');
+  const offer = vm.get('Wowie_Inbox.restore and Wowie_Inbox.restore.id');
+  assert.ok(offer);
+  assert.equal(vm.get('Wowie_Inbox.restore.chats[1].messages[1].text'), 'The same player question');
+  for (let i = 1; i <= 12; i++) {
+    await capturePacket(fixture, running, hello(i), 500);
+    await waitAck(fixture, vm, `restore-hello-${String(i).padStart(4, '0')}`);
+    assert.equal(vm.get('Wowie_Inbox.restore.id'), offer);
+  }
+  fixture.clearStrip();
+  await stopBridge(running);
+  running = fixture.start([]);
+  await capturePacket(fixture, running, hello(13), 500);
+  await waitAck(fixture, vm, 'restore-hello-0013');
+  assert.equal(vm.get('Wowie_Inbox.restore.id'), offer);
+  fixture.write(controlState('restore', 'wrong-restore-0001', 'wrong-offer-0001', '', 'generation-0001', 'reset-session'));
+  await capturePacket(fixture, running, hello(14), 500);
+  await waitAck(fixture, vm, 'restore-hello-0014');
+  assert.equal(vm.get('Wowie_Inbox.restore.id'), offer);
+  fixture.write(controlState('restore', 'right-restore-0001', offer, '', 'generation-0001', 'reset-session'));
+  await receipt(fixture, vm, 'restore', 'right-restore-0001', '', 'reset-session');
+  assert.equal(vm.get('Wowie_Inbox.restore and Wowie_Inbox.restore.id'), null);
+  fixture.clearStrip();
+  await stopBridge(running);
+  running = fixture.start([]);
+  await receipt(fixture, vm, 'restore', 'right-restore-0001', '', 'reset-session');
+  await capturePacket(fixture, running, hello(15), 500);
+  await waitAck(fixture, vm, 'restore-hello-0015');
+  assert.equal(vm.get('Wowie_Inbox.restore and Wowie_Inbox.restore.id'), null);
+  assert.equal(fixture.callCount(), 1);
+});
+
+test('periodic maintenance reclaims abandoned partial profiles without any completing packet', async t => {
+  const fixture = bridgeSandbox(t, {}, {capture: true, clock: true, presenceIntervalMs: 25}), vm = addonVM();
+  const running = fixture.start([]);
+  await waitClock(fixture, vm, fixture.advance(0));
+  const record = (nonce, flags, text) => ['token', 'chat', '146', '', `nonce=${nonce};generation=generation-0001;${flags}`, 'Chat', text].join('\x1f');
+  for (let i = 0; i < 64; i++) {
+    await capturePacket(fixture, running, record(`orphan-profile-${String(i).padStart(4, '0')}`, 'data=profile;profile=146;encoding=b64;part=1/2', 'eyJ2'));
+  }
+  await waitClock(fixture, vm, fixture.advance(60));
+  // Let the independent maintenance timer run; no further data packet is sent.
+  await new Promise(resolve => setTimeout(resolve, 8000));
+  const nonce = 'after-orphan-sweep';
+  await capturePacket(fixture, running, record(nonce, 'profile=146', 'Read after orphan cleanup'));
+  await waitReply(fixture, vm, nonce, 'context');
+  const payload = Buffer.from(JSON.stringify({version: 1, enabled: ['inventory'], data: {inventory: []}})).toString('base64');
+  await capturePacket(fixture, running, record(nonce, 'data=profile;profile=146;encoding=b64;part=1/1', payload));
+  await waitFor(() => fixture.callCount() === 1);
+  fixture.release(1);
+  await waitReply(fixture, vm, nonce, 'done');
+  assert.equal(fixture.callCount(), 1);
 });

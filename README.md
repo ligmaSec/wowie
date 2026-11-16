@@ -102,7 +102,13 @@ If you used a previous global launcher, unlink that command and run `npm link` f
 
 Open `/wowie` and use **New chat** in the Conversations sidebar. Each chat has a persistent agent session, transcript, working folder and draft. Its **...** menu provides rename, copy, folder, fresh-session, clear and delete actions.
 
-**Chats** toggles the sidebar when you want more reading space. Replies separate headings, paragraphs, steps, quotes and code into selectable blocks. Markdown links become readable source references; numbered **Source** buttons open the exact URL for copying because an addon cannot launch your browser. Inline emphasis markers are normalized rather than displayed literally. **Summary** and routine bridge **Details** stay collapsed; errors remain visible. The per-message **Copy** button retains the original complete text, including URLs.
+**Chats** toggles the sidebar when you want more reading space. The wider sidebar uses compact rows with single-line titles, a separate metadata line and an aligned actions column. Hover a title to read it in full; truncation never changes the saved name. Search and the sharing footer remain separate from the scrollable list.
+
+Replies use gold section headings, highlighted **bold** terms, clearer section spacing and a bounded reading width. Bullets and numbered steps wrap beneath their text, not beneath their markers. Paragraphs, lists, quotes and code remain directly selectable; code retains the full available width.
+
+Markdown links become highlighted inline **[1]** source references: hover to see the full URL, or click to open it for copying because an addon cannot launch your browser. Routine bridge **Details** stay collapsed; errors remain visible. The per-message **Copy** button retains the original complete text, including Markdown, list markers and URLs.
+
+Agents are instructed to lead with the answer, keep bullets to one point, and use short labeled sections for comparisons. Existing replies get the new presentation without rewriting saved history. Updating an existing `ReplyView.lua` installation needs `/reload`; restart the bridge to apply the new answer instructions.
 
 **Settings → Reading** offers Small, Medium and Large text, plus a local **Preview formatting** page. **Back to Settings** preserves unsaved choices. Preview never sends an AI request or creates a conversation. Save applies reading preferences; Cancel discards them.
 
@@ -111,12 +117,13 @@ Open `/wowie` and use **New chat** in the Conversations sidebar. Each chat has a
 - **Enter** sends; **Shift+Enter** inserts a newline. Drag-select reply text and press **Ctrl+C** to copy it directly. **Esc** releases text focus without discarding your draft.
 - **Shift-click** an item, spell, quest or chat link into the composer to include its name and tooltip in your question.
 - **Stop waiting** stops local waiting, not the external AI process. **Check reply** retrieves an outstanding reply without consuming your next-message draft.
+- Pending replies have animated activity dots, an elapsed timer and a distinct sending, queued, shared-context or working label. Search activity shows the actual query; browse actions show their URL or find target when the agent supplies it.
 
-The full answer stays in the discussion window. Game-chat echo defaults to a short `TL;DR` with an **open** link; `/wowie echo full` changes that.
+The full answer stays in the discussion window, without a separate generated summary or summary button. Game-chat echo defaults to a bounded preview of the answer with an **open** link; `/wowie echo full` prints more, and `/wowie echo off` disables the echo.
 
 ### Map annotations and navigation
 
-Ask for a location or route, then manage its points through **Navigation**:
+When an answer recommends visiting a location, trainer, vendor or other in-game destination, the assistant also creates a saved navigation point—no separate map request is needed. It resolves the destination's map and coordinates rather than relying on prose alone. Manage those points through **Navigation**:
 
 - **Navigate** starts a destination; that point's button becomes **Stop navigation**, so another click cancels guidance without deleting the point. **Previous**, **Next** and the active card's **Stop** remain available.
 - **On map / Show on map** opens and centers the destination, using OpenMap's stitched-world view or the native map canvas. Wowie minimizes so it does not cover the map; your draft and active route are preserved.
@@ -171,7 +178,7 @@ Bank, mail, chat history, guild, friends/Battle.net, party/raid, target/focus, m
 
 Pausing or changing sharing cannot recall information already sent. Links you manually include in a message still share their tooltip.
 
-Prompts and permitted character data can reach the selected AI provider. Chat history and bridge state are also persisted locally for recovery. Do not treat the Sharing panel as an anonymity mechanism or a way to remove data from a provider after delivery.
+Prompts and permitted character data can reach the selected AI provider. Chat history and bridge state are also persisted locally for recovery. The private `bridge/requests.json` journal holds active shared snapshots/query continuations and retained full results; active snapshot payloads are removed at completion or deletion. Do not treat the Sharing panel as an anonymity mechanism or a way to remove data from a provider after delivery.
 
 Only approved native data getters and permitted raw data are exposed through character queries. Arbitrary Lua, setters, mail sending/deletion and protected gameplay commands are not query operations. Closed-window, secret or restricted values are returned as unavailable.
 
@@ -192,6 +199,10 @@ WoW addons cannot open a normal network connection or freely write files. Wowie 
 
 Sound-file readiness checks are notification hints, not proof of a live connection. **Reconnect** requires a fresh matching challenge/acknowledgement round trip. The UI reports verification age rather than pretending there is a persistent socket.
 
+Completed replies survive bridge restarts and can be replayed without running the agent again. Queued requests and addon-information waits resume from their saved state. If the bridge stops during agent execution, Wowie reports an interrupted request instead of silently repeating potentially side-effecting work; inspect the result before explicitly sending a new question.
+
+Request protocol 2 adds durable reply/restore receipts and chat generations, so stale work cannot resurrect a deleted conversation. Update both halves together: run setup, restart the idle bridge, then `/reload` an existing addon installation. Preserve `bridge/requests.json`, `state.json` and `transcripts.json` when troubleshooting.
+
 Under **Settings → Pixel display**, Compact uses smaller cells where the display supports them. Quiet uses dark colors and verifies whether a smaller or larger dark grid is reliable. Failed calibration keeps the robust display. These options reduce visual intrusion; they do not change the assistant's permissions.
 
 Pixel textures are built and repainted in bounded slices across UI frames, with an approximately 2 ms paint budget when the client's profiler is available. Only complete frames are shown, and each gets its full capture interval after painting. Large uploads or low frame rates can therefore take more frames without dropping selected information or doing the entire canvas update in one game frame.
@@ -205,6 +216,8 @@ Protocol details and limitations: [Architecture](docs/ARCHITECTURE.md).
 - **Bridge not responding:** start the bridge, ensure the game window is capturable, then click **Reconnect**. A failed check keeps your draft.
 - **Idle / not verified:** the previous verification expired; this is not proof that the bridge stopped. Sending checks again automatically.
 - **Replies stop after extended use:** inspect `/wowie slots`. If exhausted, `/reload` frees the pool.
+- **Request interrupted by restart:** the previous agent may have performed external work. Wowie will not automatically rerun that instruction; check the outcome before sending it again.
+- **Another bridge owns this installation:** close the duplicate launcher. Ownership stays held until existing child processes are cleaned up; an occupied lock port fails closed rather than allowing duplicate execution.
 - **A question takes a long time:** keep **Smart** delivery enabled so unused sources are not collected with every question. Full snapshots and large requested sections still increase prompt size; a faster model or lower reasoning level can reduce AI processing time. Compression does not reduce model tokens.
 - **Linux capture is black, stale or cannot find the game:** follow the [Linux capture guide](docs/INSTALL-LINUX.md). `npm run probe` captures a diagnostic image; avoid sharing it if it contains private information.
 - **New addon files or slots are missing:** run setup with the client closed, then fully relaunch—not just `/reload`.
